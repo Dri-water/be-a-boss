@@ -19,7 +19,6 @@ from typing import Any, Awaitable, Callable
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
-    ClaudeSDKClient,
     ResultMessage,
     SystemMessage,
     create_sdk_mcp_server,
@@ -27,6 +26,7 @@ from claude_agent_sdk import (
 )
 
 from .. import rendering
+from .agent_backend import AgentBackend, ClaudeAgentBackend
 from .ports import MediaIn, Outbound, Speaker
 
 log = logging.getLogger("beaboss.core.session")
@@ -95,6 +95,7 @@ class CoreSession:
         tap: TapFn | None = None,
         extra_mcp_servers: dict[str, Any] | None = None,
         max_turns: int | None = None,
+        backend: AgentBackend | None = None,
     ):
         self.thread_id = thread_id
         self.cwd = cwd
@@ -108,8 +109,8 @@ class CoreSession:
         self._tap = tap
         self._extra_mcp = extra_mcp_servers or {}
         self._max_turns = max_turns
-
-        self._client: ClaudeSDKClient | None = None
+        # The agent runtime is a swappable seam; default to the Claude Code SDK.
+        self._backend = backend or ClaudeAgentBackend(self._build_options)
         self._queue: asyncio.Queue[Turn] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self.status = "new"  # new | idle | busy | error | stopped
@@ -232,8 +233,7 @@ class CoreSession:
         return {"content": [{"type": "text", "text": f"sent {p.name} into the thread"}]}
 
     async def start(self) -> None:
-        self._client = ClaudeSDKClient(self._build_options())
-        await self._client.connect()
+        await self._backend.start()
         self.status = "idle"
         self._worker = asyncio.create_task(
             self._run(), name=f"session-{self.thread_id}"
@@ -245,16 +245,15 @@ class CoreSession:
         self.status = "stopped"
         if self._worker:
             self._worker.cancel()
-        if self._client:
-            try:
-                await self._client.disconnect()
-            except Exception as e:  # noqa: BLE001
-                log.warning("disconnect failed thread=%s: %s", self.thread_id, e)
+        try:
+            await self._backend.stop()
+        except Exception as e:  # noqa: BLE001
+            log.warning("disconnect failed thread=%s: %s", self.thread_id, e)
 
     async def interrupt(self) -> None:
-        if self._client and self.status == "busy":
+        if self.status == "busy":
             try:
-                await self._client.interrupt()
+                await self._backend.interrupt()
             except Exception as e:  # noqa: BLE001
                 log.warning("interrupt failed thread=%s: %s", self.thread_id, e)
 
@@ -317,28 +316,11 @@ class CoreSession:
                 self._queue.task_done()
 
     async def _do_turn(self, turn: Turn) -> None:
-        assert self._client is not None
         await self._busy(self.thread_id)
-
-        if turn.images:
-            content: list[dict] = [
-                {"type": "image", "source": {
-                    "type": "base64", "media_type": img["media_type"],
-                    "data": img["data"]}}
-                for img in turn.images
-            ]
-            content.append({"type": "text", "text": turn.text or "(no caption)"})
-            message = {"type": "user", "message": {"role": "user", "content": content}}
-
-            async def stream():
-                yield message
-
-            await self._client.query(stream())
-        else:
-            await self._client.query(turn.text)
+        await self._backend.send(turn)
 
         result: ResultMessage | None = None
-        async for message in self._client.receive_response():
+        async for message in self._backend.receive():
             if isinstance(message, SystemMessage) and message.subtype == "init":
                 sid = message.data.get("session_id")
                 if sid:
@@ -377,13 +359,11 @@ class CoreSession:
         if self.status == "stopped":
             return
         try:
-            if self._client:
-                await self._client.disconnect()
+            await self._backend.stop()
         except Exception:  # noqa: BLE001
             pass
         try:
-            self._client = ClaudeSDKClient(self._build_options())
-            await self._client.connect()
+            await self._backend.start()
             log.info("session reconnected thread=%s resume=%s",
                      self.thread_id, self.session_id)
         except Exception as e:  # noqa: BLE001

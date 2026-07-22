@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 from beaboss.config import Settings
 from beaboss.core.ports import MediaIn, Outbound, Speaker
@@ -90,6 +91,82 @@ def test_submit_media_sanitizes_filename(tmp_path):
 def test_tool_send_guards(tmp_path, path, fragment):
     r = asyncio.run(_session(tmp_path)._tool_send({"path": path}, "photo"))
     assert r["is_error"] and fragment in r["content"][0]["text"]
+
+
+class FakeBackend:
+    """An in-memory AgentBackend — no Claude client, no subprocess, no network.
+
+    It replays a scripted list of SDK message objects for each turn, which is all
+    a backend owes the session: connect, take a turn, stream events, stop.
+    """
+
+    def __init__(self, scripted: list):
+        self._scripted = scripted
+        self.started = 0
+        self.stopped = 0
+        self.interrupted = 0
+        self.sent: list[Turn] = []
+
+    async def start(self):
+        self.started += 1
+
+    async def send(self, turn: Turn):
+        self.sent.append(turn)
+
+    def receive(self):
+        async def gen():
+            for m in self._scripted:
+                yield m
+        return gen()
+
+    async def interrupt(self):
+        self.interrupted += 1
+
+    async def stop(self):
+        self.stopped += 1
+
+
+def test_fake_backend_drives_a_turn(tmp_path):
+    """Proves the seam: a session runs a full turn against a swapped-in backend,
+    rendering its events and firing the done hook — with no Claude involved."""
+    post = SinkPost()
+    backend = FakeBackend([
+        AssistantMessage(content=[TextBlock(text="hello from fake")], model="fake"),
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=2, session_id="sess-xyz", total_cost_usd=0.01,
+        ),
+    ])
+    captured_sids: list[str] = []
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=captured_sids.append, backend=backend,
+    )
+    done: list[ResultMessage] = []
+
+    async def on_done(_s, result):
+        done.append(result)
+
+    sess.on_turn_done = on_done
+
+    async def drive():
+        await sess.start()
+        await sess.submit("hi there")
+        await sess._queue.join()  # wait for the worker to finish the turn
+        await sess.stop()
+
+    asyncio.run(drive())
+
+    assert backend.started == 1 and backend.stopped == 1
+    assert [t.text for t in backend.sent] == ["hi there"]
+    texts = [o.text for o in post.out]
+    assert any("hello from fake" in t for t in texts)
+    assert any("done · 2 turns" in t for t in texts)
+    assert sess.session_id == "sess-xyz" and captured_sids == ["sess-xyz"]
+    assert sess.turns == 1
+    assert done and done[0].session_id == "sess-xyz"
 
 
 def test_tool_send_posts_outbound_with_speaker(tmp_path):
