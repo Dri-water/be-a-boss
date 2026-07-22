@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Secrets & local state
+.env
+state/
+*.log
+
+# Generated / runtime
+landing/preview.png
+.tg-inbox/

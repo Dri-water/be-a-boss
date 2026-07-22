@@ -1,0 +1,26 @@
+# Always-on session manager. `docker compose up -d --build` to start; it
+# auto-restarts on crash or host reboot (restart: unless-stopped).
+services:
+  tasm:
+    build: .
+    image: tasm
+    container_name: tasm
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Container-side overrides (these win over .env). Paths are INSIDE the container.
+      PROJECTS_ROOT: /workspace
+      STATE_DIR: /data
+      CLAUDE_PERMISSION_MODE: bypassPermissions
+    volumes:
+      # Your repos, shared with the host. On Windows this is a bind mount over the
+      # WSL2 boundary — fine for edit/commit/run; hot-reload file-watching can lag.
+      - "${HOST_DOCUMENTS:?set HOST_DOCUMENTS in .env — host path to your projects}:/workspace"
+      # Claude auth + session store (so sessions resume across restarts).
+      # Quick-start: reuse the host login. See README for the setup-token upgrade.
+      - "${HOST_CLAUDE_DIR:?set HOST_CLAUDE_DIR in .env — host path to your ~/.claude}:/root/.claude"
+      # Bot's own state (topic <-> session map).
+      - bot_state:/data
+
+volumes:
+  bot_state:

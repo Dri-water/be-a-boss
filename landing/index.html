@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>telegram-agentic-session-manager — Claude Code, from Telegram</title>
+<style>
+  :root {
+    --bg: #0a0c10;
+    --bg-2: #0e1117;
+    --panel: #141821;
+    --panel-2: #171c26;
+    --border: #232a36;
+    --border-glow: #2f3a4d;
+    --text: #e6eaf2;
+    --muted: #9aa6b8;
+    --faint: #6b7688;
+    --accent: #4c8dff;
+    --accent-2: #7aa2ff;
+    --tg: #2aabee;
+    --tg-2: #229ed9;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --violet: #a78bfa;
+    --radius: 16px;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Fira Code", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    font-family: var(--sans);
+    color: var(--text);
+    background:
+      radial-gradient(900px 600px at 78% -8%, rgba(42, 171, 238, 0.16), transparent 60%),
+      radial-gradient(760px 520px at 12% 4%, rgba(76, 141, 255, 0.14), transparent 58%),
+      var(--bg);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  a { color: inherit; text-decoration: none; }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ---------- Nav ---------- */
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    backdrop-filter: blur(12px);
+    background: rgba(10, 12, 16, 0.72);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .wrap {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 64px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+  .logo {
+    width: 30px; height: 30px;
+    border-radius: 9px;
+    display: grid; place-items: center;
+    background: linear-gradient(150deg, var(--tg), var(--accent));
+    box-shadow: 0 4px 16px rgba(42, 171, 238, 0.35);
+    flex: none;
+  }
+  .logo svg { width: 18px; height: 18px; display: block; }
+  .brand-name { font-size: 15px; }
+  .brand-name .thin { color: var(--muted); font-weight: 500; }
+  .nav-links { display: flex; gap: 26px; font-size: 14px; color: var(--muted); }
+  .nav-links a:hover { color: var(--text); }
+  .nav-cta {
+    font-size: 13.5px;
+    font-weight: 600;
+    padding: 8px 16px;
+    border-radius: 10px;
+    border: 1px solid var(--border-glow);
+    background: var(--panel);
+    color: var(--text);
+  }
+  .nav-cta:hover { border-color: var(--accent); }
+  @media (max-width: 720px) { .nav-links { display: none; } }
+
+  /* ---------- Hero ---------- */
+  header.hero {
+    padding: 92px 0 64px;
+    position: relative;
+    overflow: hidden;
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--accent-2);
+    background: rgba(76, 141, 255, 0.09);
+    border: 1px solid rgba(76, 141, 255, 0.25);
+    padding: 6px 14px;
+    border-radius: 999px;
+    margin-bottom: 26px;
+  }
+  .eyebrow .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18);
+  }
+  h1 {
+    font-size: clamp(38px, 6.2vw, 64px);
+    line-height: 1.04;
+    letter-spacing: -0.03em;
+    margin: 0 0 22px;
+    font-weight: 720;
+  }
+  h1 .grad {
+    background: linear-gradient(100deg, #ffffff 10%, var(--accent-2) 55%, var(--tg) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .tagline {
+    font-size: clamp(17px, 2.2vw, 21px);
+    color: var(--muted);
+    max-width: 640px;
+    margin: 0 0 36px;
+  }
+  .tagline strong { color: var(--text); font-weight: 600; }
+  .hero-cta { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 30px; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 15px;
+    font-weight: 600;
+    padding: 13px 24px;
+    border-radius: 12px;
+    border: 1px solid transparent;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn-primary {
+    background: linear-gradient(150deg, var(--tg), var(--accent));
+    color: #fff;
+    box-shadow: 0 8px 24px rgba(42, 171, 238, 0.32);
+  }
+  .btn-primary:hover { box-shadow: 0 12px 30px rgba(42, 171, 238, 0.42); }
+  .btn-ghost {
+    background: var(--panel);
+    border-color: var(--border-glow);
+    color: var(--text);
+  }
+  .btn-ghost:hover { border-color: var(--accent); }
+  .hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 22px;
+    font-size: 13.5px;
+    color: var(--faint);
+  }
+  .hero-meta span { display: inline-flex; align-items: center; gap: 7px; }
+  .hero-meta .tick { color: var(--green); }
+
+  /* ---------- Chat mock ---------- */
+  .hero-visual { margin-top: 56px; }
+  .chat {
+    max-width: 560px;
+    margin: 0 auto;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.02) inset;
+    overflow: hidden;
+  }
+  .chat-head {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255,255,255,0.015);
+  }
+  .chat-avatar {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: linear-gradient(150deg, var(--tg), var(--accent));
+    display: grid; place-items: center;
+    font-size: 15px; flex: none;
+  }
+  .chat-title { font-size: 14px; font-weight: 600; }
+  .chat-sub { font-size: 12px; color: var(--faint); }
+  .chat-topic {
+    margin-left: auto;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--tg);
+    background: rgba(42,171,238,0.1);
+    padding: 4px 9px;
+    border-radius: 7px;
+  }
+  .chat-body { padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 13.5px; }
+  .msg .lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--faint); margin-bottom: 3px; }
+  .msg.me {
+    align-self: flex-end;
+    background: linear-gradient(150deg, rgba(42,171,238,0.9), rgba(76,141,255,0.9));
+    color: #fff;
+    border-bottom-right-radius: 5px;
+  }
+  .msg.me .lbl { color: rgba(255,255,255,0.7); }
+  .msg.bot {
+    align-self: flex-start;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 5px;
+    color: var(--text);
+  }
+  .msg code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: rgba(255,255,255,0.08);
+    padding: 1px 5px;
+    border-radius: 5px;
+  }
+  .msg.bot code { background: rgba(76,141,255,0.14); color: var(--accent-2); }
+  .typing { display: inline-flex; gap: 4px; align-items: center; color: var(--faint); font-size: 12.5px; }
+  .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--faint); display: inline-block; }
+
+  /* ---------- Sections ---------- */
+  section { padding: 68px 0; }
+  .section-tag {
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 14px;
+  }
+  h2 {
+    font-size: clamp(27px, 3.6vw, 38px);
+    letter-spacing: -0.02em;
+    line-height: 1.12;
+    margin: 0 0 16px;
+    font-weight: 680;
+  }
+  .section-lead { font-size: 17px; color: var(--muted); max-width: 640px; margin: 0 0 44px; }
+
+  .divider { border: none; border-top: 1px solid var(--border); margin: 0; opacity: 0.7; }
+
+  /* ---------- How it works ---------- */
+  .flow {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+  }
+  .flow-step {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px 22px;
+    position: relative;
+  }
+  .flow-step .num {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--tg);
+    background: rgba(42,171,238,0.1);
+    width: 30px; height: 30px;
+    border-radius: 9px;
+    display: grid; place-items: center;
+    margin-bottom: 16px;
+    font-weight: 600;
+  }
+  .flow-step h3 { margin: 0 0 8px; font-size: 16.5px; letter-spacing: -0.01em; }
+  .flow-step p { margin: 0; font-size: 14px; color: var(--muted); }
+  .flow-step p code {
+    font-family: var(--mono); font-size: 12.5px;
+    color: var(--accent-2); background: rgba(76,141,255,0.1);
+    padding: 1px 5px; border-radius: 5px;
+  }
+  .flow-note {
+    margin-top: 26px;
+    text-align: center;
+    font-size: 14.5px;
+    color: var(--faint);
+  }
+  .flow-note b { color: var(--text); font-weight: 600; }
+  @media (max-width: 760px) { .flow { grid-template-columns: 1fr; } }
+
+  /* ---------- Features ---------- */
+  .features {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+  }
+  .feat {
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 26px 24px;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+  .feat:hover { border-color: var(--border-glow); transform: translateY(-2px); }
+  .feat .ic {
+    width: 42px; height: 42px;
+    border-radius: 11px;
+    display: grid; place-items: center;
+    margin-bottom: 18px;
+    background: rgba(76,141,255,0.1);
+    border: 1px solid rgba(76,141,255,0.2);
+  }
+  .feat .ic svg { width: 21px; height: 21px; }
+  .feat h3 { margin: 0 0 9px; font-size: 16.5px; letter-spacing: -0.01em; }
+  .feat p { margin: 0; font-size: 14px; color: var(--muted); }
+  .feat.violet .ic { background: rgba(167,139,250,0.1); border-color: rgba(167,139,250,0.22); }
+  .feat.green .ic { background: rgba(52,211,153,0.1); border-color: rgba(52,211,153,0.22); }
+  .feat.amber .ic { background: rgba(251,191,36,0.1); border-color: rgba(251,191,36,0.22); }
+  .feat.tg .ic { background: rgba(42,171,238,0.1); border-color: rgba(42,171,238,0.22); }
+  @media (max-width: 900px) { .features { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .features { grid-template-columns: 1fr; } }
+
+  /* ---------- Cheat sheet ---------- */
+  .cheat-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .cheat-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .cheat-card-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .cheat-card-head .pill {
+    font-family: var(--mono); font-size: 11px;
+    padding: 3px 8px; border-radius: 6px;
+    background: rgba(42,171,238,0.12); color: var(--tg);
+  }
+  .cheat-card-head .pill.gen { background: rgba(167,139,250,0.14); color: var(--violet); }
+  .cmd-row {
+    display: flex; align-items: baseline; gap: 14px;
+    padding: 13px 20px;
+    border-bottom: 1px solid rgba(35,42,54,0.6);
+  }
+  .cmd-row:last-child { border-bottom: none; }
+  .cmd-row code {
+    font-family: var(--mono);
+    font-size: 13.5px;
+    color: var(--accent-2);
+    white-space: nowrap;
+    flex: none;
+    min-width: 108px;
+  }
+  .cmd-row span { font-size: 13.5px; color: var(--muted); }
+  @media (max-width: 720px) { .cheat-grid { grid-template-columns: 1fr; } }
+
+  /* ---------- CTA band ---------- */
+  .cta-band {
+    background: linear-gradient(135deg, rgba(42,171,238,0.12), rgba(76,141,255,0.1));
+    border: 1px solid var(--border-glow);
+    border-radius: 22px;
+    padding: 48px 40px;
+    text-align: center;
+  }
+  .cta-band h2 { margin-bottom: 12px; }
+  .cta-band p { color: var(--muted); font-size: 16px; margin: 0 0 28px; }
+  .cta-band .hero-cta { justify-content: center; }
+
+  /* ---------- Footer ---------- */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 40px 0 56px;
+  }
+  footer .wrap {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+  }
+  .foot-brand { display: flex; align-items: center; gap: 11px; font-weight: 600; font-size: 14.5px; }
+  .foot-meta { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 13px; color: var(--faint); }
+  .foot-badge {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--muted);
+  }
+  .foot-badge .b-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .foot-note { width: 100%; font-size: 12.5px; color: var(--faint); border-top: 1px solid var(--border); padding-top: 20px; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M21.5 4.3 2.9 11.4c-.9.35-.9 1.6.02 1.9l4.7 1.5 1.8 5.6c.24.72 1.15.9 1.65.33l2.6-2.9 4.7 3.45c.6.44 1.45.11 1.6-.62L23 5.5c.2-.9-.7-1.6-1.5-1.2Z" fill="#fff"/></svg>
+      </span>
+      <span class="brand-name">telegram-agentic<span class="thin">-session-manager</span></span>
+    </div>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#commands">Commands</a>
+    </div>
+    <a class="nav-cta" href="#start">Self-host it →</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="eyebrow"><span class="dot"></span> Self-hosted · no orchestrator layer</span>
+    <h1>Drive parallel <span class="grad">Claude Code</span> sessions from Telegram.</h1>
+    <p class="tagline">
+      One Telegram topic = <strong>one live Claude Code session</strong>, bound to a repo.
+      Kick off real coding sessions from your phone, run several at once across
+      different projects, and manage each independently.
+    </p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="#start">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M21.5 4.3 2.9 11.4c-.9.35-.9 1.6.02 1.9l4.7 1.5 1.8 5.6c.24.72 1.15.9 1.65.33l2.6-2.9 4.7 3.45c.6.44 1.45.11 1.6-.62L23 5.5c.2-.9-.7-1.6-1.5-1.2Z" fill="#fff"/></svg>
+        Get started
+      </a>
+      <a class="btn btn-ghost" href="#how">See how it works</a>
+    </div>
+    <div class="hero-meta">
+      <span><span class="tick">✓</span> You own the bot, the box &amp; the data</span>
+      <span><span class="tick">✓</span> Runs anywhere Docker does</span>
+      <span><span class="tick">✓</span> MIT licensed</span>
+    </div>
+
+    <div class="hero-visual">
+      <div class="chat">
+        <div class="chat-head">
+          <span class="chat-avatar" aria-hidden="true">🤖</span>
+          <div>
+            <div class="chat-title">Session Manager</div>
+            <div class="chat-sub">supergroup · Topics enabled</div>
+          </div>
+          <span class="chat-topic"># myapp-hotfix</span>
+        </div>
+        <div class="chat-body">
+          <div class="msg me">
+            <div class="lbl">General</div>
+            <code>/new myapp-hotfix hotfix</code>
+          </div>
+          <div class="msg bot">
+            <div class="lbl">Bot</div>
+            Spun up a live session in <code>/workspace/myapp-hotfix</code> — talk to it in the new topic.
+          </div>
+          <div class="msg me">
+            <div class="lbl"># hotfix</div>
+            find why the /login route 500s and patch it
+          </div>
+          <div class="msg bot">
+            <div class="lbl">Claude Code</div>
+            Reproduced it — null token on refresh. Fixed <code>auth.py</code>, tests green. Sending you the diff.
+          </div>
+          <div class="msg bot" style="padding:8px 14px;">
+            <span class="typing">edited 1 file · ran 12 tests <i></i><i></i><i></i></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<hr class="divider" />
+
+<!-- HOW IT WORKS -->
+<section id="how">
+  <div class="wrap">
+    <div class="section-tag">How it works</div>
+    <h2>A message in a topic <em>is</em> that session's next turn.</h2>
+    <p class="section-lead">
+      No orchestrator to manage. One supergroup with Topics enabled becomes your
+      control surface — the General topic is the control plane, and every other
+      topic is exactly one headless Claude Code session bound to a working directory.
+    </p>
+
+    <div class="flow">
+      <div class="flow-step">
+        <div class="num">1</div>
+        <h3>Spawn from General</h3>
+        <p>In the General topic, run <code>/new &lt;path&gt; [name]</code>. The bot creates a new topic and a live session with <code>cwd</code> set to that repo.</p>
+      </div>
+      <div class="flow-step">
+        <div class="num">2</div>
+        <h3>Talk in the topic</h3>
+        <p>Whatever you type in a session topic is sent verbatim as the next turn. Output — text, tool calls, media — streams straight back into the same topic.</p>
+      </div>
+      <div class="flow-step">
+        <div class="num">3</div>
+        <h3>Run many in parallel</h3>
+        <p>Each topic is independent and isolated. Two topics can even point at the <code>same</code> repo for parallel, separate lines of work.</p>
+      </div>
+    </div>
+
+    <p class="flow-note">
+      Sessions run headless with <b>bypassPermissions</b> and are driven by the
+      official <b>claude-agent-sdk</b> running the standalone <b>claude</b> CLI —
+      one turn at a time, serialized per topic.
+    </p>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="wrap">
+    <div class="section-tag">Features</div>
+    <h2>Everything a phone-first coding cockpit needs.</h2>
+    <p class="section-lead">Accurate to the box you run — nothing more, nothing hidden.</p>
+
+    <div class="features">
+      <div class="feat tg">
+        <div class="ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#2aabee" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/></svg>
+        </div>
+        <h3>Parallel sessions</h3>
+        <p>1 topic ⇄ 1 session, many at once, each isolated with its own working directory. One repo can back several topics.</p>
+      </div>
+
+      <div class="feat violet">
+        <div class="ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m5 17 4.5-4.5 3 3L16 12l3 3"/></svg>
+        </div>
+        <h3>Media, both directions</h3>
+        <p>Send photos, files &amp; video into a topic (images become vision input, everything lands in <code>.tg-inbox/</code>); the agent pushes media back via built-in tools.</p>
+      </div>
+
+      <div class="feat green">
+        <div class="ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v4h4"/></svg>
+        </div>
+        <h3>Resumable across restarts</h3>
+        <p>Every session's ID is persisted, so a bot restart lazily reconnects each session with full context — nothing is lost on reboot.</p>
+      </div>
+
+      <div class="feat amber">
+        <div class="ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8 8 10 4.6-2 8-5 8-10V6z"/><path d="m9 12 2 2 4-4"/></svg>
+        </div>
+        <h3>Container-isolated</h3>
+        <p>The container boundary is what keeps <code>bypassPermissions</code> safe — sessions only reach the repos you mount at <code>/workspace</code>, never the rest of your host.</p>
+      </div>
+
+      <div class="feat">
+        <div class="ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#4c8dff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/></svg>
+        </div>
+        <h3>Batteries-included image</h3>
+        <p>Common stacks (node, python, git, ffmpeg, ripgrep…) ship in the image; sessions <code>apt</code>/<code>npm</code>/<code>pip</code> install anything exotic at runtime.</p>
+      </div>
+
+      <div class="feat green">
+        <div class="ic" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/><circle cx="12" cy="12" r="3.2"/></svg>
+        </div>
+        <h3>Always-on &amp; self-hosted</h3>
+        <p>Runs anywhere Docker does with <code>restart: unless-stopped</code>. You own the bot, the box, and the data — no hosted lock-in.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- COMMANDS -->
+<section id="commands">
+  <div class="wrap">
+    <div class="section-tag">Cheat sheet</div>
+    <h2>Two places, a handful of commands.</h2>
+    <p class="section-lead">Drive the whole thing from the General topic and from inside each session.</p>
+
+    <div class="cheat-grid">
+      <div class="cheat-card">
+        <div class="cheat-card-head"><span class="pill gen"># General</span> control plane</div>
+        <div class="cmd-row"><code>/new &lt;path&gt;</code><span>Create a topic + session in that repo (relative to <code style="font-size:12px">PROJECTS_ROOT</code> or absolute).</span></div>
+        <div class="cmd-row"><code>/list</code><span>List sessions and their status.</span></div>
+      </div>
+
+      <div class="cheat-card">
+        <div class="cheat-card-head"><span class="pill"># session topic</span> per session</div>
+        <div class="cmd-row"><code>/stop</code><span>Interrupt the current turn.</span></div>
+        <div class="cmd-row"><code>/kill</code><span>End the session and close the topic.</span></div>
+      </div>
+    </div>
+    <p class="flow-note" style="margin-top:22px;">
+      Inside a topic, <b>any message</b> is the session's next turn — and a photo, file or video is downloaded to <code style="font-family:var(--mono);font-size:12.5px;color:var(--accent-2)">.tg-inbox/</code> and handed straight to the session.
+    </p>
+  </div>
+</section>
+
+<!-- CTA -->
+<section id="start">
+  <div class="wrap">
+    <div class="cta-band">
+      <h2>Own your agent cockpit.</h2>
+      <p>A self-hosted, no-lock-in alternative to hosted "control your agent from your phone" tools. Docker up, add your bot, start typing.</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17V9a2 2 0 0 1 1-1.7l7-4a2 2 0 0 1 2 0l7 4"/><path d="M8 21h8M12 12v9"/></svg>
+          docker compose up -d
+        </a>
+        <a class="btn btn-ghost" href="#how">Read the docs</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-brand">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M21.5 4.3 2.9 11.4c-.9.35-.9 1.6.02 1.9l4.7 1.5 1.8 5.6c.24.72 1.15.9 1.65.33l2.6-2.9 4.7 3.45c.6.44 1.45.11 1.6-.62L23 5.5c.2-.9-.7-1.6-1.5-1.2Z" fill="#fff"/></svg>
+      </span>
+      telegram-agentic-session-manager
+    </div>
+    <div class="foot-meta">
+      <span class="foot-badge"><span class="b-dot" style="background:var(--green)"></span> MIT licensed</span>
+      <span class="foot-badge"><span class="b-dot" style="background:var(--tg)"></span> Self-hosted</span>
+      <span class="foot-badge"><span class="b-dot" style="background:var(--violet)"></span> Docker-native</span>
+    </div>
+    <div class="foot-note">
+      Built on the official claude-agent-sdk and the standalone claude CLI. You own the bot, the box, and the data — nothing leaves your host but your Telegram messages.
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
