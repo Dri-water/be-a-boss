@@ -11,11 +11,11 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4" poster="assets/promo-poster.png" width="720" controls muted playsinline>
-    <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4"><img src="assets/promo-poster.png" width="720" alt="be-a-boss — watch the 35-second intro"></a>
-  </video>
+  <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4">
+    <img src="assets/promo.gif" width="760" alt="be-a-boss — the 35-second intro (click to watch with sound)">
+  </a>
 </p>
-<p align="center"><em>▶︎ <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4">Watch the 35-second intro</a></em></p>
+<p align="center"><em>▶︎ <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4">Watch with sound (35s)</a></em></p>
 
 **Run your own agent org.** You're the boss: you talk to an **orchestrator** agent,
 and it hires **worker** agents for your tasks, briefs them, and supervises — while
