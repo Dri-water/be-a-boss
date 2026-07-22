@@ -1,0 +1,6 @@
+.gitignore
+.vscodeignore
+esbuild.js
+src/**
+node_modules/**
+*.vsix

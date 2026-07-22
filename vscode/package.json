@@ -1,0 +1,41 @@
+{
+  "name": "beaboss",
+  "displayName": "be-a-boss",
+  "description": "The be-a-boss agentic chat UI, inside VS Code.",
+  "version": "0.1.0",
+  "publisher": "your-publisher-name",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "beaboss.open",
+        "title": "be-a-boss: Open"
+      }
+    ],
+    "configuration": {
+      "title": "be-a-boss",
+      "properties": {
+        "beaboss.wsUrl": {
+          "type": "string",
+          "default": "ws://127.0.0.1:8765",
+          "description": "WebSocket URL of the be-a-boss server the chat UI connects to."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0"
+  }
+}
