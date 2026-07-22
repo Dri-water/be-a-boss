@@ -1,102 +1,106 @@
 # telegram-agentic-session-manager
 
-Control **parallel [Claude Code](https://www.claude.com/product/claude-code)
-sessions from Telegram — one live session per forum topic.** Kick off and talk to
-real coding sessions from your phone, run several at once across different repos,
-and manage them independently. No orchestrator layer: a message in a topic is that
-Claude session's next turn.
+Run **your own agent org from Telegram.** Talk to an **orchestrator** agent in
+your group's General topic; it hires **coder** agents for your tasks, briefs
+them, and supervises. Every coder works in its own forum topic — a **glass wall**
+you can watch through and speak into — and in an isolated git worktree, so
+parallel work never collides. All of it self-hosted on your box, driven by
+[Claude Code](https://www.claude.com/product/claude-code).
 
-Think of it as a self-hosted, no-lock-in alternative to hosted "control your agent
-from your phone" tools — you own the bot, the box, and the data.
+Think of it as a phone-first take on orchestrator-crew systems like
+[firstmate](https://github.com/kunchenguid/firstmate): same delegation model,
+but every agent conversation is a visible, joinable chat thread.
 
 ## The model
 
-- **One Telegram supergroup** (with Topics enabled) is your control surface.
-- **The General topic** is the control plane: `/new`, `/list`, `/status`.
-- **Every other topic = exactly one live Claude Code session**, bound to a working
-  directory. What you type in a topic is sent verbatim to that session; its output
-  streams back into the same topic.
-- One repo can back **several** topics → parallel lines of work on one codebase.
-- Sessions run headless with `bypassPermissions` (there's no terminal to answer
-  prompts). Each session's ID is persisted, so a bot restart **resumes** every
-  session with full context.
-
 ```mermaid
-flowchart TB
-    subgraph SG["Telegram supergroup (Topics enabled)"]
-        G["# General<br/>control: /new · /list · /status"]
-        T1["# myapp<br/>live session"]
-        T2["# myapp-hotfix<br/>live session"]
-        T3["# docs-site<br/>live session"]
-    end
-    T1 --> R1[("/workspace/myapp")]
-    T2 --> R1
-    T3 --> R2[("/workspace/docs-site")]
-    G -. spawns topics .-> T1 & T2 & T3
+flowchart LR
+    H([You<br/>the boss]) <-->|"# General"| O["🧭 orchestrator"]
+    O <-->|"brief / report<br/>(visible thread)"| C1["⚙️ Nova · myapp<br/>worktree A"]
+    O <-->|"brief / report"| C2["⚙️ Kite · myapp<br/>worktree B"]
+    H -.->|"interject any time —<br/>both see it"| C1
 ```
 
-Two topics can point at the **same** repo (`myapp` + `myapp-hotfix`) — parallel,
-independent sessions on one codebase.
+- **General topic = the orchestrator's office.** Give it goals in plain language
+  ("fix the login 500 in myapp, then audit deps"). It splits the work, hires
+  coders, briefs them, supervises at checkpoints, and reports outcomes.
+- **Every coder gets its own topic** named after it (`⚙️ Nova · myapp`). The
+  orchestrator's instructions and the coder's work stream into that topic live —
+  you literally watch the manager drive the worker.
+- **You can interject in any coder topic.** Your message reaches the coder as
+  input *and* the orchestrator's inbox — both see it, like walking up to a desk.
+- **Isolated worktrees.** Each coder works on its own branch (`coder/<name>`) in
+  its own git worktree — same-repo parallelism is safe; work survives on the
+  branch after the coder is dismissed. Dirty worktrees are never deleted.
+- **Direct sessions still exist**: `/new <path>` gives you a classic
+  1-topic-=-1-session thread with no orchestrator in between — perfect for quick
+  hands-on work.
+- Everything is headless (`bypassPermissions`), resumable across restarts, and
+  runs always-on in Docker.
+
+One Telegram bot token carries all identities — speakers are rendered as header
+cards (🧭 orchestrator / ⚙️ coder name) since a bot account can't change its
+sender per message.
 
 ## Features
 
-- **1 topic ⇄ 1 session**, many in parallel, each isolated.
+- **Orchestrator + crew** — talk to one agent; it hires, briefs, and supervises
+  coders. Or go direct with `/new`.
+- **Glass-walled delegation** — every coder conversation is a visible topic you
+  can watch and interject into; both agents see your message.
+- **Isolated git worktrees** — each coder on its own `coder/<name>` branch;
+  parallel same-repo work never collides, and un-landed work is never deleted.
+- **Checkpoint supervision** — coders run autonomously; the orchestrator is woken
+  only at meaningful checkpoints (done / blocked / needs-decision / interjection),
+  never per token. Wakes are coalesced to save tokens.
 - **Full media, both directions** — send photos/files/video *to* a session (images
-  become vision input; everything lands in `./.tg-inbox/`), and the agent can send
-  photos/video/documents/messages *back* via built-in tools (see
-  [Media & agent tools](#media--agent-tools)).
-- **Resumable** across restarts (persisted session IDs; lazily reconnected).
-- **Runs anywhere Docker does**, always-on via `restart: unless-stopped`.
-- **Container-isolated** so `bypassPermissions` only reaches the repos you mount.
-- **Batteries-included image** — sessions can build/run most projects and
-  `apt`/`npm`/`pip` install whatever else they need.
-- **Environment-aware sessions** — each session is told it's headless on a possibly
-  bind-mounted FS, so it prefers one-shot builds over hot-reload and reports
-  environment quirks instead of confabulating around them.
-- Configurable bot persona (`BOT_NAME`), user allowlist, per-session working dirs.
+  become vision input; everything lands in `./.tg-inbox/`), and any session can
+  send photos/video/documents/messages *back* (see [Media & agent tools](#media--agent-tools)).
+- **Resumable** across restarts, **always-on** in Docker, **container-isolated**,
+  **batteries-included image** (node/python/git/ffmpeg/chromium; agents can
+  install more).
+- **Transport-agnostic core** — the engine (`core/`) speaks in `Speaker`/`Event`
+  abstractions; Telegram is one adapter in `transports/`. Slack/VSCode = new
+  adapters, zero core changes.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    U([You on Telegram]) -->|"text / photo / file"| BOT[Bot<br/>python-telegram-bot]
-    BOT -->|"/new, routing"| MGR[SessionManager]
-    MGR -->|one per topic| S[ClaudeSession<br/>queue + worker]
-    S -->|claude-agent-sdk| CC[claude CLI<br/>bypassPermissions<br/>cwd = repo]
-    CC <-->|read / edit / run| WS[("/workspace repo")]
-    CC -->|messages| S
-    S -->|rendering| BOT
-    CC -. "MCP: send_photo / video / file" .-> BOT
-    BOT -->|"replies + media"| U
+    U([You]) -->|"# General"| ENG[engine<br/>core, transport-agnostic]
+    U -. "interject in a coder topic" .-> ENG
+    ENG --> ORC["🧭 orchestrator session"]
+    ORC -->|"fleet tools:<br/>spawn / message / dismiss"| ENG
+    ENG -->|worktree + thread| C1["⚙️ coder session"]
+    C1 -->|"turn-end / blocked / done"| SUP[checkpoint inbox]
+    SUP -->|coalesced digest| ORC
+    ENG <-->|Transport contract| TG[telegram adapter<br/>topics ⇄ threads, header cards]
+    TG <--> U
 ```
 
-A single user turn, end to end:
+A delegated task, end to end:
 
 ```mermaid
 sequenceDiagram
     actor You
-    participant TG as Telegram
-    participant Bot
-    participant Sess as ClaudeSession
-    participant SDK as claude (SDK/CLI)
-    You->>TG: type in a topic (or send a photo)
-    TG->>Bot: update (text / media)
-    Bot->>Sess: route → queue a turn<br/>(media saved to .tg-inbox)
-    Sess->>SDK: query(text [+ image blocks])
-    SDK-->>Sess: assistant text · tool calls · result
-    Sess-->>Bot: rendered lines
-    Bot-->>TG: messages into the topic
-    opt agent sends media
-        SDK->>Bot: MCP send_photo(path)
-        Bot-->>TG: photo into the topic
-    end
-    TG-->>You: replies + media
+    participant O as 🧭 Orchestrator
+    participant E as Engine
+    participant C as ⚙️ Coder
+    You->>O: "fix the login 500 in myapp"
+    O->>E: spawn_coder(myapp, brief)
+    E->>C: new worktree coder/nova + brief (posted in its topic)
+    C->>C: work autonomously, commit on branch
+    C-->>You: streams into its topic (you can watch)
+    You-->>C: interjection: "check the TTL too"
+    C-->>E: turn ends · STATUS: done
+    E->>O: [fleet inbox] Nova done (+ your interjection)
+    O-->>You: reports outcome in General
 ```
 
 Sessions are driven by the official
-[`claude-agent-sdk`](https://code.claude.com/docs/en/agent-sdk/overview), which
-runs the standalone `claude` CLI. Turns are serialized per topic (a Claude session
-is inherently one turn at a time). See [AGENTS.md](AGENTS.md) for internals.
+[`claude-agent-sdk`](https://code.claude.com/docs/en/agent-sdk/overview) running
+the standalone `claude` CLI. See **[docs/architecture.md](docs/architecture.md)**
+for the full design and [AGENTS.md](AGENTS.md) for internals.
 
 ## Requirements
 
@@ -159,23 +163,32 @@ uv run tasm
 
 ### 4. Use it
 
-In **General**:
+**Just talk to the orchestrator in General** — plain language, no command:
+
+> *"In myapp, reproduce the /login 500 and patch it. Separately, audit the deps in
+> docs-site for anything unmaintained."*
+
+It hires coders (one per task), opens a topic for each, briefs them, and reports
+back. Open a coder's topic to watch the work; type there to steer.
+
+Commands in **General**:
 
 | Command | Effect |
 |---|---|
-| `/new <path> [name]` | Create a topic + session in `<path>` (relative to `PROJECTS_ROOT`, or absolute) |
-| `/list` | List sessions and their status |
+| *(plain message)* | A goal for the orchestrator |
+| `/new <path> [name]` | A **direct** session (no orchestrator) in `<path>` |
+| `/list` | All threads (orchestrator, coders, direct) + status |
 | `/status` | Bot health |
-| `/whoami` | Show your Telegram id + the chat id (handy while filling in the allowlist) |
+| `/whoami` | Your Telegram id + the chat id (handy for the allowlist) |
 
-In a **session topic**:
+In any **session/coder topic**:
 
 | Command | Effect |
 |---|---|
-| *(any message)* | Sent to that session as its next turn |
-| *(a photo / file / video)* | Downloaded to `./.tg-inbox/` and given to the session (images also as vision input) |
+| *(any message)* | Sent to that session; in a coder topic the orchestrator sees it too |
+| *(a photo / file / video)* | Saved to `./.tg-inbox/` and handed to the session (images also as vision) |
 | `/stop` | Interrupt the current turn |
-| `/kill` | End the session and close the topic |
+| `/kill` | End the session (a coder's clean worktree is removed; dirty ones kept) |
 
 ## Media & agent tools
 
@@ -190,10 +203,10 @@ back into its own topic:
 
 | Tool | Sends |
 |---|---|
-| `mcp__telegram__send_photo(path, caption?)` | an image, rendered inline |
-| `mcp__telegram__send_video(path, caption?)` | a video |
-| `mcp__telegram__send_file(path, caption?)` | any file, as a document |
-| `mcp__telegram__send_message(text)` | an extra text message |
+| `mcp__chat__send_photo(path, caption?)` | an image, rendered inline |
+| `mcp__chat__send_video(path, caption?)` | a video |
+| `mcp__chat__send_file(path, caption?)` | any file, as a document |
+| `mcp__chat__send_message(text)` | an extra text message |
 
 So you can ask a session to "screenshot the page and send it to me", "render the
 chart and send the PNG", or "build the report and send me the PDF" — and it will.
@@ -235,21 +248,30 @@ uv sync
 uv run tasm            # run
 ```
 
-Layout:
+Layout (core is transport-agnostic; adapters live in `transports/`):
 
 ```
 src/tasm/
-  __main__.py       entrypoint
-  config.py         env-backed settings
-  store.py          persistent topic <-> session map
-  claude_session.py one live ClaudeSDKClient per topic
-  manager.py        create / route / resume / kill
-  rendering.py      SDK messages -> Telegram (pure, testable)
-  telegram_bot.py   handlers + emitter
+  __main__.py            entrypoint (config → engine → telegram → poll)
+  config.py              env-backed settings
+  rendering.py           SDK message → text (pure, testable)
+  core/
+    ports.py             Transport / Speaker / Outbound / Inbound contracts
+    session.py           CoreSession — one Claude session, posts via a callback
+    engine.py            Engine — orchestrator, fleet tools, checkpoint inbox
+    worktrees.py         isolated git worktrees (fail-closed teardown)
+    store.py             restart-proof thread/fleet state
+    names.py             coder name pool
+  transports/
+    telegram.py          topics ⇄ threads, header-card identities, commands
 ```
 
-Contributions welcome — keep session output as plain text (Telegram entity parsing
-is fragile) and verify SDK field names against the installed `claude-agent-sdk`.
+Adding a transport = implement `core.ports.Transport` and feed the engine
+`InboundMessage`s. Nothing in `core/` may import a chat platform.
+
+Contributions welcome — keep session output plain text (chat entity parsing is
+fragile) and verify SDK field names against the installed `claude-agent-sdk`.
+See **[docs/architecture.md](docs/architecture.md)**.
 
 ## License
 

@@ -4,44 +4,45 @@ Guidance for AI agents working on this repo.
 
 ## What this is
 
-A self-hosted Telegram bot (display persona configurable via `BOT_NAME`) that
-manages **parallel Claude Code sessions — one live session per Telegram forum
-topic**. No orchestrator: a message in a topic is that Claude session's next turn.
+A self-hosted **agent org over chat** (persona via `BOT_NAME`): an orchestrator
+session hires/briefs/supervises coder sessions, each visible in its own thread.
+The core is **transport-agnostic**; Telegram is one adapter. See
+[docs/architecture.md](docs/architecture.md) for the full picture.
 
-## Architecture (one direction of data flow)
+## Architecture
 
 ```
-Telegram topic ──msg──► on_message ──► SessionManager.route
-                                          │
-                                          ▼
-                                   ClaudeSession (per topic)
-                                     queue → worker → ClaudeSDKClient
-                                          │
-Telegram topic ◄── TelegramEmitter ◄── rendering ◄── SDK messages
+transports/telegram.py  (adapter: topics ⇄ threads, header cards, commands)
+        │  InboundMessage ▲ Outbound (via core.ports.Transport)
+        ▼                 │
+core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrator
+   ├─ core/session.py  CoreSession — one ClaudeSDKClient, posts via a callback
+   ├─ core/store.py    thread registry + fleet records (restart-proof)
+   └─ core/worktrees.py isolated git worktree per coder
 ```
 
-- `claude_session.py` — the crux. One long-lived `ClaudeSDKClient` per topic,
-  `permission_mode=bypassPermissions`, `cwd=<repo>`, turns serialized via an
-  `asyncio.Queue[Turn]`. Captures `session_id` (from `SystemMessage.init` /
-  `ResultMessage`) and persists it so restarts `resume=` the same session.
-  Also builds a **per-session in-process MCP server** ("telegram") exposing
-  `send_photo/send_video/send_file/send_message`, wired to this topic's emitter.
-- `manager.py` — creates sessions, **lazily resumes** dormant ones on first
-  message, `route`/`route_media`/kills/interrupts.
-- `store.py` — JSON map `thread_id -> {cwd, session_id, name}`.
-- `rendering.py` — pure `SDK message -> list[str]`. Plain text only (no
-  parse_mode) to dodge Telegram entity-parse 400s. Tests live against these.
-- `telegram_bot.py` — PTB v22 handlers + `TelegramEmitter` (text + photo/video/
-  document). `on_media` downloads attachments into `MediaItem`s and routes them.
+- **`core/` imports no chat platform.** It speaks `Speaker`/`Outbound`/
+  `InboundMessage` (`core/ports.py`). A transport implements `Transport`
+  (create/close thread, `post`, busy) and calls `engine.on_inbound(...)`.
+- **`CoreSession`** (`core/session.py`) — the old ClaudeSession, decoupled: all
+  output goes through `post(Outbound(speaker=…))`; media tools are the `chat` MCP
+  server (`mcp__chat__send_*`); `on_turn_done` hook fires the supervision wake; a
+  `tap` lets the engine observe a coder thread.
+- **`Engine`** (`core/engine.py`) — three session roles: `orchestrator` (fleet
+  MCP tools: spawn/message/status/dismiss), `coder` (worktree cwd + STATUS
+  protocol prompt), `direct` (the classic `/new`). The orchestrator lives in the
+  transport's main thread ("general"). Coder turn-ends and human interjections
+  land in `_inbox`; `_wake_orchestrator` coalesces them into one digest turn.
+- **Identity**: one bot = one sender, so `TelegramTransport._header` prefixes a
+  labelled header for orchestrator/coder speakers; direct sessions stay unadorned.
 
 ## Media flow
 
-- **Inbound**: `on_media` → `_collect_media` (download each attachment) →
-  `manager.route_media` → `ClaudeSession.submit_media`, which writes files to
-  `<cwd>/.tg-inbox/` and queues a `Turn(text, images)`. Images ride along as
-  `{"type":"image","source":{base64}}` blocks via `client.query(async_iterable)`.
-- **Outbound**: the session calls `mcp__telegram__send_*`; `_tool_send` resolves
-  the path **inside cwd** (refuses escapes), then calls the emitter. 50 MB cap.
+- **Inbound**: adapter `_collect_media` → `engine.on_inbound(InboundMessage)` →
+  `CoreSession.submit_media`, which saves files under `<cwd>/.tg-inbox/` and
+  queues a `Turn(text, images)`. Images ride as base64 image blocks.
+- **Outbound**: session calls `mcp__chat__send_*`; `_tool_send` resolves the path
+  **inside cwd** (refuses escapes) and emits an `Outbound` with `media_path`. 50 MB.
 
 ## Invariants / gotchas
 
@@ -69,5 +70,8 @@ uv run tasm
 
 ## Conventions
 
-- Keep the persona name in `__init__.py::BOT_NAME`; the repo name stays generic.
+- **`core/` never imports a chat platform.** Platform code lives in `transports/`.
+  Test the engine with a fake transport (see `tests/test_engine.py`).
+- Persona is `BOT_NAME` (env), default `DEFAULT_BOT_NAME` in `__init__.py`.
 - Prefer small pure functions in `rendering.py` for anything testable.
+- Every git/subprocess call in `core/worktrees.py` is timeout-bounded — keep it so.
