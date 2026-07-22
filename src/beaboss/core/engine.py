@@ -432,15 +432,15 @@ class Engine:
         coder_id = name.lower()
 
         # workspace: isolated worktree when the repo is git, else the repo itself
-        if await worktrees.is_git_repo(repo):
-            try:
+        try:
+            if await worktrees.is_git_repo(repo):
                 wt = await worktrees.create_worktree(
                     repo, self.settings.state_dir / "worktrees", coder_id)
                 cwd, isolated = wt, True
-            except worktrees.WorktreeError as e:
-                return err(f"worktree creation failed: {e}")
-        else:
-            cwd, isolated = repo, False
+            else:
+                cwd, isolated = repo, False
+        except worktrees.WorktreeError as e:
+            return err(f"couldn't set up an isolated workspace for {repo.name}: {e}")
 
         assert self.transport is not None
         thread_id = await self.transport.create_thread(

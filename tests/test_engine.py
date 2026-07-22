@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 from beaboss.config import Settings
+from beaboss.core import worktrees
 from beaboss.core.engine import Engine
 from beaboss.core.ports import InboundMessage, Outbound
 from beaboss.core.store import CoreStore, ThreadRecord
@@ -165,6 +166,31 @@ def test_orchestrator_message_routes_plain(tmp_path):
     engine.sessions["general"] = fake
     asyncio.run(engine.on_inbound(InboundMessage(thread_id="general", text="status?")))
     assert fake.submitted == ["status?"]
+
+
+def test_spawn_coder_worktree_failure_is_clean(tmp_path, monkeypatch):
+    """If worktree setup fails during spawn, the tool returns a clean error and
+    creates no thread — no raw traceback leaks to the orchestrator."""
+    engine, t = _engine(tmp_path)
+    repo = tmp_path / "projects" / "myrepo"
+    repo.mkdir(parents=True)
+
+    async def fake_is_git(path):
+        return True
+
+    async def fake_create(*args, **kwargs):
+        raise worktrees.WorktreeError("branch 'coder/nova' already exists — retry")
+
+    monkeypatch.setattr(worktrees, "is_git_repo", fake_is_git)
+    monkeypatch.setattr(worktrees, "create_worktree", fake_create)
+
+    res = asyncio.run(engine._spawn_coder("myrepo", "do a task"))
+
+    assert res.get("is_error") is True
+    text = res["content"][0]["text"]
+    assert "isolated workspace" in text
+    assert "coder/nova" in text  # surfaces the underlying reason
+    assert t.threads == []       # nothing half-created
 
 
 def test_speakers(tmp_path):
