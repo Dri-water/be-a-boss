@@ -41,6 +41,51 @@ def test_defaults_and_allowlist_parsing(clean_env, monkeypatch):
     assert s.max_turns is None
 
 
+def test_blank_token_exits(clean_env, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "   ")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
+    with pytest.raises(SystemExit) as excinfo:
+        Settings.from_env(clean_env)
+    assert "TELEGRAM_BOT_TOKEN" in str(excinfo.value)
+
+
+def test_malformed_allowlist_exits(clean_env, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "123,abc")
+    with pytest.raises(SystemExit) as excinfo:
+        Settings.from_env(clean_env)
+    msg = str(excinfo.value)
+    assert "TELEGRAM_ALLOWED_USER_IDS" in msg
+    assert "abc" in msg
+
+
+def test_bad_separator_allowlist_exits(clean_env, monkeypatch):
+    # Space-separated instead of comma-separated is a common mistake.
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "123 456")
+    with pytest.raises(SystemExit) as excinfo:
+        Settings.from_env(clean_env)
+    assert "TELEGRAM_ALLOWED_USER_IDS" in str(excinfo.value)
+
+
+def test_non_numeric_chat_id_exits(clean_env, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "not-a-number")
+    with pytest.raises(SystemExit) as excinfo:
+        Settings.from_env(clean_env)
+    assert "TELEGRAM_CHAT_ID" in str(excinfo.value)
+
+
+def test_non_numeric_max_turns_exits(clean_env, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
+    monkeypatch.setenv("CLAUDE_MAX_TURNS", "lots")
+    with pytest.raises(SystemExit) as excinfo:
+        Settings.from_env(clean_env)
+    assert "CLAUDE_MAX_TURNS" in str(excinfo.value)
+
+
 def test_overrides(clean_env, monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")

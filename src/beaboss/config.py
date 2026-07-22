@@ -15,9 +15,27 @@ def _parse_ids(raw: str) -> set[int]:
     ids: set[int] = set()
     for part in raw.split(","):
         part = part.strip()
-        if part:
+        if not part:
+            continue
+        try:
             ids.add(int(part))
+        except ValueError:
+            raise SystemExit(
+                f"TELEGRAM_ALLOWED_USER_IDS contains an invalid entry: {part!r}. "
+                "It must be a comma-separated list of numeric Telegram user ids, "
+                "e.g. 123456789,987654321 (get your id from @userinfobot)."
+            ) from None
     return ids
+
+
+def _parse_int_env(name: str, raw: str, example: str) -> int:
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"{name} must be a whole number, but got {raw!r}. "
+            f"For example: {name}={example}."
+        ) from None
 
 
 @dataclass
@@ -58,7 +76,9 @@ class Settings:
         return cls(
             bot_token=token,
             allowed_user_ids=allowed,
-            chat_id=int(chat_raw) if chat_raw else None,
+            chat_id=_parse_int_env("TELEGRAM_CHAT_ID", chat_raw, "-100123456789")
+            if chat_raw
+            else None,
             permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
             or "bypassPermissions",
             projects_root=Path(
@@ -66,7 +86,9 @@ class Settings:
             ).expanduser(),
             cli_path=(os.getenv("CLAUDE_CLI_PATH", "").strip() or None),
             model=(os.getenv("CLAUDE_MODEL", "").strip() or None),
-            max_turns=int(max_turns_raw) if max_turns_raw else None,
+            max_turns=_parse_int_env("CLAUDE_MAX_TURNS", max_turns_raw, "12")
+            if max_turns_raw
+            else None,
             state_dir=Path(os.getenv("STATE_DIR", "state")).expanduser(),
             bot_name=os.getenv("BOT_NAME", "").strip() or DEFAULT_BOT_NAME,
             # None => use the built-in default note; empty string => no note at all.
