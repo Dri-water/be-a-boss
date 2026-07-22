@@ -1,7 +1,7 @@
 [project]
 name = "be-a-boss"
 version = "0.1.0"
-description = "Run your own agent org over chat: an orchestrator hires and supervises coder agents, each a visible, joinable thread. Self-hosted, Claude Code."
+description = "Run your own agent org over chat: an orchestrator hires and supervises worker agents, each a visible, joinable thread. Self-hosted, Claude Code."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

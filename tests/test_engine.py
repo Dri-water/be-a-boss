@@ -91,10 +91,10 @@ def test_first_message_only_bootstraps_office_in_main_thread(tmp_path):
     assert t.posts and t.posts[-1].speaker.role == "system"  # got the hint
 
 
-def test_interjection_reaches_coder_and_inbox(tmp_path):
+def test_interjection_reaches_worker_and_inbox(tmp_path):
     engine, t = _engine(tmp_path)
     engine.store.put("55", ThreadRecord(
-        role="coder", name="Nova", cwd=str(tmp_path), coder_id="nova",
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
         repo=str(tmp_path), task="fix"))
     fake = FakeSession()
     engine.sessions["55"] = fake
@@ -115,8 +115,8 @@ def test_orchestrator_wake_digest_drains_inbox(tmp_path):
     fake = FakeSession()
     engine.sessions["general"] = fake
 
-    engine._note("coder nova finished: STATUS: done")
-    engine._note("coder kite blocked: STATUS: blocked: need creds")
+    engine._note("worker nova finished: STATUS: done")
+    engine._note("worker kite blocked: STATUS: blocked: need creds")
     asyncio.run(engine._wake_orchestrator())
 
     assert len(fake.submitted) == 1
@@ -127,7 +127,7 @@ def test_orchestrator_wake_digest_drains_inbox(tmp_path):
 
 
 def test_wake_drains_notes_arriving_during_digest(tmp_path):
-    """Regression: a coder finishing while the orchestrator is mid-digest must not
+    """Regression: a worker finishing while the orchestrator is mid-digest must not
     be stranded — the wake loop must pick up the late note and deliver it too."""
     engine, t = _engine(tmp_path)
     engine.store.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))
@@ -141,8 +141,8 @@ def test_wake_drains_notes_arriving_during_digest(tmp_path):
 
         async def submit(self, text):
             self.digests.append(text)
-            if len(self.digests) == 1:  # a coder finishes "during" the first digest
-                engine._note("coder kite finished late")
+            if len(self.digests) == 1:  # a worker finishes "during" the first digest
+                engine._note("worker kite finished late")
 
         async def stop(self):
             pass
@@ -150,7 +150,7 @@ def test_wake_drains_notes_arriving_during_digest(tmp_path):
     fake = LateNoteSession()
     engine.sessions["general"] = fake
 
-    engine._note("coder nova finished")
+    engine._note("worker nova finished")
     asyncio.run(engine._wake_orchestrator())
 
     assert len(fake.digests) == 2, fake.digests
@@ -168,7 +168,7 @@ def test_orchestrator_message_routes_plain(tmp_path):
     assert fake.submitted == ["status?"]
 
 
-def test_spawn_coder_worktree_failure_is_clean(tmp_path, monkeypatch):
+def test_spawn_worker_worktree_failure_is_clean(tmp_path, monkeypatch):
     """If worktree setup fails during spawn, the tool returns a clean error and
     creates no thread — no raw traceback leaks to the orchestrator."""
     engine, t = _engine(tmp_path)
@@ -179,17 +179,17 @@ def test_spawn_coder_worktree_failure_is_clean(tmp_path, monkeypatch):
         return True
 
     async def fake_create(*args, **kwargs):
-        raise worktrees.WorktreeError("branch 'coder/nova' already exists — retry")
+        raise worktrees.WorktreeError("branch 'worker/nova' already exists — retry")
 
     monkeypatch.setattr(worktrees, "is_git_repo", fake_is_git)
     monkeypatch.setattr(worktrees, "create_worktree", fake_create)
 
-    res = asyncio.run(engine._spawn_coder("myrepo", "do a task"))
+    res = asyncio.run(engine._spawn_worker("myrepo", "do a task"))
 
     assert res.get("is_error") is True
     text = res["content"][0]["text"]
     assert "isolated workspace" in text
-    assert "coder/nova" in text  # surfaces the underlying reason
+    assert "worker/nova" in text  # surfaces the underlying reason
     assert t.threads == []       # nothing half-created
 
 
@@ -197,7 +197,7 @@ def test_speakers(tmp_path):
     engine, _ = _engine(tmp_path)
     o = engine.orchestrator_speaker()
     assert o.role == "orchestrator" and o.name == "Lim Wei Jie" and o.emoji == "🧭"
-    c = engine.coder_speaker("Nova")
+    c = engine.worker_speaker("Nova")
     assert c.label == "⚙️ Nova"
 
 

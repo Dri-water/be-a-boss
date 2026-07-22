@@ -23,15 +23,15 @@ def test_orchestrator_thread_persists(tmp_path):
     assert reloaded.get("general").role == "orchestrator"
 
 
-def test_coders_filter_and_fields(tmp_path):
+def test_workers_filter_and_fields(tmp_path):
     s = CoreStore(tmp_path / "state")
     s.put("1", ThreadRecord(role="direct", name="d", cwd="/r"))
-    s.put("2", ThreadRecord(role="coder", name="Nova", cwd="/wt", coder_id="nova",
-                            repo="/r", task="fix bug", coder_status="working"))
-    coders = s.coders()
-    assert list(coders.keys()) == ["2"]
+    s.put("2", ThreadRecord(role="worker", name="Nova", cwd="/wt", worker_id="nova",
+                            repo="/r", task="fix bug", worker_status="working"))
+    workers = s.workers()
+    assert list(workers.keys()) == ["2"]
     rec = CoreStore(tmp_path / "state").get("2")
-    assert rec.coder_id == "nova" and rec.task == "fix bug"
+    assert rec.worker_id == "nova" and rec.task == "fix bug"
 
 
 def test_delete_and_update_unknown(tmp_path):

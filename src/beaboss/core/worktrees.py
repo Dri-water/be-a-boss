@@ -1,8 +1,8 @@
-"""Git worktree isolation for coders. Every subprocess call is timeout-bounded.
+"""Git worktree isolation for workers. Every subprocess call is timeout-bounded.
 
-A coder never works in the repo's primary checkout: it gets a linked worktree on
-its own branch (coder/<id>). Teardown removes clean worktrees; dirty ones are
-left in place and reported (firstmate practice: never delete un-merged work).
+A worker never works in the repo's primary checkout: it gets a linked worktree on
+its own branch (worker/<id>). Teardown removes clean worktrees; dirty ones are
+left in place and reported (never delete un-merged work).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ async def _git(cwd: Path, *args: str, timeout: int = GIT_TIMEOUT) -> tuple[int, 
         )
     except FileNotFoundError as e:
         raise WorktreeError(
-            "git is not installed or not on PATH — install git to use coders"
+            "git is not installed or not on PATH — install git to use workers"
         ) from e
     except OSError as e:
         raise WorktreeError(f"could not run git in {cwd}: {e}") from e
@@ -53,28 +53,28 @@ async def is_git_repo(path: Path) -> bool:
     return code == 0
 
 
-async def create_worktree(repo: Path, worktrees_dir: Path, coder_id: str) -> Path:
-    """Create <worktrees_dir>/<coder_id> on new branch coder/<coder_id>."""
+async def create_worktree(repo: Path, worktrees_dir: Path, worker_id: str) -> Path:
+    """Create <worktrees_dir>/<worker_id> on new branch worker/<worker_id>."""
     if not await is_git_repo(repo):
         raise WorktreeError(
             f"not a git repository: {repo} — run `git init` there (and make an "
-            f"initial commit), or point the coder at a repo under version control"
+            f"initial commit), or point the worker at a repo under version control"
         )
     worktrees_dir.mkdir(parents=True, exist_ok=True)
-    dest = worktrees_dir / coder_id
+    dest = worktrees_dir / worker_id
     if dest.exists():
         raise WorktreeError(
-            f"worktree path already exists: {dest} — an earlier coder may not "
+            f"worktree path already exists: {dest} — an earlier worker may not "
             f"have been cleaned up; remove it (git worktree remove {dest}) and retry"
         )
-    branch = f"coder/{coder_id}"
+    branch = f"worker/{worker_id}"
     code, out = await _git(repo, "worktree", "add", "-b", branch, str(dest))
     if code != 0:
         # branch may linger from an earlier run — retry attaching to it
         code2, out2 = await _git(repo, "worktree", "add", str(dest), branch)
         if code2 != 0:
             raise WorktreeError(
-                f"could not create an isolated worktree for '{coder_id}'. "
+                f"could not create an isolated worktree for '{worker_id}'. "
                 f"git said: {_tidy(out2 or out)}. Likely the branch '{branch}' "
                 f"or path is already in use — remove the stale worktree "
                 f"(git worktree remove) or branch (git branch -D {branch}) and retry"

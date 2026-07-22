@@ -19,14 +19,14 @@ class ThreadRecord:
 
     role: Role
     name: str
-    cwd: str = ""            # repo (direct) or worktree (coder); "" = none yet
+    cwd: str = ""            # repo (direct) or worktree (worker); "" = none yet
     session_id: str | None = None
     created_at: float = 0.0
-    # coder-only:
-    coder_id: str = ""       # short id, e.g. "nova"
+    # worker-only:
+    worker_id: str = ""       # short id, e.g. "nova"
     repo: str = ""           # the primary checkout the worktree came from
     task: str = ""           # the brief, verbatim
-    coder_status: str = ""   # working | done | blocked | dismissed
+    worker_status: str = ""   # working | done | blocked | dismissed
 
 
 class CoreStore:
@@ -55,10 +55,10 @@ class CoreStore:
                 cwd=v.get("cwd", ""),
                 session_id=v.get("session_id"),
                 created_at=v.get("created_at", 0.0),
-                coder_id=v.get("coder_id", ""),
+                worker_id=v.get("worker_id", ""),
                 repo=v.get("repo", ""),
                 task=v.get("task", ""),
-                coder_status=v.get("coder_status", ""),
+                worker_status=v.get("worker_status", ""),
             )
 
     def _flush(self) -> None:
@@ -105,5 +105,5 @@ class CoreStore:
             self.orchestrator_thread = thread_id
             self._flush()
 
-    def coders(self) -> dict[str, ThreadRecord]:
-        return {k: v for k, v in self._threads.items() if v.role == "coder"}
+    def workers(self) -> dict[str, ThreadRecord]:
+        return {k: v for k, v in self._threads.items() if v.role == "worker"}

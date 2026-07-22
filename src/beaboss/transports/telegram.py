@@ -1,7 +1,7 @@
 """Telegram adapter: forum topics ⇄ core threads, header-card speaker identity.
 
 One bot token = one Telegram sender, so speaker identity is rendered in the
-message body: orchestrator and coder messages open with a labelled header line;
+message body: orchestrator and worker messages open with a labelled header line;
 direct sessions stay unadorned (single-speaker threads don't need cards).
 
 The General topic is the orchestrator's office: talking there talks to the
@@ -133,7 +133,7 @@ class TelegramTransport:
 
     @staticmethod
     def _header(out: Outbound) -> str:
-        if out.speaker.role in ("orchestrator", "coder"):
+        if out.speaker.role in ("orchestrator", "worker"):
             return f"{out.speaker.label}:"
         if out.speaker.role == "system":
             return ""  # system lines carry their own tone
@@ -166,8 +166,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         f"👋 {settings.bot_name} — your agent org in this group.\n\n"
         "🧭 Talk to me in General: I'm the orchestrator. Give me goals "
-        "(\"fix the login bug in myapp, then audit deps\") and I hire coder "
-        "agents, brief them, and supervise. Every coder gets its own topic — "
+        "(\"fix the login bug in myapp, then audit deps\") and I hire worker "
+        "agents, brief them, and supervise. Every worker gets its own topic — "
         "watch us work, and type there anytime to steer us both.\n\n"
         "🗂 Commands (General):\n"
         "  /new <path> [name] — classic direct session (no orchestrator)\n"
@@ -231,7 +231,7 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     lines = ["Threads:"]
     for _tid, rec, status in rows:
-        extra = f" · {rec.coder_status}" if rec.role == "coder" else ""
+        extra = f" · {rec.worker_status}" if rec.role == "worker" else ""
         lines.append(f"• [{rec.role}] {rec.name} [{status}]{extra} — {rec.cwd or '—'}")
     await update.effective_message.reply_text("\n".join(lines))
 

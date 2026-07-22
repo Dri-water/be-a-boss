@@ -2,13 +2,13 @@
 
 Threads and roles:
 - orchestrator thread ("the office", transport's main thread): human <-> orchestrator
-- coder threads: a visible pair — the orchestrator drives a coder session, and
+- worker threads: a visible pair — the orchestrator drives a worker session, and
   everything both say is posted to the thread. The human may interject; the
-  message reaches the coder as input and the orchestrator via its inbox.
+  message reaches the worker as input and the orchestrator via its inbox.
 - direct threads: the original beaboss model (human <-> session), unchanged.
 
-Supervision is checkpoint-based: coder turn-ends and human interjections land in
-an inbox; each coder turn-end wakes the orchestrator with the accumulated digest.
+Supervision is checkpoint-based: worker turn-ends and human interjections land in
+an inbox; each worker turn-end wakes the orchestrator with the accumulated digest.
 """
 
 from __future__ import annotations
@@ -29,41 +29,50 @@ from . import worktrees
 log = logging.getLogger("beaboss.core.engine")
 
 ORCHESTRATOR_EMOJI = "🧭"
-CODER_EMOJI = "⚙️"
+WORKER_EMOJI = "⚙️"
+
+CODE_PHILOSOPHY = (
+    "Code-quality bar (non-negotiable): robustness through SIMPLICITY. Prefer the "
+    "simplest solution that works — simple code is more observable, robust, and "
+    "maintainable. Build for extension and modularity (small, composable pieces "
+    "with clear seams), but do NOT over-engineer: no speculative abstraction, no "
+    "indirection you don't need yet. When in doubt, pick the boring, obvious "
+    "solution, and let the code be self-documenting (comment intent, not mechanics)."
+)
 
 ORCHESTRATOR_APPEND = (
     "You are the ORCHESTRATOR of a small software organisation, talking with your "
     "boss in a chat thread. You do not write project code yourself — you run a "
-    "crew of coder agents and use your fleet tools to get work done:\n"
+    "team of worker agents and use your fleet tools to get work done:\n"
     "- mcp__fleet__list_repos() — see the available repositories\n"
-    "- mcp__fleet__spawn_coder(repo, task) — hire a coder: creates a visible "
+    "- mcp__fleet__spawn_worker(repo, task) — hire a worker: creates a visible "
     "thread and an isolated git worktree, briefs them, and they start working\n"
-    "- mcp__fleet__message_coder(coder_id, text) — speak to a coder (your message "
+    "- mcp__fleet__message_worker(worker_id, text) — speak to a worker (your message "
     "is visible in their thread)\n"
-    "- mcp__fleet__coder_status(coder_id?) — current fleet state\n"
-    "- mcp__fleet__dismiss_coder(coder_id) — end a coder: clean worktrees are "
+    "- mcp__fleet__worker_status(worker_id?) — current fleet state\n"
+    "- mcp__fleet__dismiss_worker(worker_id) — end a worker: clean worktrees are "
     "removed, dirty ones are preserved and reported\n\n"
     "Prime directives:\n"
-    "1. Never modify a project yourself — coders change projects, you read and "
+    "1. Never modify a project yourself — workers change projects, you read and "
     "direct.\n"
     "2. Never merge or discard work without the boss's explicit word.\n"
-    "3. Never dismiss a coder whose work isn't committed/landed — a refused "
+    "3. Never dismiss a worker whose work isn't committed/landed — a refused "
     "teardown is a stop-and-investigate, not an obstacle.\n"
     "4. Report outcomes faithfully. If work failed, say so plainly with the "
     "evidence.\n\n"
-    "How to brief a coder:\n"
-    "- A brief must be SELF-CONTAINED: the coder knows nothing about this chat. "
+    "How to brief a worker:\n"
+    "- A brief must be SELF-CONTAINED: the worker knows nothing about this chat. "
     "State the repo context, the concrete goal, constraints, acceptance criteria "
     "and the definition of done (tests pass, build works, committed).\n"
-    "- One coder = one task. Split independent work across coders; they run in "
+    "- One worker = one task. Split independent work across workers; they run in "
     "parallel in isolated worktrees, so same-repo parallelism is safe.\n"
     "- Steer with short messages; put long instructions in the brief, not drip-fed.\n\n"
     "Supervision:\n"
-    "- You are woken with [fleet inbox] digests when a coder finishes a turn, "
-    "gets blocked, needs a decision, or the boss interjects in a coder thread. "
-    "React to the digest: answer the coder, re-brief, dismiss, or report to the "
-    "boss. Do not poll; do not micro-manage a working coder.\n"
-    "- A coder's 'STATUS: blocked' means they need YOUR help now. A "
+    "- You are woken with [fleet inbox] digests when a worker finishes a turn, "
+    "gets blocked, needs a decision, or the boss interjects in a worker thread. "
+    "React to the digest: answer the worker, re-brief, dismiss, or report to the "
+    "boss. Do not poll; do not micro-manage a working worker.\n"
+    "- A worker's 'STATUS: blocked' means they need YOUR help now. A "
     "'needs-decision' belongs to the boss — relay it with options and your "
     "recommendation.\n"
     "- Escalate to the boss: decisions that are theirs (product choices, merges, "
@@ -72,20 +81,22 @@ ORCHESTRATOR_APPEND = (
     "retries, or internal mechanics.\n\n"
     "Talk in outcomes, not mechanics. The boss cares about the project, not your "
     "internals: say 'isolated copy' not 'worktree', 'instructions' not 'brief', "
-    "'cleanup' not 'teardown', name coders only when it matters. Lead with "
+    "'cleanup' not 'teardown', name workers only when it matters. Lead with "
     "concrete evidence, then the consequence, then options and a recommendation.\n\n"
-    "The boss can see every coder thread and may talk in them directly; treat "
-    "their word there as authoritative context for you and the coder both.\n"
+    "The boss can see every worker thread and may talk in them directly; treat "
+    "their word there as authoritative context for you and the worker both.\n"
     "Keep replies to the boss short and information-dense. No flattery. An empty "
-    "queue is a healthy resting state — never invent work."
-)
+    "queue is a healthy resting state — never invent work.\n\n"
+    "Every brief you write must carry the code-quality bar below — workers build "
+    "to it, and you hold them to it on review:\n"
+) + CODE_PHILOSOPHY
 
-CODER_APPEND_EXTRA = (
-    "\n\nYou are a CODER on a small team. Your manager (the orchestrator) briefs "
+WORKER_APPEND_EXTRA = (
+    "\n\nYou are a WORKER on a small team. Your manager (the orchestrator) briefs "
     "you and supervises via this thread; the boss (a human) can read everything "
     "and may interject directly — treat boss messages as authoritative.\n"
     "- First, verify isolation: run `git rev-parse --show-toplevel` — you should "
-    "be in your own worktree (branch coder/<your-id>), not the primary checkout. "
+    "be in your own worktree (branch worker/<your-id>), not the primary checkout. "
     "If you find yourself in the primary checkout, STOP and report it.\n"
     "- Work autonomously toward the brief's definition of done. Commit on your "
     "branch with clear messages as you go; your branch outlives you.\n"
@@ -97,8 +108,8 @@ CODER_APPEND_EXTRA = (
     "- End every reply with one line, chosen honestly (a wrong 'done' is worse "
     "than 'blocked'):\n"
     "  STATUS: done | working | blocked: <what you need> | "
-    "needs-decision: <the options>"
-)
+    "needs-decision: <the options>\n\n"
+) + CODE_PHILOSOPHY
 
 
 class Engine:
@@ -133,8 +144,8 @@ class Engine:
                        emoji=ORCHESTRATOR_EMOJI)
 
     @staticmethod
-    def coder_speaker(name: str) -> Speaker:
-        return Speaker(role="coder", name=name, emoji=CODER_EMOJI)
+    def worker_speaker(name: str) -> Speaker:
+        return Speaker(role="worker", name=name, emoji=WORKER_EMOJI)
 
     # ---- inbound routing -------------------------------------------------
 
@@ -158,7 +169,7 @@ class Engine:
         if session is None:
             return
 
-        if rec.role == "coder":
+        if rec.role == "worker":
             await self._interject(msg, rec, session)
             return
 
@@ -170,7 +181,7 @@ class Engine:
 
     async def _interject(self, msg: InboundMessage, rec: ThreadRecord,
                          session: CoreSession) -> None:
-        """Boss speaks inside a coder thread: coder hears it now, orchestrator
+        """Boss speaks inside a worker thread: worker hears it now, orchestrator
         sees it in the next digest."""
         who = msg.sender_name or "the boss"
         text = (f"[Interjection from {who} — visible to you and the orchestrator]: "
@@ -179,7 +190,7 @@ class Engine:
             await session.submit_media(text, msg.media)
         else:
             await session.submit(text)
-        self._note(f"{who} said in {rec.coder_id}'s thread: {msg.text}")
+        self._note(f"{who} said in {rec.worker_id}'s thread: {msg.text}")
 
     # ---- session management ---------------------------------------------
 
@@ -190,8 +201,8 @@ class Engine:
         try:
             if rec.role == "orchestrator":
                 session = self._make_orchestrator_session(thread_id, rec)
-            elif rec.role == "coder":
-                session = self._make_coder_session(thread_id, rec)
+            elif rec.role == "worker":
+                session = self._make_worker_session(thread_id, rec)
             else:
                 session = self._make_direct_session(thread_id, rec)
             await session.start()
@@ -233,17 +244,17 @@ class Engine:
             extra_mcp_servers={"fleet": self._build_fleet_server()},
         )
 
-    def _make_coder_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
+    def _make_worker_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
         session = CoreSession(
             thread_id=thread_id, cwd=Path(rec.cwd),
-            speaker=self.coder_speaker(rec.name),
+            speaker=self.worker_speaker(rec.name),
             settings=self.settings, post=self._post, busy=self._busy,
             on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
             system_append=None,  # default env note…
         )
-        # …plus the coder role note appended onto it
-        session._system_append = session._resolve_append() + CODER_APPEND_EXTRA
-        session.on_turn_done = self._on_coder_turn_done
+        # …plus the worker role note appended onto it
+        session._system_append = session._resolve_append() + WORKER_APPEND_EXTRA
+        session.on_turn_done = self._on_worker_turn_done
         return session
 
     async def _ensure_orchestrator(self, thread_id: str) -> None:
@@ -258,27 +269,27 @@ class Engine:
         self._inbox.append(text)
         log.info("inbox note: %s", text[:160])
 
-    async def _on_coder_turn_done(self, session: CoreSession, result: ResultMessage) -> None:
+    async def _on_worker_turn_done(self, session: CoreSession, result: ResultMessage) -> None:
         rec = self.store.get(session.thread_id)
         if rec is None:
             return
         tail = (result.result or "").strip()
         if len(tail) > 600:
             tail = tail[:600] + "…"
-        # track the coder's self-reported status line if present
+        # track the worker's self-reported status line if present
         low = tail.lower()
         if "status: done" in low:
-            self.store.update(session.thread_id, coder_status="done")
+            self.store.update(session.thread_id, worker_status="done")
         elif "status: blocked" in low or "status: needs-decision" in low:
-            self.store.update(session.thread_id, coder_status="blocked")
+            self.store.update(session.thread_id, worker_status="blocked")
         status = "errored" if result.is_error else "finished a turn"
-        self._note(f"coder {rec.coder_id} ({rec.name}, task: {rec.task[:80]}) "
+        self._note(f"worker {rec.worker_id} ({rec.name}, task: {rec.task[:80]}) "
                    f"{status}: {tail or '(no text)'}")
         await self._wake_orchestrator()
 
-    # Coalescing window: near-simultaneous coder events (e.g. two coders finish
-    # together, or a boss interjection followed by the coder's reply) become one
-    # orchestrator turn instead of several. (Firstmate's SIGNAL_GRACE idea.)
+    # Coalescing window: near-simultaneous worker events (e.g. two workers finish
+    # together, or a boss interjection followed by the worker's reply) become one
+    # orchestrator turn instead of several.
     WAKE_COALESCE_SECS = 2.0
 
     async def _wake_orchestrator(self) -> None:
@@ -296,7 +307,7 @@ class Engine:
             return
         self._waking = True
         try:
-            # Loop-drain: a coder finishing while we're mid-digest appends to
+            # Loop-drain: a worker finishing while we're mid-digest appends to
             # _inbox; the while-check re-runs with no await between it and the
             # `finally` below, so no completion note can be stranded.
             while self._inbox:
@@ -338,11 +349,11 @@ class Engine:
                 return err(f"could not list {root}: {e}")
 
         @tool(
-            "spawn_coder",
-            "Hire a coder for one task. Creates a visible thread and an isolated "
-            "git worktree of the repo, briefs the coder, and they start working. "
+            "spawn_worker",
+            "Hire a worker for one task. Creates a visible thread and an isolated "
+            "git worktree of the repo, briefs the worker, and they start working. "
             "The brief must be self-contained (goal, constraints, definition of "
-            "done). Returns the coder's id.",
+            "done). Returns the worker's id.",
             {"type": "object",
              "properties": {
                  "repo": {"type": "string",
@@ -351,69 +362,69 @@ class Engine:
              },
              "required": ["repo", "task"]},
         )
-        async def spawn_coder(args: dict[str, Any]) -> dict[str, Any]:
-            return await engine._spawn_coder(str(args.get("repo", "")),
+        async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._spawn_worker(str(args.get("repo", "")),
                                              str(args.get("task", "")))
 
         @tool(
-            "message_coder",
-            "Say something to a coder. Your message is posted in their thread "
-            "(visible to the boss) and becomes the coder's next input.",
+            "message_worker",
+            "Say something to a worker. Your message is posted in their thread "
+            "(visible to the boss) and becomes the worker's next input.",
             {"type": "object",
              "properties": {
-                 "coder_id": {"type": "string"},
+                 "worker_id": {"type": "string"},
                  "text": {"type": "string"},
              },
-             "required": ["coder_id", "text"]},
+             "required": ["worker_id", "text"]},
         )
-        async def message_coder(args: dict[str, Any]) -> dict[str, Any]:
-            return await engine._message_coder(str(args.get("coder_id", "")),
+        async def message_worker(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._message_worker(str(args.get("worker_id", "")),
                                                str(args.get("text", "")))
 
         @tool(
-            "coder_status",
-            "Current fleet state. Pass coder_id for one coder, omit for all.",
+            "worker_status",
+            "Current fleet state. Pass worker_id for one worker, omit for all.",
             {"type": "object",
-             "properties": {"coder_id": {"type": "string"}}},
+             "properties": {"worker_id": {"type": "string"}}},
         )
-        async def coder_status(args: dict[str, Any]) -> dict[str, Any]:
+        async def worker_status(args: dict[str, Any]) -> dict[str, Any]:
             rows = []
-            for tid, rec in engine.store.coders().items():
-                cid = rec.coder_id
-                want = str(args.get("coder_id", "")).strip()
+            for tid, rec in engine.store.workers().items():
+                cid = rec.worker_id
+                want = str(args.get("worker_id", "")).strip()
                 if want and want != cid:
                     continue
                 live = engine.sessions.get(tid)
                 state = live.status if live else "dormant"
                 rows.append(f"- {cid} ({rec.name}) [{state}] repo={rec.repo} "
-                            f"status={rec.coder_status or 'working'} task={rec.task[:100]}")
-            return ok("\n".join(rows) or "(no coders)")
+                            f"status={rec.worker_status or 'working'} task={rec.task[:100]}")
+            return ok("\n".join(rows) or "(no workers)")
 
         @tool(
-            "dismiss_coder",
-            "End a coder's engagement. Their worktree is removed if clean; a "
+            "dismiss_worker",
+            "End a worker's engagement. Their worktree is removed if clean; a "
             "dirty worktree is preserved and its path reported.",
             {"type": "object",
-             "properties": {"coder_id": {"type": "string"}},
-             "required": ["coder_id"]},
+             "properties": {"worker_id": {"type": "string"}},
+             "required": ["worker_id"]},
         )
-        async def dismiss_coder(args: dict[str, Any]) -> dict[str, Any]:
-            return await engine._dismiss_coder(str(args.get("coder_id", "")))
+        async def dismiss_worker(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._dismiss_worker(str(args.get("worker_id", "")))
 
         return create_sdk_mcp_server(
             "fleet",
-            tools=[list_repos, spawn_coder, message_coder, coder_status, dismiss_coder],
+            tools=[list_repos, spawn_worker, message_worker, worker_status, dismiss_worker],
         )
 
     # ---- fleet operations ------------------------------------------------
 
-    def _find_coder(self, coder_id: str) -> tuple[str, ThreadRecord] | None:
-        for tid, rec in self.store.coders().items():
-            if rec.coder_id == coder_id:
+    def _find_worker(self, worker_id: str) -> tuple[str, ThreadRecord] | None:
+        for tid, rec in self.store.workers().items():
+            if rec.worker_id == worker_id:
                 return tid, rec
         return None
 
-    async def _spawn_coder(self, repo_raw: str, task: str) -> dict[str, Any]:
+    async def _spawn_worker(self, repo_raw: str, task: str) -> dict[str, Any]:
         def err(text: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": text}], "is_error": True}
 
@@ -426,16 +437,16 @@ class Engine:
         if not repo.is_dir():
             return err(f"no such repo: {repo}")
 
-        taken = {r.coder_id for r in self.store.coders().values()}
-        taken |= {r.name.lower() for r in self.store.coders().values()}
+        taken = {r.worker_id for r in self.store.workers().values()}
+        taken |= {r.name.lower() for r in self.store.workers().values()}
         name = pick_name(taken)
-        coder_id = name.lower()
+        worker_id = name.lower()
 
         # workspace: isolated worktree when the repo is git, else the repo itself
         try:
             if await worktrees.is_git_repo(repo):
                 wt = await worktrees.create_worktree(
-                    repo, self.settings.state_dir / "worktrees", coder_id)
+                    repo, self.settings.state_dir / "worktrees", worker_id)
                 cwd, isolated = wt, True
             else:
                 cwd, isolated = repo, False
@@ -444,15 +455,15 @@ class Engine:
 
         assert self.transport is not None
         thread_id = await self.transport.create_thread(
-            f"{CODER_EMOJI} {name} · {repo.name}")
+            f"{WORKER_EMOJI} {name} · {repo.name}")
 
         rec = ThreadRecord(
-            role="coder", name=name, cwd=str(cwd), coder_id=coder_id,
-            repo=str(repo), task=task.strip(), coder_status="working",
+            role="worker", name=name, cwd=str(cwd), worker_id=worker_id,
+            repo=str(repo), task=task.strip(), worker_status="working",
         )
         self.store.put(thread_id, rec)
 
-        iso_note = ("isolated worktree, branch coder/" + coder_id if isolated
+        iso_note = ("isolated worktree, branch worker/" + worker_id if isolated
                     else "⚠️ not a git repo — working directly in the project dir")
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM,
@@ -465,21 +476,21 @@ class Engine:
 
         session = await self._ensure_session(thread_id, rec)
         if session is None:
-            return err("coder session failed to start (see thread)")
+            return err("worker session failed to start (see thread)")
         await session.submit(
             f"[Brief from the orchestrator]\n{task.strip()}"
         )
         return {"content": [{"type": "text", "text":
-                f"spawned coder {coder_id} ({name}) in {iso_note}; "
+                f"spawned worker {worker_id} ({name}) in {iso_note}; "
                 f"thread created. They will report back via the fleet inbox."}]}
 
-    async def _message_coder(self, coder_id: str, text: str) -> dict[str, Any]:
+    async def _message_worker(self, worker_id: str, text: str) -> dict[str, Any]:
         def err(t: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": t}], "is_error": True}
 
-        found = self._find_coder(coder_id.strip())
+        found = self._find_worker(worker_id.strip())
         if found is None:
-            return err(f"no such coder: {coder_id}")
+            return err(f"no such worker: {worker_id}")
         if not text.strip():
             return err("text is required")
         thread_id, rec = found
@@ -488,17 +499,17 @@ class Engine:
         ))
         session = await self._ensure_session(thread_id, rec)
         if session is None:
-            return err("coder session unavailable")
+            return err("worker session unavailable")
         await session.submit(f"[From the orchestrator]: {text.strip()}")
         return {"content": [{"type": "text", "text": "delivered"}]}
 
-    async def _dismiss_coder(self, coder_id: str) -> dict[str, Any]:
+    async def _dismiss_worker(self, worker_id: str) -> dict[str, Any]:
         def err(t: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": t}], "is_error": True}
 
-        found = self._find_coder(coder_id.strip())
+        found = self._find_worker(worker_id.strip())
         if found is None:
-            return err(f"no such coder: {coder_id}")
+            return err(f"no such worker: {worker_id}")
         thread_id, rec = found
 
         session = self.sessions.pop(thread_id, None)
@@ -514,7 +525,7 @@ class Engine:
             else:
                 detail = ""
 
-        self.store.update(thread_id, coder_status="dismissed")
+        self.store.update(thread_id, worker_status="dismissed")
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM,
             text=f"{rec.name} dismissed by the orchestrator.{detail}",
@@ -524,7 +535,7 @@ class Engine:
                 await self.transport.close_thread(thread_id)
             except Exception:  # noqa: BLE001
                 pass
-        return {"content": [{"type": "text", "text": f"dismissed {coder_id}{detail}"}]}
+        return {"content": [{"type": "text", "text": f"dismissed {worker_id}{detail}"}]}
 
     # ---- direct sessions (pre-orchestrator model, unchanged) -------------
 
@@ -560,7 +571,7 @@ class Engine:
             await session.stop()
         if rec is None:
             return session is not None
-        if rec.role == "coder" and rec.repo and rec.cwd != rec.repo:
+        if rec.role == "worker" and rec.repo and rec.cwd != rec.repo:
             await worktrees.remove_worktree(Path(rec.repo), Path(rec.cwd))
         if rec.role == "orchestrator":
             self.store.set_orchestrator_thread(None)

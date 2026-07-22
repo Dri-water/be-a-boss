@@ -5,7 +5,7 @@ Guidance for AI agents working on this repo.
 ## What this is
 
 A self-hosted **agent org over chat** (persona via `BOT_NAME`): an orchestrator
-session hires/briefs/supervises coder sessions, each visible in its own thread.
+session hires/briefs/supervises worker sessions, each visible in its own thread.
 The core is **transport-agnostic**; Telegram is one adapter. See
 [docs/architecture.md](docs/architecture.md) for the full picture.
 
@@ -18,7 +18,7 @@ transports/telegram.py  (adapter: topics ⇄ threads, header cards, commands)
 core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrator
    ├─ core/session.py  CoreSession — one ClaudeSDKClient, posts via a callback
    ├─ core/store.py    thread registry + fleet records (restart-proof)
-   └─ core/worktrees.py isolated git worktree per coder
+   └─ core/worktrees.py isolated git worktree per worker
 ```
 
 - **`core/` imports no chat platform.** It speaks `Speaker`/`Outbound`/
@@ -27,14 +27,14 @@ core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrat
 - **`CoreSession`** (`core/session.py`) — the old ClaudeSession, decoupled: all
   output goes through `post(Outbound(speaker=…))`; media tools are the `chat` MCP
   server (`mcp__chat__send_*`); `on_turn_done` hook fires the supervision wake; a
-  `tap` lets the engine observe a coder thread.
+  `tap` lets the engine observe a worker thread.
 - **`Engine`** (`core/engine.py`) — three session roles: `orchestrator` (fleet
-  MCP tools: spawn/message/status/dismiss), `coder` (worktree cwd + STATUS
+  MCP tools: spawn/message/status/dismiss), `worker` (worktree cwd + STATUS
   protocol prompt), `direct` (the classic `/new`). The orchestrator lives in the
-  transport's main thread ("general"). Coder turn-ends and human interjections
+  transport's main thread ("general"). Worker turn-ends and human interjections
   land in `_inbox`; `_wake_orchestrator` coalesces them into one digest turn.
 - **Identity**: one bot = one sender, so `TelegramTransport._header` prefixes a
-  labelled header for orchestrator/coder speakers; direct sessions stay unadorned.
+  labelled header for orchestrator/worker speakers; direct sessions stay unadorned.
 
 ## Media flow
 

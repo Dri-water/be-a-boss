@@ -1,15 +1,33 @@
-# be-a-boss
+<p align="center">
+  <img src="assets/logo.svg" width="460" alt="be-a-boss" />
+</p>
 
-Run **your own agent org from Telegram.** Talk to an **orchestrator** agent in
-your group's General topic; it hires **coder** agents for your tasks, briefs
-them, and supervises. Every coder works in its own forum topic — a **glass wall**
-you can watch through and speak into — and in an isolated git worktree, so
-parallel work never collides. All of it self-hosted on your box, driven by
-[Claude Code](https://www.claude.com/product/claude-code).
+<p align="center">
+  <a href="docs/">Docs</a> ·
+  <a href="docs/concepts.md">Concepts</a> ·
+  <a href="docs/behaviour.md">Behaviour</a> ·
+  <a href="docs/extending.md">Extending</a> ·
+  <a href="docs/architecture.md">Architecture</a>
+</p>
 
-Think of it as a phone-first take on orchestrator-crew systems like
-[firstmate](https://github.com/kunchenguid/firstmate): same delegation model,
-but every agent conversation is a visible, joinable chat thread.
+**Run your own agent org.** You're the boss: you talk to an **orchestrator** agent,
+and it hires **worker** agents for your tasks, briefs them, and supervises — while
+you watch every agent-to-agent conversation and can step into any of them. Each
+worker runs in an isolated git worktree, so parallel work never collides.
+Self-hosted, on your box.
+
+be-a-boss is a **framework**, and deliberately modular: the org logic is a
+transport-agnostic, backend-agnostic core. The **surface** you drive it from and
+the **agent backend** your workers run on are both pluggable adapters — nothing in
+the core knows which one it's talking to.
+
+| | Supported now | Next |
+|---|---|---|
+| **Surface** — how you drive it | Telegram | Web / VS Code · Slack |
+| **Agent backend** — what workers run | Claude Code | Codex |
+
+The guide below uses the Telegram + Claude Code combo (today's supported pair);
+swapping either is an adapter, not a rewrite.
 
 ## The model
 
@@ -23,15 +41,15 @@ flowchart LR
 
 - **General topic = the orchestrator's office.** Give it goals in plain language
   ("fix the login 500 in myapp, then audit deps"). It splits the work, hires
-  coders, briefs them, supervises at checkpoints, and reports outcomes.
-- **Every coder gets its own topic** named after it (`⚙️ Nova · myapp`). The
-  orchestrator's instructions and the coder's work stream into that topic live —
+  workers, briefs them, supervises at checkpoints, and reports outcomes.
+- **Every worker gets its own topic** named after it (`⚙️ Nova · myapp`). The
+  orchestrator's instructions and the worker's work stream into that topic live —
   you literally watch the manager drive the worker.
-- **You can interject in any coder topic.** Your message reaches the coder as
+- **You can interject in any worker topic.** Your message reaches the worker as
   input *and* the orchestrator's inbox — both see it, like walking up to a desk.
-- **Isolated worktrees.** Each coder works on its own branch (`coder/<name>`) in
+- **Isolated worktrees.** Each worker works on its own branch (`worker/<name>`) in
   its own git worktree — same-repo parallelism is safe; work survives on the
-  branch after the coder is dismissed. Dirty worktrees are never deleted.
+  branch after the worker is dismissed. Dirty worktrees are never deleted.
 - **Direct sessions still exist**: `/new <path>` gives you a classic
   1-topic-=-1-session thread with no orchestrator in between — perfect for quick
   hands-on work.
@@ -39,18 +57,18 @@ flowchart LR
   runs always-on in Docker.
 
 One Telegram bot token carries all identities — speakers are rendered as header
-cards (🧭 orchestrator / ⚙️ coder name) since a bot account can't change its
+cards (🧭 orchestrator / ⚙️ worker name) since a bot account can't change its
 sender per message.
 
 ## Features
 
-- **Orchestrator + crew** — talk to one agent; it hires, briefs, and supervises
-  coders. Or go direct with `/new`.
-- **Glass-walled delegation** — every coder conversation is a visible topic you
+- **Orchestrator + team** — talk to one agent; it hires, briefs, and supervises
+  workers. Or go direct with `/new`.
+- **Glass-walled delegation** — every worker conversation is a visible topic you
   can watch and interject into; both agents see your message.
-- **Isolated git worktrees** — each coder on its own `coder/<name>` branch;
+- **Isolated git worktrees** — each worker on its own `worker/<name>` branch;
   parallel same-repo work never collides, and un-landed work is never deleted.
-- **Checkpoint supervision** — coders run autonomously; the orchestrator is woken
+- **Checkpoint supervision** — workers run autonomously; the orchestrator is woken
   only at meaningful checkpoints (done / blocked / needs-decision / interjection),
   never per token. Wakes are coalesced to save tokens.
 - **Full media, both directions** — send photos/files/video *to* a session (images
@@ -68,10 +86,10 @@ sender per message.
 ```mermaid
 flowchart LR
     U([You]) -->|"# General"| ENG[engine<br/>core, transport-agnostic]
-    U -. "interject in a coder topic" .-> ENG
+    U -. "interject in a worker topic" .-> ENG
     ENG --> ORC["🧭 orchestrator session"]
     ORC -->|"fleet tools:<br/>spawn / message / dismiss"| ENG
-    ENG -->|worktree + thread| C1["⚙️ coder session"]
+    ENG -->|worktree + thread| C1["⚙️ worker session"]
     C1 -->|"turn-end / blocked / done"| SUP[checkpoint inbox]
     SUP -->|coalesced digest| ORC
     ENG <-->|Transport contract| TG[telegram adapter<br/>topics ⇄ threads, header cards]
@@ -85,10 +103,10 @@ sequenceDiagram
     actor You
     participant O as 🧭 Orchestrator
     participant E as Engine
-    participant C as ⚙️ Coder
+    participant C as ⚙️ Worker
     You->>O: "fix the login 500 in myapp"
-    O->>E: spawn_coder(myapp, brief)
-    E->>C: new worktree coder/nova + brief (posted in its topic)
+    O->>E: spawn_worker(myapp, brief)
+    E->>C: new worktree worker/nova + brief (posted in its topic)
     C->>C: work autonomously, commit on branch
     C-->>You: streams into its topic (you can watch)
     You-->>C: interjection: "check the TTL too"
@@ -168,8 +186,8 @@ uv run boss
 > *"In myapp, reproduce the /login 500 and patch it. Separately, audit the deps in
 > docs-site for anything unmaintained."*
 
-It hires coders (one per task), opens a topic for each, briefs them, and reports
-back. Open a coder's topic to watch the work; type there to steer.
+It hires workers (one per task), opens a topic for each, briefs them, and reports
+back. Open a worker's topic to watch the work; type there to steer.
 
 Commands in **General**:
 
@@ -177,18 +195,18 @@ Commands in **General**:
 |---|---|
 | *(plain message)* | A goal for the orchestrator |
 | `/new <path> [name]` | A **direct** session (no orchestrator) in `<path>` |
-| `/list` | All threads (orchestrator, coders, direct) + status |
+| `/list` | All threads (orchestrator, workers, direct) + status |
 | `/status` | Bot health |
 | `/whoami` | Your Telegram id + the chat id (handy for the allowlist) |
 
-In any **session/coder topic**:
+In any **session/worker topic**:
 
 | Command | Effect |
 |---|---|
-| *(any message)* | Sent to that session; in a coder topic the orchestrator sees it too |
+| *(any message)* | Sent to that session; in a worker topic the orchestrator sees it too |
 | *(a photo / file / video)* | Saved to `./.tg-inbox/` and handed to the session (images also as vision) |
 | `/stop` | Interrupt the current turn |
-| `/kill` | End the session (a coder's clean worktree is removed; dirty ones kept) |
+| `/kill` | End the session (a worker's clean worktree is removed; dirty ones kept) |
 
 ## Media & agent tools
 
@@ -261,7 +279,7 @@ src/beaboss/
     engine.py            Engine — orchestrator, fleet tools, checkpoint inbox
     worktrees.py         isolated git worktrees (fail-closed teardown)
     store.py             restart-proof thread/fleet state
-    names.py             coder name pool
+    names.py             worker name pool
   transports/
     telegram.py          topics ⇄ threads, header-card identities, commands
 ```

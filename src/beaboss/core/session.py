@@ -3,7 +3,7 @@
 Ported from the original claude_session.py: same queue/worker/turn logic, but all
 output flows through a single `post(Outbound)` callback with a Speaker identity,
 and media tools are generic. A tap can observe everything the session says
-(used by the orchestrator to 'see' coder threads) and inbound turns can carry an
+(used by the orchestrator to 'see' worker threads) and inbound turns can carry an
 extra observer note (used for human interjections).
 """
 

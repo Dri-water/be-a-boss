@@ -32,7 +32,7 @@ async def _noop_busy(thread_id: str):
 def _session(tmp: Path, post=None) -> CoreSession:
     return CoreSession(
         thread_id="t1", cwd=tmp,
-        speaker=Speaker(role="coder", name="Nova", emoji="⚙️"),
+        speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
         settings=_settings(tmp), post=post or SinkPost(), busy=_noop_busy,
         on_session_id=lambda _s: None,
     )

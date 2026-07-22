@@ -41,15 +41,15 @@ def test_worktree_add_failure_is_digestible(tmp_path):
     not a raw multi-line git dump."""
     repo = _init_repo(tmp_path / "repo")
     wts = tmp_path / "wts"
-    # First worktree succeeds and checks out branch coder/nova.
+    # First worktree succeeds and checks out branch worker/nova.
     dest = asyncio.run(worktrees.create_worktree(repo, wts, "nova"))
     # Delete the directory without `git worktree remove`: git still considers
-    # branch coder/nova checked out, so both add attempts now fail.
+    # branch worker/nova checked out, so both add attempts now fail.
     shutil.rmtree(dest)
     with pytest.raises(worktrees.WorktreeError) as exc:
         asyncio.run(worktrees.create_worktree(repo, wts, "nova"))
     msg = str(exc.value)
-    assert "coder/nova" in msg  # names the offending branch
+    assert "worker/nova" in msg  # names the offending branch
     assert "retry" in msg       # points at a next step
     assert "\n" not in msg      # single, digestible line
 
