@@ -173,6 +173,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "  /new <path> [name] — classic direct session (no orchestrator)\n"
         "  /list — all threads + status\n"
         "  /status — bot health\n"
+        "  /setup — verify this group is configured right\n"
         "  /whoami — your Telegram id + this chat's id\n\n"
         "💬 In any session topic:\n"
         "  • text / photos / files → that session (images are seen as vision)\n"
@@ -193,6 +194,55 @@ async def cmd_whoami(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     lines = [f"you: id={user.id}  @{user.username or '—'}  ({status})"]
     if chat:
         lines.append(f"chat: id={chat.id}  type={chat.type}")
+    await msg.reply_text("\n".join(lines))
+
+
+async def cmd_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    # Not allowlist-gated: this is the first-time "is my group configured right?"
+    # check, so it must work before you've added yourself to the allowlist. It only
+    # reveals the current chat's own configuration.
+    chat = update.effective_chat
+    msg = update.effective_message
+    if not chat or not msg:
+        return
+    if chat.type == "private":
+        await msg.reply_text(
+            "Run /setup inside your group (not this DM) so I can check that group. "
+            "A bot can't create the group for you — Telegram only lets a person do "
+            "that — but I'll tell you exactly what to fix.")
+        return
+
+    lines = [f"Setup check for “{chat.title or chat.id}”:"]
+    ok = True
+
+    is_forum = bool(getattr(chat, "is_forum", False))
+    lines.append(("✅" if is_forum else "❌") + " Topics enabled"
+                 + ("" if is_forum else " — open group Settings and turn on Topics"))
+    ok &= is_forum
+
+    try:
+        me = await ctx.bot.get_me()
+        member = await ctx.bot.get_chat_member(chat.id, me.id)
+        is_admin = member.status == "administrator"
+        can_topics = is_admin and bool(getattr(member, "can_manage_topics", False))
+        lines.append(("✅" if is_admin else "❌") + " I'm an admin here"
+                     + ("" if is_admin else " — add me as an Admin"))
+        lines.append(("✅" if can_topics else "❌") + " I can manage topics"
+                     + ("" if can_topics else " — grant me the “Manage Topics” admin right"))
+        ok &= is_admin and can_topics
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"⚠️ couldn't read my own membership ({e})")
+        ok = False
+
+    settings: Settings = ctx.bot_data["settings"]
+    if not settings.allowed_user_ids:
+        lines.append("⚠️ Setup mode — no allowlist yet. DM me /whoami, put your id in "
+                     "TELEGRAM_ALLOWED_USER_IDS, and restart.")
+        ok = False
+
+    lines.append("")
+    lines.append("✅ All set — talk to me in the General topic to get started."
+                 if ok else "Fix the ❌ / ⚠️ items above, then run /setup again.")
     await msg.reply_text("\n".join(lines))
 
 
@@ -362,6 +412,7 @@ async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("whoami", "show your Telegram id (for setup)"),
+        BotCommand("setup", "check this group is configured right"),
         BotCommand("new", "direct session: /new <path> [name]"),
         BotCommand("list", "list all threads"),
         BotCommand("status", "bot health"),
@@ -415,6 +466,7 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
 
     app.add_handler(CommandHandler(["start", "help"], cmd_help))
     app.add_handler(CommandHandler("whoami", cmd_whoami))
+    app.add_handler(CommandHandler("setup", cmd_setup))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("status", cmd_status))

@@ -12,10 +12,10 @@
 
 <p align="center">
   <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4">
-    <img src="assets/promo.gif" width="760" alt="be-a-boss — the 35-second intro (click to watch with sound)">
+    <img src="assets/promo.gif" width="760" alt="be-a-boss — the intro (click to watch with sound)">
   </a>
 </p>
-<p align="center"><em>▶︎ <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4">Watch with sound (35s)</a></em></p>
+<p align="center"><em>▶︎ <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4">Watch with sound (43s)</a></em></p>
 
 **Run your own agent org.** You're the boss: you talk to an **orchestrator** agent,
 and it hires **worker** agents for your tasks, briefs them, and supervises — while
@@ -341,6 +341,14 @@ Adding a transport = implement `core.ports.Transport` and feed the engine
 Contributions welcome — keep session output plain text (chat entity parsing is
 fragile) and verify SDK field names against the installed `claude-agent-sdk`.
 See **[docs/architecture.md](docs/architecture.md)**.
+
+## Credits
+
+The promo video uses only free, license-clean assets:
+
+- **Music:** *Local Forecast – Elevator* by Kevin MacLeod ([incompetech.com](https://incompetech.com/)) — licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- **Stock photography:** CC0 / public domain, sourced via [Openverse](https://openverse.org/) (StockSnap, rawpixel).
+- **Voiceover:** synthesized locally with [Chatterbox](https://github.com/resemble-ai/chatterbox); no cloud TTS.
 
 ## License
 
