@@ -22,9 +22,10 @@ A surface adapter does three things:
 That's the whole contract. The core never formats platform text; the adapter never
 holds session state. A new surface is a new adapter and **zero core changes**.
 
-- **Supported:** Telegram.
-- **Next:** a WebSocket surface (which a web app and a VS Code extension both speak
-  to, so they share one client), then Slack.
+- **Supported:** Telegram; a **WebSocket** surface that a **web app** (`python -m
+  beaboss.web`) and a **VS Code extension** (`vscode/`) both speak to — sharing one
+  `BeabossClient`, so there's no duplicated protocol code.
+- **Next:** Slack.
 
 ## Seam 2 — the agent backend
 
@@ -37,9 +38,9 @@ way to resume it later. Claude Code is one such backend; Codex is another. The
 orchestrator, supervision, and isolation don't change when you swap it — a worker is
 a worker.
 
-- **Supported:** Claude Code.
-- **Next:** Codex. (This seam is being factored out of the worker session now; until
-  it lands, the backend is Claude Code directly.)
+- **Supported:** Claude Code (default) and **Codex** (`BEABOSS_BACKEND=codex`).
+  Codex runs via its `codex exec` CLI, translated into the same event vocabulary —
+  the orchestrator, supervision, and isolation don't change.
 
 ## The rule that keeps this honest
 

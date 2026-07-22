@@ -23,11 +23,11 @@ the core knows which one it's talking to.
 
 | | Supported now | Next |
 |---|---|---|
-| **Surface** — how you drive it | Telegram | Web / VS Code · Slack |
-| **Agent backend** — what workers run | Claude Code | Codex |
+| **Surface** — how you drive it | Telegram · **Web** (`python -m beaboss.web`) · **VS Code** (`vscode/`) | Slack |
+| **Agent backend** — what workers run | Claude Code · **Codex** (`BEABOSS_BACKEND=codex`) | — |
 
-The guide below uses the Telegram + Claude Code combo (today's supported pair);
-swapping either is an adapter, not a rewrite.
+The guide below uses the Telegram + Claude Code combo; swapping either is an
+adapter, not a rewrite — that's the whole point of the core.
 
 ## The model
 
