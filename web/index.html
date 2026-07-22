@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>beaboss — web</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; height: 100vh; display: grid;
+      grid-template-columns: 260px 1fr;
+      font: 15px/1.45 system-ui, sans-serif;
+    }
+    aside { border-right: 1px solid #8883; display: flex; flex-direction: column; }
+    aside h1 { font-size: 14px; margin: 0; padding: 12px; opacity: .7; }
+    #threads { flex: 1; overflow-y: auto; }
+    .thread {
+      padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #8882;
+    }
+    .thread.active { background: #8883; }
+    .thread.closed { opacity: .5; }
+    main { display: flex; flex-direction: column; min-width: 0; }
+    #log { flex: 1; overflow-y: auto; padding: 16px; }
+    .msg { margin-bottom: 14px; max-width: 720px; }
+    .speaker { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+    .role-orchestrator .speaker { color: #6b8afd; }
+    .role-worker .speaker { color: #b57bde; }
+    .role-system .speaker { color: #888; font-style: italic; }
+    .text { white-space: pre-wrap; word-wrap: break-word; }
+    form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #8883; }
+    #box { flex: 1; padding: 9px 12px; border: 1px solid #8886; border-radius: 8px;
+           background: transparent; color: inherit; font: inherit; }
+    button { padding: 9px 16px; border: 0; border-radius: 8px; cursor: pointer;
+             background: #6b8afd; color: #fff; font: inherit; }
+    button:disabled { opacity: .5; cursor: default; }
+    #status { padding: 8px 12px; font-size: 12px; opacity: .7; }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>THREADS</h1>
+    <div id="threads"></div>
+    <div id="status">connecting…</div>
+  </aside>
+  <main>
+    <div id="log"></div>
+    <form id="send">
+      <input id="box" placeholder="Message…" autocomplete="off" disabled>
+      <button id="submit" disabled>Send</button>
+    </form>
+  </main>
+  <script src="client.js"></script>
+  <script>
+    // Default to the same host the page is served from, else the dev default.
+    const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") +
+      (location.host || "127.0.0.1:8765");
+    beaboss.connect(wsUrl);
+  </script>
+</body>
+</html>
