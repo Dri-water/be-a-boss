@@ -109,6 +109,9 @@ class Engine:
         self.sessions: dict[str, CoreSession] = {}
         self._inbox: list[str] = []          # pending notes for the orchestrator
         self._waking = False                 # digest wake in flight
+        # The thread that is the orchestrator's "office". Transports may override;
+        # the Telegram adapter's General topic maps to "general".
+        self.main_thread = "general"
 
     # ---- wiring ----------------------------------------------------------
 
@@ -138,11 +141,10 @@ class Engine:
     async def on_inbound(self, msg: InboundMessage) -> None:
         rec = self.store.get(msg.thread_id)
 
-        if rec is None and msg.thread_id == (self.store.orchestrator_thread or msg.thread_id):
+        if rec is None and msg.thread_id == self.main_thread:
             # First contact in the office thread: bring the orchestrator to life.
-            if self.store.orchestrator_thread in (None, msg.thread_id):
-                await self._ensure_orchestrator(msg.thread_id)
-                rec = self.store.get(msg.thread_id)
+            await self._ensure_orchestrator(msg.thread_id)
+            rec = self.store.get(msg.thread_id)
 
         if rec is None:
             await self._post(Outbound(
@@ -294,12 +296,16 @@ class Engine:
             return
         self._waking = True
         try:
-            await asyncio.sleep(self.WAKE_COALESCE_SECS)
-            notes, self._inbox = self._inbox, []
-            if not notes:
-                return
-            digest = "[fleet inbox]\n" + "\n".join(f"- {n}" for n in notes)
-            await session.submit(digest)
+            # Loop-drain: a coder finishing while we're mid-digest appends to
+            # _inbox; the while-check re-runs with no await between it and the
+            # `finally` below, so no completion note can be stranded.
+            while self._inbox:
+                await asyncio.sleep(self.WAKE_COALESCE_SECS)
+                notes, self._inbox = self._inbox, []
+                if not notes:
+                    break
+                digest = "[fleet inbox]\n" + "\n".join(f"- {n}" for n in notes)
+                await session.submit(digest)
         finally:
             self._waking = False
 

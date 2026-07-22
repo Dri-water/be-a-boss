@@ -80,6 +80,16 @@ def test_unknown_thread_gets_system_hint(tmp_path):
     assert len(t.posts) == 1 and t.posts[0].speaker.role == "system"
 
 
+def test_first_message_only_bootstraps_office_in_main_thread(tmp_path):
+    """A first message to a random (non-main) thread must NOT claim the
+    orchestrator's office — only the main thread does."""
+    engine, t = _engine(tmp_path)
+    assert engine.store.orchestrator_thread is None
+    asyncio.run(engine.on_inbound(InboundMessage(thread_id="777", text="hi")))
+    assert engine.store.orchestrator_thread is None  # office not claimed
+    assert t.posts and t.posts[-1].speaker.role == "system"  # got the hint
+
+
 def test_interjection_reaches_coder_and_inbox(tmp_path):
     engine, t = _engine(tmp_path)
     engine.store.put("55", ThreadRecord(
@@ -112,6 +122,38 @@ def test_orchestrator_wake_digest_drains_inbox(tmp_path):
     digest = fake.submitted[0]
     assert digest.startswith("[fleet inbox]")
     assert "nova finished" in digest and "kite blocked" in digest
+    assert engine._inbox == []
+
+
+def test_wake_drains_notes_arriving_during_digest(tmp_path):
+    """Regression: a coder finishing while the orchestrator is mid-digest must not
+    be stranded — the wake loop must pick up the late note and deliver it too."""
+    engine, t = _engine(tmp_path)
+    engine.store.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))
+    engine.store.set_orchestrator_thread("general")
+
+    class LateNoteSession:
+        def __init__(self):
+            self.digests = []
+            self.status = "idle"
+            self.pending = 0
+
+        async def submit(self, text):
+            self.digests.append(text)
+            if len(self.digests) == 1:  # a coder finishes "during" the first digest
+                engine._note("coder kite finished late")
+
+        async def stop(self):
+            pass
+
+    fake = LateNoteSession()
+    engine.sessions["general"] = fake
+
+    engine._note("coder nova finished")
+    asyncio.run(engine._wake_orchestrator())
+
+    assert len(fake.digests) == 2, fake.digests
+    assert "nova" in fake.digests[0] and "kite" in fake.digests[1]
     assert engine._inbox == []
 
 
