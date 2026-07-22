@@ -30,7 +30,7 @@ from ..core.ports import InboundMessage, MediaIn, Outbound, SYSTEM
 from ..core.store import CoreStore
 from ..rendering import chunk
 
-log = logging.getLogger("tasm.transport.telegram")
+log = logging.getLogger("beaboss.transport.telegram")
 
 GENERAL = "general"
 

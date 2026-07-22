@@ -1,4 +1,4 @@
-# telegram-agentic-session-manager
+# be-a-boss
 
 Run **your own agent org from Telegram.** Talk to an **orchestrator** agent in
 your group's General topic; it hires **coder** agents for your tasks, briefs
@@ -135,7 +135,7 @@ Fill in at minimum:
 | `TELEGRAM_ALLOWED_USER_IDS` | ✅ | Comma-separated user IDs allowed to command the bot |
 | `HOST_DOCUMENTS` | ✅ (Docker) | Host path to your projects, mounted as `/workspace` |
 | `HOST_CLAUDE_DIR` | ✅ (Docker) | Host path to your `~/.claude`, mounted for auth |
-| `BOT_NAME` | – | Display persona (default `Session Manager`) |
+| `BOT_NAME` | – | Display persona (default `Orchestrator`) |
 | `TELEGRAM_CHAT_ID` | – | Pin the bot to one group (logged on first run) |
 | `CLAUDE_MODEL`, `CLAUDE_MAX_TURNS` | – | Session tuning |
 
@@ -158,7 +158,7 @@ It auto-restarts on crash or host reboot. Compose mounts `HOST_DOCUMENTS` →
 
 ```bash
 uv sync
-uv run tasm
+uv run boss
 ```
 
 ### 4. Use it
@@ -245,13 +245,13 @@ Sessions can only touch what you mount (`/workspace`), not the rest of your host
 
 ```bash
 uv sync
-uv run tasm            # run
+uv run boss            # run
 ```
 
 Layout (core is transport-agnostic; adapters live in `transports/`):
 
 ```
-src/tasm/
+src/beaboss/
   __main__.py            entrypoint (config → engine → telegram → poll)
   config.py              env-backed settings
   rendering.py           SDK message → text (pure, testable)

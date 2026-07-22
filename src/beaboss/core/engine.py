@@ -5,7 +5,7 @@ Threads and roles:
 - coder threads: a visible pair — the orchestrator drives a coder session, and
   everything both say is posted to the thread. The human may interject; the
   message reaches the coder as input and the orchestrator via its inbox.
-- direct threads: the original tasm model (human <-> session), unchanged.
+- direct threads: the original beaboss model (human <-> session), unchanged.
 
 Supervision is checkpoint-based: coder turn-ends and human interjections land in
 an inbox; each coder turn-end wakes the orchestrator with the accumulated digest.
@@ -26,7 +26,7 @@ from .session import CoreSession
 from .store import CoreStore, ThreadRecord
 from . import worktrees
 
-log = logging.getLogger("tasm.core.engine")
+log = logging.getLogger("beaboss.core.engine")
 
 ORCHESTRATOR_EMOJI = "🧭"
 CODER_EMOJI = "⚙️"

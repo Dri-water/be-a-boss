@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from claude_agent_sdk import TextBlock, ThinkingBlock, ToolUseBlock
 
-from tasm import rendering
+from beaboss import rendering
 
 
 def A(*blocks):

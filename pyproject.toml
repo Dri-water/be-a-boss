@@ -1,7 +1,7 @@
 [project]
-name = "telegram-agentic-session-manager"
+name = "be-a-boss"
 version = "0.1.0"
-description = "Telegram bot that manages parallel Claude Code sessions — one live session per forum topic."
+description = "Run your own agent org over chat: an orchestrator hires and supervises coder agents, each a visible, joinable thread. Self-hosted, Claude Code."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,14 +11,14 @@ dependencies = [
 ]
 
 [project.scripts]
-tasm = "tasm.__main__:main"
+boss = "beaboss.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tasm"]
+packages = ["src/beaboss"]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

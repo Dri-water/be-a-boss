@@ -1,4 +1,4 @@
-from tasm.core.store import CoreStore, ThreadRecord
+from beaboss.core.store import CoreStore, ThreadRecord
 
 
 def test_roundtrip_and_reload(tmp_path):

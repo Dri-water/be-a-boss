@@ -65,7 +65,7 @@ core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrat
 ```
 uv sync
 cp .env.example .env   # fill TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_USER_IDS
-uv run tasm
+uv run boss
 ```
 
 ## Conventions

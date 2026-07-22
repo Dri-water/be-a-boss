@@ -29,7 +29,7 @@ from claude_agent_sdk import (
 from .. import rendering
 from .ports import MediaIn, Outbound, Speaker
 
-log = logging.getLogger("tasm.core.session")
+log = logging.getLogger("beaboss.core.session")
 
 SETTING_SOURCES = ["project", "local"]
 INBOX_DIRNAME = ".tg-inbox"

@@ -1,6 +1,6 @@
 import pytest
 
-from tasm.config import Settings
+from beaboss.config import Settings
 
 _KEYS = [
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_CHAT_ID", "BOT_NAME",
@@ -34,7 +34,7 @@ def test_defaults_and_allowlist_parsing(clean_env, monkeypatch):
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", " 1, 2 ,3, ")
     s = Settings.from_env(clean_env)
     assert s.allowed_user_ids == {1, 2, 3}
-    assert s.bot_name == "Session Manager"
+    assert s.bot_name == "Orchestrator"
     assert s.permission_mode == "bypassPermissions"
     assert s.session_system_append is None
     assert s.chat_id is None

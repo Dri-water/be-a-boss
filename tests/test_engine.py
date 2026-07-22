@@ -1,10 +1,10 @@
 import asyncio
 from pathlib import Path
 
-from tasm.config import Settings
-from tasm.core.engine import Engine
-from tasm.core.ports import InboundMessage, Outbound
-from tasm.core.store import CoreStore, ThreadRecord
+from beaboss.config import Settings
+from beaboss.core.engine import Engine
+from beaboss.core.ports import InboundMessage, Outbound
+from beaboss.core.store import CoreStore, ThreadRecord
 
 
 def _settings(tmp: Path) -> Settings:

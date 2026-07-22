@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from tasm.config import Settings
-from tasm.core.ports import MediaIn, Outbound, Speaker
-from tasm.core.session import CoreSession, Turn
+from beaboss.config import Settings
+from beaboss.core.ports import MediaIn, Outbound, Speaker
+from beaboss.core.session import CoreSession, Turn
 
 
 def _settings(tmp: Path) -> Settings:

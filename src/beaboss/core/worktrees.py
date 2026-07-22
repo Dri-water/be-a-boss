@@ -11,7 +11,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-log = logging.getLogger("tasm.core.worktrees")
+log = logging.getLogger("beaboss.core.worktrees")
 
 GIT_TIMEOUT = 60  # seconds per git command
 

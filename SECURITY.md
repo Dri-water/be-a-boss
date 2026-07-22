@@ -42,7 +42,7 @@ on it:
 
 ```bash
 # list loose files at the mount root — move anything sensitive out of it
-docker compose exec tasm sh -c "find /workspace -maxdepth 1 -type f"
+docker compose exec be-a-boss sh -c "find /workspace -maxdepth 1 -type f"
 ```
 
 - Move recovery keys, `*.pem`, exported secrets, financial docs, etc. out of the
@@ -50,7 +50,7 @@ docker compose exec tasm sh -c "find /workspace -maxdepth 1 -type f"
 - OS "library" junctions (Windows `My Pictures`/`My Videos`/`My Music`) typically
   appear as symlinks to paths *outside* the mount — they dangle at the container
   boundary and are not reachable. Verify:
-  `docker compose exec tasm ls '/workspace/My Pictures'`.
+  `docker compose exec be-a-boss ls '/workspace/My Pictures'`.
 - When in doubt, mount a dedicated code directory rather than your whole home.
 
 ## Publishing this code safely

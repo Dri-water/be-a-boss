@@ -46,4 +46,4 @@ ENV PATH="/opt/venv/bin:${PATH}"
 
 # tini reaps zombies + forwards SIGTERM so the bot shuts sessions down cleanly.
 ENTRYPOINT ["tini", "--"]
-CMD ["tasm"]
+CMD ["boss"]

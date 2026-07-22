@@ -1,10 +1,10 @@
-# Always-on session manager. `docker compose up -d --build` to start; it
+# Always-on be-a-boss. `docker compose up -d --build` to start; it
 # auto-restarts on crash or host reboot (restart: unless-stopped).
 services:
-  tasm:
+  be-a-boss:
     build: .
-    image: tasm
-    container_name: tasm
+    image: be-a-boss
+    container_name: be-a-boss
     restart: unless-stopped
     env_file: .env
     environment:
