@@ -71,6 +71,7 @@
   function connect(url) {
     const client = new BeabossClient(url).connect();
     let active = null;
+    const busyThreads = new Set();   // threads whose agent is mid-turn
 
     const status = $("status");
     const box = $("box");
@@ -92,7 +93,15 @@
       renderThreads();
       renderLog();
     });
+    // "working…" indicator: instant confirmation the message landed, even before
+    // the first reply. Set when the agent's turn starts (or when you hit send),
+    // cleared when output arrives.
+    client.on("busy", (threadId) => {
+      busyThreads.add(threadId);
+      if (threadId === active) renderLog();
+    });
     client.on("message", (threadId) => {
+      busyThreads.delete(threadId);
       if (threadId === active) renderLog();
     });
 
@@ -125,6 +134,15 @@
         wrap.append(head, body);
         log.appendChild(wrap);
       }
+      if (busyThreads.has(active)) {
+        const w = document.createElement("div");
+        w.className = "msg role-system busy";
+        const b = document.createElement("div");
+        b.className = "text";
+        b.textContent = "⚙️ working…";
+        w.appendChild(b);
+        log.appendChild(w);
+      }
       log.scrollTop = log.scrollHeight;
     }
 
@@ -136,6 +154,7 @@
       // The server doesn't echo your own message back — show it locally so your
       // side of the conversation is visible, not just the agents' replies.
       client.addLocalMessage(active, { role: "you", name: "You" }, text);
+      busyThreads.add(active);   // instant "working…" until the reply lands
       box.value = "";
       renderLog();
     });

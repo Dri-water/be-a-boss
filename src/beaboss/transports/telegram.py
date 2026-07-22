@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
@@ -378,6 +378,14 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     if not msg:
         return
+
+    # Instant "received" acknowledgement: an agent turn can take a while before its
+    # first reply, so react the moment the message lands — you're never left
+    # wondering whether it got through. Best-effort; never blocks the message.
+    try:
+        await msg.set_reaction(ReactionTypeEmoji(emoji="👀"))
+    except Exception:  # noqa: BLE001
+        pass
 
     media: list[MediaIn] = []
     if (msg.photo or msg.document or msg.video or msg.animation or msg.audio
