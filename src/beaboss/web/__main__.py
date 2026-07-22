@@ -31,6 +31,19 @@ def main() -> None:
     host = os.getenv("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.getenv("WEB_PORT", "8765").strip() or "8765")
 
+    # Safe by default: the web surface has no client auth yet, so refuse a public
+    # bind unless the operator explicitly accepts the risk (e.g. behind their own
+    # auth/proxy). Localhost is fine for dev, SSH tunnels, and the VS Code extension.
+    local = {"127.0.0.1", "localhost", "::1", ""}
+    if host not in local and os.getenv("WEB_ALLOW_INSECURE_BIND") != "1":
+        raise SystemExit(
+            f"Refusing to bind the web surface to {host!r}: it has no client "
+            "authentication yet, so a public bind would let anyone drive your "
+            "agents. Bind to 127.0.0.1 (the default) and reach it via an SSH "
+            "tunnel or the VS Code extension. If you front it with your own "
+            "auth/proxy, set WEB_ALLOW_INSECURE_BIND=1 to override."
+        )
+
     try:
         asyncio.run(serve_forever(engine, transport, host, port))
     except KeyboardInterrupt:
