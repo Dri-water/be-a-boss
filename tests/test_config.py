@@ -1,6 +1,8 @@
 import pytest
 
 from beaboss.config import Settings
+from beaboss.core.store import CoreStore
+from beaboss.transports.telegram import build_application
 
 _KEYS = [
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_CHAT_ID", "BOT_NAME",
@@ -17,16 +19,32 @@ def clean_env(monkeypatch, tmp_path):
     return tmp_path / "nonexistent.env"
 
 
-def test_missing_token_exits(clean_env, monkeypatch):
+def test_from_env_is_transport_neutral(clean_env):
+    # The config layer no longer forces Telegram creds: with neither a token nor an
+    # allowlist, from_env still succeeds so the web surface can boot from it.
+    s = Settings.from_env(clean_env)
+    assert s.bot_token is None
+    assert s.allowed_user_ids == set()
+
+
+def test_telegram_surface_requires_token(clean_env, monkeypatch, tmp_path):
+    # Enforcement moved to the surface: the Telegram app refuses to build tokenless.
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
-    with pytest.raises(SystemExit):
-        Settings.from_env(clean_env)
+    s = Settings.from_env(clean_env)
+    with pytest.raises(SystemExit) as excinfo:
+        build_application(s, CoreStore(tmp_path / "state"))
+    assert "TELEGRAM_BOT_TOKEN" in str(excinfo.value)
 
 
-def test_empty_allowlist_exits(clean_env, monkeypatch):
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
-    with pytest.raises(SystemExit):
-        Settings.from_env(clean_env)
+def test_telegram_empty_allowlist_is_setup_mode(clean_env, monkeypatch, tmp_path, caplog):
+    # An empty allowlist is not fatal — the bot starts in setup mode (only /whoami)
+    # so the operator can bootstrap their id without a third-party bot.
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    s = Settings.from_env(clean_env)
+    with caplog.at_level("WARNING"):
+        app = build_application(s, CoreStore(tmp_path / "state"))
+    assert app is not None
+    assert "SETUP MODE" in caplog.text
 
 
 def test_defaults_and_allowlist_parsing(clean_env, monkeypatch):
@@ -41,12 +59,12 @@ def test_defaults_and_allowlist_parsing(clean_env, monkeypatch):
     assert s.max_turns is None
 
 
-def test_blank_token_exits(clean_env, monkeypatch):
+def test_blank_token_normalizes_to_none(clean_env, monkeypatch):
+    # Whitespace-only token is treated as absent (None), not a real token.
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "   ")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_IDS", "1")
-    with pytest.raises(SystemExit) as excinfo:
-        Settings.from_env(clean_env)
-    assert "TELEGRAM_BOT_TOKEN" in str(excinfo.value)
+    s = Settings.from_env(clean_env)
+    assert s.bot_token is None
 
 
 def test_malformed_allowlist_exits(clean_env, monkeypatch):

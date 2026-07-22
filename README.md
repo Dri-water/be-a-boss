@@ -10,6 +10,13 @@
   <a href="docs/architecture.md">Architecture</a>
 </p>
 
+<p align="center">
+  <video src="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4" poster="assets/promo-poster.png" width="720" controls muted playsinline>
+    <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4"><img src="assets/promo-poster.png" width="720" alt="be-a-boss — watch the 35-second intro"></a>
+  </video>
+</p>
+<p align="center"><em>▶︎ <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4">Watch the 35-second intro</a></em></p>
+
 **Run your own agent org.** You're the boss: you talk to an **orchestrator** agent,
 and it hires **worker** agents for your tasks, briefs them, and supervises — while
 you watch every agent-to-agent conversation and can step into any of them. Each
@@ -26,8 +33,18 @@ the core knows which one it's talking to.
 | **Surface** — how you drive it | Telegram · **Web** (`python -m beaboss.web`) · **VS Code** (`vscode/`) | Slack |
 | **Agent backend** — what workers run | Claude Code · **Codex** (`BEABOSS_BACKEND=codex`) | — |
 
-The guide below uses the Telegram + Claude Code combo; swapping either is an
-adapter, not a rewrite — that's the whole point of the core.
+The quickstart below covers **both** surfaces; the orchestrator + workers
+underneath are identical either way — swapping a surface or backend is an adapter,
+not a rewrite. That's the whole point of the core.
+
+<p align="center">
+  <img src="assets/screenshot-web.png" width="90%" alt="be-a-boss web app: the orchestrator delegates the login-500 fix to worker Nova and a dep audit to worker Kite; you watch and steer">
+</p>
+<p align="center"><em>The web app (<code>python -m beaboss.web</code>): give the orchestrator a goal, watch it hire and brief workers, and steer any of them. The <strong>same UI</strong> runs as a VS Code panel — one shared client, in the editor's theme:</em></p>
+
+<p align="center">
+  <img src="assets/screenshot-vscode.png" width="78%" alt="the same be-a-boss chat UI running as a VS Code webview panel in the editor's dark theme">
+</p>
 
 ## The model
 
@@ -78,8 +95,8 @@ sender per message.
   **batteries-included image** (node/python/git/ffmpeg/chromium; agents can
   install more).
 - **Transport-agnostic core** — the engine (`core/`) speaks in `Speaker`/`Event`
-  abstractions; Telegram is one adapter in `transports/`. Slack/VSCode = new
-  adapters, zero core changes.
+  abstractions; Telegram and a WebSocket surface (web app + VS Code) are adapters in
+  `transports/`. Slack is the next adapter — zero core changes.
 
 ## How it works
 
@@ -130,64 +147,90 @@ for the full design and [AGENTS.md](AGENTS.md) for internals.
 
 ## Quickstart
 
-### 1. Create and configure the bot
+**Pick a surface** — the orchestrator + workers underneath are identical on each:
 
-1. **Create the bot:** [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
-2. **Create a supergroup**, open its settings → enable **Topics**.
-3. **Add the bot as an Admin** with **Manage Topics** permission. (Admins receive
-   all messages, so you do *not* need to touch BotFather's privacy mode.)
-4. **Get your numeric user ID** from [@userinfobot](https://t.me/userinfobot) — or
-   start the bot and DM it `/whoami`.
+- **Web / VS Code** — fastest to try: no accounts, nothing to register, runs on
+  your box. **Start here** if you just want to see it work.
+- **Telegram** — an always-on bot you reach from your phone; its group topics
+  become your agent threads. A few minutes of one-time setup.
 
-### 2. Configure
+### Prerequisites (both surfaces)
+
+- **A [Claude Code](https://code.claude.com/docs/en/agent-sdk/overview) login** —
+  workers run real agent sessions as you. (Prefer Codex? Set `BEABOSS_BACKEND=codex`.)
+- **Python ≥ 3.11 + [uv](https://docs.astral.sh/uv/)** for local runs, **or Docker**
+  for the always-on Telegram bot.
 
 ```bash
-cp .env.example .env
+git clone https://github.com/Dri-water/be-a-boss.git
+cd be-a-boss && uv sync
 ```
 
-Fill in at minimum:
+### Option A — Web / VS Code (no Telegram)
 
-| Variable | Required | Meaning |
+Start the server (binds to localhost only), then open a UI against it:
+
+```bash
+uv run python -m beaboss.web        # serves ws://127.0.0.1:8765
+```
+
+- **Browser** — open `web/index.html`; it connects to the server and drops you in
+  the orchestrator's thread. Type a goal.
+- **VS Code** — install the extension in `vscode/` (or the packaged `.vsix` from
+  [Releases](https://github.com/Dri-water/be-a-boss/releases)) and run
+  **"be-a-boss: Open"**. Set `beaboss.wsUrl` if you changed the host/port.
+
+No token or allowlist here — the security boundary is the **localhost bind** (reach
+a remote box over an SSH tunnel). A public bind is refused unless you set
+`WEB_ALLOW_INSECURE_BIND=1` and front it with your own auth. Set `PROJECTS_ROOT` if
+you want bare project names to resolve somewhere other than your home dir.
+
+### Option B — Telegram (always-on bot)
+
+1. **Create the bot:** [@BotFather](https://t.me/BotFather) → `/newbot` → copy the
+   token. **Add it as an Admin** (with **Manage Topics**) of a **supergroup that has
+   Topics enabled**. (Admins receive all messages — no need to touch privacy mode.)
+2. **Configure:** `cp .env.example .env`, set `TELEGRAM_BOT_TOKEN` and (for Docker)
+   `HOST_DOCUMENTS` + `HOST_CLAUDE_DIR`. Leave `TELEGRAM_ALLOWED_USER_IDS` **blank**
+   for now.
+3. **Run it** — with no allowlist yet, it starts in **setup mode** (only `/whoami`
+   works, everything else is ignored):
+
+   ```bash
+   docker compose up -d --build     # always-on, auto-restarts;  or, for dev:  uv run boss
+   ```
+
+4. **DM the bot `/whoami`.** It replies with your numeric id — this works *before*
+   you're allowlisted, which is the whole point of setup mode. Put that id in
+   `TELEGRAM_ALLOWED_USER_IDS`, restart, and you're the boss. No third-party bot needed.
+
+| Variable | Needed | Meaning |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | ✅ | BotFather token |
-| `TELEGRAM_ALLOWED_USER_IDS` | ✅ | Comma-separated user IDs allowed to command the bot |
+| `TELEGRAM_ALLOWED_USER_IDS` | after setup | Ids allowed to command the bot (blank ⇒ setup mode) |
 | `HOST_DOCUMENTS` | ✅ (Docker) | Host path to your projects, mounted as `/workspace` |
 | `HOST_CLAUDE_DIR` | ✅ (Docker) | Host path to your `~/.claude`, mounted for auth |
 | `BOT_NAME` | – | Display persona (default `Orchestrator`) |
 | `TELEGRAM_CHAT_ID` | – | Pin the bot to one group (logged on first run) |
 | `CLAUDE_MODEL`, `CLAUDE_MAX_TURNS` | – | Session tuning |
 
-Use forward slashes in paths on all platforms (Windows: `C:/Users/You/Documents`).
+Docker mounts `HOST_DOCUMENTS` → `/workspace` and sets `PROJECTS_ROOT=/workspace`,
+so `/new myapp` targets `/workspace/myapp`. Use forward slashes on all platforms
+(Windows: `C:/Users/You/Documents`).
 
-### 3. Run
+### Use it
 
-**Docker (always-on, recommended):**
-
-```bash
-docker compose up -d --build
-docker compose logs -f          # watch it come online
-```
-
-It auto-restarts on crash or host reboot. Compose mounts `HOST_DOCUMENTS` →
-`/workspace` and sets `PROJECTS_ROOT=/workspace`, so `/new myapp` targets
-`/workspace/myapp`.
-
-**Local (dev):**
-
-```bash
-uv sync
-uv run boss
-```
-
-### 4. Use it
-
-**Just talk to the orchestrator in General** — plain language, no command:
+**Talk to the orchestrator** — in Telegram's **General** topic, or the first thread
+of the web/VS Code UI — plain language, no command:
 
 > *"In myapp, reproduce the /login 500 and patch it. Separately, audit the deps in
 > docs-site for anything unmaintained."*
 
-It hires workers (one per task), opens a topic for each, briefs them, and reports
-back. Open a worker's topic to watch the work; type there to steer.
+It hires workers (one per task), opens a thread for each, briefs them, and reports
+back. Open a worker's thread to watch the work; type there to steer.
+
+Slash-commands below are the **Telegram** surface's; the web/VS Code UI drives the
+same core with just the thread list + message box.
 
 Commands in **General**:
 
@@ -244,10 +287,13 @@ Sessions authenticate as your Claude account. Two options:
 
 ## Security
 
-**Please read [SECURITY.md](SECURITY.md).** In short: the **allowlist** and the
-**container boundary** are what keep `bypassPermissions` safe. The bot ignores
-anyone not in `TELEGRAM_ALLOWED_USER_IDS` and refuses to start with an empty list.
-Sessions can only touch what you mount (`/workspace`), not the rest of your host.
+**Please read [SECURITY.md](SECURITY.md).** In short, what keeps `bypassPermissions`
+safe is the **boundary around each surface** plus the **container**. The Telegram bot
+ignores anyone not in `TELEGRAM_ALLOWED_USER_IDS`; with an empty allowlist it runs in
+**setup mode** — only `/whoami` works, everything else is refused — so it is never
+open-to-all. The web/VS Code surface binds to **localhost** and refuses a public bind
+unless you explicitly opt in (`WEB_ALLOW_INSECURE_BIND=1`). Either way, sessions can
+only touch what you mount (`/workspace`), not the rest of your host.
 
 ## Caveats
 
@@ -270,18 +316,23 @@ Layout (core is transport-agnostic; adapters live in `transports/`):
 
 ```
 src/beaboss/
-  __main__.py            entrypoint (config → engine → telegram → poll)
-  config.py              env-backed settings
+  __main__.py            Telegram entrypoint (config → engine → telegram → poll)
+  config.py              env-backed settings (transport-neutral)
   rendering.py           SDK message → text (pure, testable)
   core/
     ports.py             Transport / Speaker / Outbound / Inbound contracts
-    session.py           CoreSession — one Claude session, posts via a callback
+    session.py           CoreSession — one agent session, posts via a callback
+    agent_backend.py     backend seam: Claude Code (default) | Codex
     engine.py            Engine — orchestrator, fleet tools, checkpoint inbox
     worktrees.py         isolated git worktrees (fail-closed teardown)
     store.py             restart-proof thread/fleet state
     names.py             worker name pool
   transports/
     telegram.py          topics ⇄ threads, header-card identities, commands
+    websocket.py         browser/editor surface — web app + VS Code share it
+  web/__main__.py        `python -m beaboss.web` — serve the WebSocket surface
+web/                     static web app (index.html + client.js)
+vscode/                  VS Code extension (build copies in web/client.js)
 ```
 
 Adding a transport = implement `core.ports.Transport` and feed the engine

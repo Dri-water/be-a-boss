@@ -1,3 +1,5 @@
 node_modules/
 dist/
 *.vsix
+# Generated at build time from ../web/client.js (single source of truth).
+media/client.js

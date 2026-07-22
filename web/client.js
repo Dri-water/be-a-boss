@@ -35,6 +35,14 @@
       }
     }
 
+    // Append a message to a thread locally. Used for your own outgoing message,
+    // which the server does not echo back — pure state, no socket involved.
+    addLocalMessage(threadId, speaker, text) {
+      const list = this.messages.get(threadId) || [];
+      list.push({ speaker, text });
+      this.messages.set(threadId, list);
+    }
+
     _upsertThread(t) { this.threads.set(t.id, t); }
 
     _recv(msg) {
@@ -125,7 +133,11 @@
       const text = box.value.trim();
       if (!text || active === null) return;
       client.send(active, text);
+      // The server doesn't echo your own message back — show it locally so your
+      // side of the conversation is visible, not just the agents' replies.
+      client.addLocalMessage(active, { role: "you", name: "You" }, text);
       box.value = "";
+      renderLog();
     });
   }
 

@@ -380,6 +380,23 @@ async def _post_shutdown(app: Application) -> None:
 
 
 def build_application(settings: Settings, store: CoreStore) -> Application:
+    if not settings.bot_token:
+        raise SystemExit(
+            "TELEGRAM_BOT_TOKEN is required to run the Telegram surface. Copy "
+            ".env.example to .env and set it (get a token from @BotFather). "
+            "To drive be-a-boss from the browser or VS Code instead — no Telegram "
+            "token needed — run `python -m beaboss.web`."
+        )
+    if not settings.allowed_user_ids:
+        # Empty allowlist is not fatal: _ok() already refuses everyone, so the bot
+        # is fail-closed. Start in setup mode so the operator can bootstrap their id
+        # via /whoami (which is deliberately not allowlist-gated) instead of needing
+        # a third-party bot to discover it.
+        log.warning(
+            "No users allowlisted (TELEGRAM_ALLOWED_USER_IDS is empty) — running in "
+            "SETUP MODE: every command except /whoami is ignored. DM the bot /whoami "
+            "to get your numeric id, add it to TELEGRAM_ALLOWED_USER_IDS, and restart."
+        )
     app = (
         ApplicationBuilder()
         .token(settings.bot_token)

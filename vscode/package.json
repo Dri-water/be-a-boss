@@ -3,8 +3,13 @@
   "displayName": "be-a-boss",
   "description": "The be-a-boss agentic chat UI, inside VS Code.",
   "version": "0.1.0",
-  "publisher": "your-publisher-name",
+  "publisher": "dri-water",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dri-water/be-a-boss.git",
+    "directory": "vscode"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },

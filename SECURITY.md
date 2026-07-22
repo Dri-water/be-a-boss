@@ -9,9 +9,12 @@ runs it. Read this before deploying.
 **What protects you:**
 
 1. **User allowlist.** `TELEGRAM_ALLOWED_USER_IDS` is enforced on every update; the
-   bot silently ignores anyone not listed. It refuses to start if the list is empty.
-   This is the primary access control — keep it tight. Anyone can *find* a public
-   bot, but only allowlisted user IDs can drive it.
+   bot silently ignores anyone not listed. With an empty allowlist it starts in
+   **setup mode** — every command except `/whoami` is refused, so it is never
+   open-to-all — letting you learn your id (`/whoami`) and lock it down before
+   granting access. This is the primary access control — keep it tight. Anyone can
+   *find* a public bot, but only allowlisted user IDs can drive it. (The web/VS Code
+   surface has no allowlist; its boundary is a localhost-only bind — see README.)
 2. **The container boundary.** Running in Docker (see README) is what makes
    `bypassPermissions` reasonable. Sessions can only touch what you mount — your
    projects at `/workspace` — not the rest of the host (SSH keys, credential

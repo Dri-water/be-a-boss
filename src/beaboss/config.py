@@ -23,7 +23,7 @@ def _parse_ids(raw: str) -> set[int]:
             raise SystemExit(
                 f"TELEGRAM_ALLOWED_USER_IDS contains an invalid entry: {part!r}. "
                 "It must be a comma-separated list of numeric Telegram user ids, "
-                "e.g. 123456789,987654321 (get your id from @userinfobot)."
+                "e.g. 123456789,987654321 (DM the running bot /whoami to get yours)."
             ) from None
     return ids
 
@@ -40,7 +40,7 @@ def _parse_int_env(name: str, raw: str, example: str) -> int:
 
 @dataclass
 class Settings:
-    bot_token: str
+    bot_token: str | None
     allowed_user_ids: set[int]
     chat_id: int | None
     permission_mode: str
@@ -57,19 +57,13 @@ class Settings:
     def from_env(cls, env_path: str | os.PathLike[str] | None = None) -> "Settings":
         load_dotenv(env_path)
 
-        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-        if not token:
-            raise SystemExit(
-                "TELEGRAM_BOT_TOKEN is required. Copy .env.example to .env and fill it in."
-            )
-
+        # Telegram-specific fields are optional at the config layer: the web surface
+        # needs neither, so requiring them here would force a Telegram token on a
+        # user who only wants the browser/VS Code surface. Each surface validates its
+        # own needs instead — the Telegram surface requires a token and treats an
+        # empty allowlist as setup mode (see transports/telegram.build_application).
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or None
         allowed = _parse_ids(os.getenv("TELEGRAM_ALLOWED_USER_IDS", ""))
-        if not allowed:
-            # Fail loud rather than silently accepting everyone or no one.
-            raise SystemExit(
-                "TELEGRAM_ALLOWED_USER_IDS is empty. Set at least your own Telegram user id "
-                "(get it from @userinfobot) so the bot knows who may command it."
-            )
 
         chat_raw = os.getenv("TELEGRAM_CHAT_ID", "").strip()
         max_turns_raw = os.getenv("CLAUDE_MAX_TURNS", "").strip()
