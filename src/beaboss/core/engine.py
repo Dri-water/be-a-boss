@@ -20,6 +20,7 @@ from typing import Any
 
 from claude_agent_sdk import ResultMessage, create_sdk_mcp_server, tool
 
+from .agent_backend import CodexBackend
 from .names import pick_name
 from .ports import InboundMessage, MediaIn, Outbound, Speaker, SYSTEM, Transport
 from .session import CoreSession
@@ -245,12 +246,21 @@ class Engine:
         )
 
     def _make_worker_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
+        cwd = Path(rec.cwd)
+        # A worker may run on the Codex CLI instead of Claude; the choice lives
+        # here (the single worker-construction point) and nowhere else.
+        backend = (
+            CodexBackend(cwd)
+            if self.settings.agent_backend == "codex"
+            else None  # None => CoreSession builds the default ClaudeAgentBackend
+        )
         session = CoreSession(
-            thread_id=thread_id, cwd=Path(rec.cwd),
+            thread_id=thread_id, cwd=cwd,
             speaker=self.worker_speaker(rec.name),
             settings=self.settings, post=self._post, busy=self._busy,
             on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
             system_append=None,  # default env note…
+            backend=backend,
         )
         # …plus the worker role note appended onto it
         session._system_append = session._resolve_append() + WORKER_APPEND_EXTRA

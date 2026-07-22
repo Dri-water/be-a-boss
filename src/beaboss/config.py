@@ -51,6 +51,7 @@ class Settings:
     state_dir: Path
     bot_name: str
     session_system_append: str | None
+    agent_backend: str = "claude"  # "claude" (default) | "codex"
 
     @classmethod
     def from_env(cls, env_path: str | os.PathLike[str] | None = None) -> "Settings":
@@ -97,4 +98,5 @@ class Settings:
                 if "SESSION_SYSTEM_APPEND" in os.environ
                 else None
             ),
+            agent_backend=(os.getenv("BEABOSS_BACKEND", "").strip().lower() or "claude"),
         )
