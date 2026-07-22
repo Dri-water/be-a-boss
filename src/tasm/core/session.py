@@ -1,15 +1,10 @@
-"""One live Claude Code session, bound to a Telegram forum topic.
+"""One live Claude Code session bound to a thread — transport-agnostic.
 
-Each session owns a single long-lived ClaudeSDKClient (a real, resumable Claude
-Code session with a working directory) plus a worker task that drains an inbound
-queue. User turns are serialized per topic — which is correct, a single Claude
-session is inherently one-turn-at-a-time.
-
-Media:
-- Inbound (user -> session): images arrive as vision blocks AND are saved to
-  ./.tg-inbox/; other files are saved there and referenced in the turn text.
-- Outbound (session -> user): the session gets in-process MCP tools
-  (send_photo/send_video/send_file/send_message) wired to this topic.
+Ported from the original claude_session.py: same queue/worker/turn logic, but all
+output flows through a single `post(Outbound)` callback with a Speaker identity,
+and media tools are generic. A tap can observe everything the session says
+(used by the orchestrator to 'see' coder threads) and inbound turns can carry an
+extra observer note (used for human interjections).
 """
 
 from __future__ import annotations
@@ -19,7 +14,7 @@ import base64
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Awaitable, Callable
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -31,20 +26,18 @@ from claude_agent_sdk import (
     tool,
 )
 
-from . import rendering
+from .. import rendering
+from .ports import MediaIn, Outbound, Speaker
 
-log = logging.getLogger("tasm.session")
+log = logging.getLogger("tasm.core.session")
 
 SETTING_SOURCES = ["project", "local"]
 INBOX_DIRNAME = ".tg-inbox"
-MAX_SEND_BYTES = 50 * 1024 * 1024  # Telegram bot upload ceiling
+MAX_SEND_BYTES = 50 * 1024 * 1024
 
-# Appended (not substituted) onto Claude Code's own system prompt so the session
-# understands its unusual runtime + its Telegram powers, and doesn't confabulate
-# around environment quirks. Override via SESSION_SYSTEM_APPEND (empty = no note).
 DEFAULT_SESSION_APPEND = (
-    "Runtime context: you are a headless Claude Code session driven over a Telegram "
-    "chat, not an interactive terminal. You typically run inside a Linux container, "
+    "Runtime context: you are a headless Claude Code session driven over a chat "
+    "bot, not an interactive terminal. You typically run inside a Linux container, "
     "and your working directory may be a bind-mounted host folder (on Windows/macOS "
     "this crosses a VM boundary). Implications:\n"
     "- File reads/writes are reliable, but filesystem WATCHING (inotify) may not "
@@ -58,37 +51,20 @@ DEFAULT_SESSION_APPEND = (
     "persist, add it to the project's Dockerfile instead.\n"
     "- Only paths under your workspace are shared with the host; nothing outside it "
     "is visible. Keep your work within the workspace.\n"
-    "- Your normal text replies are delivered to the user in this topic. To send "
-    "MEDIA, use the Telegram tools: mcp__telegram__send_photo (renders an image "
-    "inline — use for screenshots, charts, diagrams you generate), "
-    "mcp__telegram__send_video, mcp__telegram__send_file (any document), and "
-    "mcp__telegram__send_message (extra plain text). Paths must be inside your "
+    "- Your normal text replies are delivered into this thread. To send MEDIA, use "
+    "the chat tools: mcp__chat__send_photo (renders inline — screenshots, charts), "
+    "mcp__chat__send_video, mcp__chat__send_file (any document), and "
+    "mcp__chat__send_message (extra plain text). Paths must be inside your "
     "workspace.\n"
     f"- Files the user sends you are saved under ./{INBOX_DIRNAME}/ and referenced "
     "in their message; images are also attached so you can see them directly."
 )
 
 
-class Emitter(Protocol):
-    async def send(self, thread_id: int, text: str) -> None: ...
-    async def typing(self, thread_id: int) -> None: ...
-    async def send_photo(self, thread_id: int, path: Path, caption: str | None) -> None: ...
-    async def send_video(self, thread_id: int, path: Path, caption: str | None) -> None: ...
-    async def send_document(self, thread_id: int, path: Path, caption: str | None) -> None: ...
-
-
-@dataclass
-class MediaItem:
-    """A file received from Telegram, ready to hand to a session."""
-    kind: str  # "image" | "file"
-    filename: str
-    mime: str | None
-    data: bytes
-
-
 @dataclass
 class Turn:
     """One queued user turn: text plus optional inline images (base64)."""
+
     text: str
     images: list[dict] = field(default_factory=list)  # {media_type, data}
 
@@ -97,65 +73,89 @@ def _safe_name(name: str) -> str:
     return Path(name).name or "file"
 
 
-class ClaudeSession:
+PostFn = Callable[[Outbound], Awaitable[None]]
+BusyFn = Callable[[str], Awaitable[None]]
+TapFn = Callable[[str, str, str], Awaitable[None]]  # (thread_id, kind, text)
+
+
+class CoreSession:
+    """A live Claude session that posts as `speaker` into `thread_id`."""
+
     def __init__(
         self,
-        thread_id: int,
+        thread_id: str,
         cwd: Path,
-        name: str,
+        speaker: Speaker,
         settings,
-        emitter: Emitter,
+        post: PostFn,
+        busy: BusyFn,
         on_session_id: Callable[[str], None],
         session_id: str | None = None,
+        system_append: str | None = None,
+        tap: TapFn | None = None,
+        extra_mcp_servers: dict[str, Any] | None = None,
+        max_turns: int | None = None,
     ):
         self.thread_id = thread_id
         self.cwd = cwd
-        self.name = name
+        self.speaker = speaker
         self.settings = settings
-        self.emitter = emitter
+        self._post = post
+        self._busy = busy
         self._on_session_id = on_session_id
         self.session_id = session_id
+        self._system_append = system_append
+        self._tap = tap
+        self._extra_mcp = extra_mcp_servers or {}
+        self._max_turns = max_turns
 
         self._client: ClaudeSDKClient | None = None
         self._queue: asyncio.Queue[Turn] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self.status = "new"  # new | idle | busy | error | stopped
         self.turns = 0
+        self.on_turn_done: Callable[["CoreSession", ResultMessage], Awaitable[None]] | None = None
 
     # ---- lifecycle -------------------------------------------------------
 
+    def _resolve_append(self) -> str:
+        if self._system_append is not None:
+            return self._system_append
+        if self.settings.session_system_append is not None:
+            return self.settings.session_system_append
+        return DEFAULT_SESSION_APPEND
+
     def _build_options(self) -> ClaudeAgentOptions:
-        append = self.settings.session_system_append
-        if append is None:
-            append = DEFAULT_SESSION_APPEND
+        append = self._resolve_append()
         system_prompt = (
             {"type": "preset", "preset": "claude_code", "append": append}
             if append
             else None
         )
+        mcp = {"chat": self._build_chat_server()}
+        mcp.update(self._extra_mcp)
         return ClaudeAgentOptions(
             cwd=str(self.cwd),
             permission_mode=self.settings.permission_mode,
             include_partial_messages=False,
-            resume=self.session_id,  # None => fresh session
+            resume=self.session_id,
             model=self.settings.model or None,
-            max_turns=self.settings.max_turns,
+            max_turns=self._max_turns if self._max_turns is not None else self.settings.max_turns,
             cli_path=self.settings.cli_path or None,
             setting_sources=SETTING_SOURCES,
             system_prompt=system_prompt,
-            mcp_servers={"telegram": self._build_mcp_server()},
+            mcp_servers=mcp,
             stderr=self._on_stderr,
         )
 
-    def _build_mcp_server(self):
-        """In-process MCP tools that let the session push media/text to this topic."""
+    def _build_chat_server(self):
         session = self
 
         @tool(
             "send_photo",
-            "Send an image file to the user in this Telegram topic so it renders "
-            "inline (screenshots, charts, generated images). Path must be inside "
-            "the workspace.",
+            "Send an image file into this thread so it renders inline "
+            "(screenshots, charts, generated images). Path must be inside the "
+            "workspace.",
             {"type": "object",
              "properties": {"path": {"type": "string"}, "caption": {"type": "string"}},
              "required": ["path"]},
@@ -165,8 +165,7 @@ class ClaudeSession:
 
         @tool(
             "send_video",
-            "Send a video file to the user in this Telegram topic. Path must be "
-            "inside the workspace.",
+            "Send a video file into this thread. Path must be inside the workspace.",
             {"type": "object",
              "properties": {"path": {"type": "string"}, "caption": {"type": "string"}},
              "required": ["path"]},
@@ -176,8 +175,8 @@ class ClaudeSession:
 
         @tool(
             "send_file",
-            "Send any file to the user in this Telegram topic as a document. Path "
-            "must be inside the workspace.",
+            "Send any file into this thread as a document. Path must be inside "
+            "the workspace.",
             {"type": "object",
              "properties": {"path": {"type": "string"}, "caption": {"type": "string"}},
              "required": ["path"]},
@@ -187,8 +186,8 @@ class ClaudeSession:
 
         @tool(
             "send_message",
-            "Send an extra plain-text message to the user in this Telegram topic "
-            "(separate from your normal reply).",
+            "Send an extra plain-text message into this thread (separate from "
+            "your normal reply).",
             {"type": "object",
              "properties": {"text": {"type": "string"}},
              "required": ["text"]},
@@ -196,11 +195,11 @@ class ClaudeSession:
         async def send_message(args: dict[str, Any]) -> dict[str, Any]:
             text = str(args.get("text", "")).strip()
             if text:
-                await session.emitter.send(session.thread_id, text)
+                await session._emit_text(text)
             return {"content": [{"type": "text", "text": "sent"}]}
 
         return create_sdk_mcp_server(
-            "telegram", tools=[send_photo, send_video, send_file, send_message]
+            "chat", tools=[send_photo, send_video, send_file, send_message]
         )
 
     async def _tool_send(self, args: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -215,33 +214,30 @@ class ClaudeSession:
         if not p.is_absolute():
             p = self.cwd / raw
         p = p.resolve()
-
-        try:  # keep sends confined to the workspace
+        try:
             p.relative_to(self.cwd.resolve())
         except ValueError:
             return err(f"refused: {p} is outside the session workspace")
         if not p.is_file():
             return err(f"no such file: {p}")
-        size = p.stat().st_size
-        if size > MAX_SEND_BYTES:
-            return err(f"file too large to send ({size} bytes > 50MB)")
-
+        if p.stat().st_size > MAX_SEND_BYTES:
+            return err(f"file too large to send (> {MAX_SEND_BYTES} bytes)")
         try:
-            if kind == "photo":
-                await self.emitter.send_photo(self.thread_id, p, caption)
-            elif kind == "video":
-                await self.emitter.send_video(self.thread_id, p, caption)
-            else:
-                await self.emitter.send_document(self.thread_id, p, caption)
+            await self._post(Outbound(
+                thread_id=self.thread_id, speaker=self.speaker,
+                media_path=p, media_kind=kind, caption=caption,
+            ))
         except Exception as e:  # noqa: BLE001
             return err(f"send failed: {e}")
-        return {"content": [{"type": "text", "text": f"sent {p.name} to the user"}]}
+        return {"content": [{"type": "text", "text": f"sent {p.name} into the thread"}]}
 
     async def start(self) -> None:
         self._client = ClaudeSDKClient(self._build_options())
         await self._client.connect()
         self.status = "idle"
-        self._worker = asyncio.create_task(self._run(), name=f"session-{self.thread_id}")
+        self._worker = asyncio.create_task(
+            self._run(), name=f"session-{self.thread_id}"
+        )
         log.info("session started thread=%s cwd=%s resume=%s",
                  self.thread_id, self.cwd, self.session_id)
 
@@ -267,8 +263,8 @@ class ClaudeSession:
     async def submit(self, text: str) -> None:
         await self._queue.put(Turn(text=text))
 
-    async def submit_media(self, caption: str, items: list[MediaItem]) -> None:
-        """Save incoming files to ./.tg-inbox/ and queue a turn describing them."""
+    async def submit_media(self, caption: str, items: list[MediaIn]) -> None:
+        """Save incoming files under the workspace inbox and queue a turn."""
         inbox = self.cwd / INBOX_DIRNAME
         inbox.mkdir(parents=True, exist_ok=True)
         images: list[dict] = []
@@ -291,7 +287,9 @@ class ClaudeSession:
         if caption.strip():
             lines.append(caption.strip())
         if saved:
-            lines.append(f"[The user sent {len(saved)} file(s), saved under ./{INBOX_DIRNAME}/:]")
+            lines.append(
+                f"[The user sent {len(saved)} file(s), saved under ./{INBOX_DIRNAME}/:]"
+            )
             for dest, mime in saved:
                 lines.append(f"- {dest.relative_to(self.cwd)} ({mime or 'unknown type'})")
         text = "\n".join(lines) if lines else "(the user sent media with no caption)"
@@ -311,7 +309,7 @@ class ClaudeSession:
                 raise
             except Exception as e:  # noqa: BLE001
                 log.exception("turn failed thread=%s", self.thread_id)
-                await self.emitter.send(self.thread_id, f"⚠️ session error: {e}")
+                await self._emit_text(f"⚠️ session error: {e}")
                 await self._try_reconnect()
             finally:
                 if self.status != "stopped":
@@ -320,12 +318,13 @@ class ClaudeSession:
 
     async def _do_turn(self, turn: Turn) -> None:
         assert self._client is not None
-        await self.emitter.typing(self.thread_id)
+        await self._busy(self.thread_id)
 
         if turn.images:
             content: list[dict] = [
                 {"type": "image", "source": {
-                    "type": "base64", "media_type": img["media_type"], "data": img["data"]}}
+                    "type": "base64", "media_type": img["media_type"],
+                    "data": img["data"]}}
                 for img in turn.images
             ]
             content.append({"type": "text", "text": turn.text or "(no caption)"})
@@ -338,6 +337,7 @@ class ClaudeSession:
         else:
             await self._client.query(turn.text)
 
+        result: ResultMessage | None = None
         async for message in self._client.receive_response():
             if isinstance(message, SystemMessage) and message.subtype == "init":
                 sid = message.data.get("session_id")
@@ -345,20 +345,35 @@ class ClaudeSession:
                     self._capture_session_id(sid)
             elif isinstance(message, AssistantMessage):
                 for piece in rendering.render_assistant(message):
-                    await self._send(piece)
+                    await self._emit_text(piece)
             elif isinstance(message, ResultMessage):
                 if message.session_id:
                     self._capture_session_id(message.session_id)
                 self.turns += 1
+                result = message
                 for piece in rendering.render_result(message):
-                    await self._send(piece)
+                    await self._emit_text(piece)
 
-    async def _send(self, text: str) -> None:
+        if result is not None and self.on_turn_done is not None:
+            try:
+                await self.on_turn_done(self, result)
+            except Exception:  # noqa: BLE001
+                log.exception("on_turn_done hook failed thread=%s", self.thread_id)
+
+    async def _emit_text(self, text: str) -> None:
+        if not text.strip():
+            return
         for part in rendering.chunk(text):
-            await self.emitter.send(self.thread_id, part)
+            await self._post(Outbound(
+                thread_id=self.thread_id, speaker=self.speaker, text=part
+            ))
+        if self._tap is not None:
+            try:
+                await self._tap(self.thread_id, "said", text)
+            except Exception:  # noqa: BLE001
+                log.exception("tap failed thread=%s", self.thread_id)
 
     async def _try_reconnect(self) -> None:
-        """Rebuild the client, resuming the same session id if we have one."""
         if self.status == "stopped":
             return
         try:
@@ -374,9 +389,7 @@ class ClaudeSession:
         except Exception as e:  # noqa: BLE001
             self.status = "error"
             log.exception("reconnect failed thread=%s", self.thread_id)
-            await self.emitter.send(
-                self.thread_id, f"⚠️ could not reconnect the session: {e}"
-            )
+            await self._emit_text(f"⚠️ could not reconnect the session: {e}")
 
     # ---- helpers ---------------------------------------------------------
 

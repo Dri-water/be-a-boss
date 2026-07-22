@@ -1,12 +1,12 @@
-"""Entrypoint: load config, wire the bot, poll."""
+"""Entrypoint: load config, wire the core engine + Telegram transport, poll."""
 
 from __future__ import annotations
 
 import logging
 
 from .config import Settings
-from .store import Store
-from .telegram_bot import build_application
+from .core.store import CoreStore
+from .transports.telegram import build_application
 
 
 def main() -> None:
@@ -18,7 +18,7 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     settings = Settings.from_env()
-    store = Store(settings.state_dir)
+    store = CoreStore(settings.state_dir)
     app = build_application(settings, store)
 
     app.run_polling(allowed_updates=["message"])
