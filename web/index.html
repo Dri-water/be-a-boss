@@ -61,9 +61,13 @@
     // Default to the same host the page is served from, else the dev default.
     // The server gates the handshake on a token (printed at startup) + Origin; read
     // the token from our own URL (open web/index.html?token=… as the server logs).
-    const token = new URLSearchParams(location.search).get("token") || "";
-    const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") +
-      (location.host || "127.0.0.1:8765") +
+    const q = new URLSearchParams(location.search);
+    const token = q.get("token") || "";
+    // Over http(s) use the serving host; opened as a file://, read host/port from
+    // the URL (default 127.0.0.1:8765) so a non-default WEB_PORT still connects.
+    const hostport = location.host ||
+      ((q.get("host") || "127.0.0.1") + ":" + (q.get("port") || "8765"));
+    const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + hostport +
       (token ? "?token=" + encodeURIComponent(token) : "");
     beaboss.connect(wsUrl);
   </script>

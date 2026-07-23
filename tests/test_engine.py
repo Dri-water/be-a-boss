@@ -606,3 +606,30 @@ def test_delivered_worker_drops_out_of_snapshot(tmp_path):
         repo="/r/x", worker_status="working"))
     snap = engine._fleet_snapshot()
     assert "b=" in snap and "a=" not in snap
+
+
+def test_status_parse_tolerates_markdown_and_postscript(tmp_path):
+    """The last-STATUS-line parse must survive real LLM formatting — bold, bullets,
+    quotes, and a trailing courtesy line — not just a bare final line."""
+    from beaboss.core.engine import _parse_worker_status as ps
+    assert ps("done the thing\n**STATUS: done**") == "done"
+    assert ps("- STATUS: done") == "done"
+    assert ps("all set.\nSTATUS: done\nThanks! 🎉") == "done"
+    assert ps("> STATUS: blocked: need the key") == "blocked"
+    assert ps("STATUS: needs-decision: A or B?") == "blocked"
+    assert ps("picking it back up\nSTATUS: working") == "working"
+    # a quote of the menu is NOT a status; a real one later wins
+    assert ps("I'll end with STATUS: done | working | blocked.\nSTATUS: working") == "working"
+    assert ps("just a menu quote: STATUS: done | working | blocked") is None
+    assert ps("no status line here") is None
+
+
+def test_none_is_not_eaten_as_a_quiet_sentinel(tmp_path):
+    """Regression: a legit one-word 'None.' answer must post, not be suppressed."""
+    from beaboss.core.session import _is_quiet_reply
+    assert _is_quiet_reply("NOTHING") is True
+    assert _is_quiet_reply("(nothing)") is True
+    assert _is_quiet_reply("None.") is False      # ordinary answer — must post
+    assert _is_quiet_reply("none") is False
+    assert _is_quiet_reply("quiet") is False
+    assert _is_quiet_reply("Done — see PR") is False

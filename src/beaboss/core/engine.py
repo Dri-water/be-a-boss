@@ -75,6 +75,28 @@ def _top_level(repo: Path) -> str:
     return "\n".join(rows[:40]) or "(empty)"
 
 
+def _parse_worker_status(text: str) -> str | None:
+    """The worker's self-reported status, read from the LAST STATUS: line — tolerating
+    markdown decoration (**bold**, '- ', '> ') and a trailing courtesy line after it.
+    A quote of the STATUS menu (contains '|') is skipped, and the last real status
+    wins, so quoting the protocol mid-reply can't be misread as done."""
+    for raw in reversed(text.splitlines()):
+        line = raw.strip().strip("*_> ").lstrip("-").strip().lower()
+        if not line.startswith("status:"):
+            continue
+        value = line.split("status:", 1)[1].strip()
+        if "|" in value:
+            continue  # the protocol menu, not a real status
+        if value.startswith("done"):
+            return "done"
+        if value.startswith(("blocked", "needs-decision")):
+            return "blocked"
+        if value.startswith("working"):
+            return "working"
+        return None  # an unrecognized status line — don't scan past it
+    return None
+
+
 def _test_hint(repo: Path) -> str:
     """A best-guess check command from the repo's shape. A HINT — the orchestrator
     still verifies by actually running it via run_checks on a worker."""
@@ -405,7 +427,7 @@ class Engine:
             out += ["", "✅ Recently delivered:"] + [
                 f"  • {r.name} · {Path(r.repo).name}" for r in cats["delivered"][-5:]]
         if not workers:
-            out += ["", "idle — nothing running. Post here or DM me to start something."]
+            out += ["", "idle — nothing running. Send me a goal to get started."]
         return "\n".join(out)
 
     async def _refresh_dashboard(self) -> None:
@@ -428,20 +450,9 @@ class Engine:
         if rec is None:
             return
         full = (result.result or "").strip()
-        # Parse STATUS from ONLY the last non-empty line of the full (untruncated)
-        # reply. Anchoring to the last line — never a substring scan of the whole
-        # text — is what stops a worker QUOTING the protocol menu mid-reply
-        # ("STATUS: done | working | blocked") from being misread as done.
-        last_line = next(
-            (ln.strip().lower() for ln in reversed(full.splitlines()) if ln.strip()), "")
-        if last_line.startswith("status:"):
-            value = last_line.split("status:", 1)[1].strip()
-            if value.startswith("done"):
-                self.store.update(session.thread_id, worker_status="done")
-            elif value.startswith(("blocked", "needs-decision")):
-                self.store.update(session.thread_id, worker_status="blocked")
-            elif value.startswith("working"):
-                self.store.update(session.thread_id, worker_status="working")  # un-stick
+        new_status = _parse_worker_status(full)  # last real STATUS line; None = unchanged
+        if new_status:
+            self.store.update(session.thread_id, worker_status=new_status)
         tail = full if len(full) <= 600 else full[:600] + "…"
         status = "errored" if result.is_error else "finished a turn"
         self._note(f"worker {rec.worker_id} ({rec.name}, task: {rec.task[:80]}) "

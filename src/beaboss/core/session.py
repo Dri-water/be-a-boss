@@ -77,8 +77,9 @@ PostFn = Callable[[Outbound], Awaitable[None]]
 BusyFn = Callable[[str], Awaitable[None]]
 
 # The words a quiet digest may reply with to post nothing (the model resists
-# emitting truly empty text, so it's given an explicit token instead).
-_QUIET_SENTINELS = {"nothing", "none", "noreply", "noupdate", "quiet"}
+# emitting truly empty text, so it's given an explicit token — NOTHING — instead).
+# Kept to unambiguous sentinels: "none"/"quiet" are ordinary one-word answers.
+_QUIET_SENTINELS = {"nothing", "noreply", "noupdate"}
 
 
 def _is_quiet_reply(text: str) -> bool:

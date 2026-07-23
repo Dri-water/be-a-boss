@@ -181,15 +181,20 @@ class WebSocketTransport:
 
     async def register(self, ws: ServerConnection) -> None:
         self.clients.add(ws)
+        # Snapshot history AFTER registering: anything posted from here on reaches ws
+        # via _broadcast (live), so replaying a stable copy of what existed at register
+        # time means no message is missed and none is delivered twice.
+        history = list(self.history)
+        dashboard = self.dashboard
         snapshot = {"type": "threads", "threads": [
             {"id": tid, "title": t["title"], "open": t["open"]}
             for tid, t in self.threads.items()
         ]}
         await ws.send(json.dumps(snapshot))
-        for event in self.history:            # replay recent conversation (no amnesia)
+        for event in history:                 # replay recent conversation (no amnesia)
             await ws.send(json.dumps(event))
-        if self.dashboard:
-            await ws.send(json.dumps({"type": "dashboard", "text": self.dashboard}))
+        if dashboard:
+            await ws.send(json.dumps({"type": "dashboard", "text": dashboard}))
 
     def unregister(self, ws: ServerConnection) -> None:
         self.clients.discard(ws)

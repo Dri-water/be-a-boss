@@ -106,12 +106,18 @@
     const box = $("box");
     const submit = $("submit");
 
+    let everOpened = false;
     client.on("open", () => {
+      everOpened = true;
       status.textContent = "connected";
       box.disabled = submit.disabled = false;
     });
     client.on("close", () => {
-      status.textContent = "disconnected";
+      // Distinguish "dropped, retrying" from "never connected" (usually a wrong or
+      // missing ?token=…) so a first-run mistake doesn't read as a dead bot.
+      status.textContent = everOpened
+        ? "disconnected — reconnecting…"
+        : "can't connect — is the server running, and is your ?token=… correct?";
       box.disabled = submit.disabled = true;
     });
 
@@ -218,13 +224,17 @@
       const parts = text.slice(1).split(/\s+/);
       const cmd = (parts[0] || "").toLowerCase();
       const rest = parts.slice(1);
+      const HELP = "Just type to talk to the orchestrator. Commands: " +
+        "/stop · /kill (this thread) · /approve <id> · /reject <id> · " +
+        "/new <path> [name] · /reset [confirm]";
       if (cmd === "stop") client.sendRaw({ type: "interrupt", thread_id: active });
       else if (cmd === "kill") client.sendRaw({ type: "kill", thread_id: active });
       else if (cmd === "approve") client.sendRaw({ type: "approve", worker_id: rest[0] || "" });
       else if (cmd === "reject") client.sendRaw({ type: "reject", worker_id: rest[0] || "" });
       else if (cmd === "new") client.sendRaw({ type: "new", path: rest[0] || "", name: rest.slice(1).join(" ") });
       else if (cmd === "reset") client.sendRaw({ type: "reset", confirm: rest[0] === "confirm" });
-      else { client.addLocalMessage(active, { role: "system", name: "sys" }, "unknown command: /" + cmd); return; }
+      else if (cmd === "help") { client.addLocalMessage(active, { role: "system", name: "help" }, HELP); return; }
+      else { client.addLocalMessage(active, { role: "system", name: "sys" }, "unknown command: /" + cmd + " — try /help"); return; }
       client.addLocalMessage(active, { role: "you", name: "You" }, text);
     }
   }
