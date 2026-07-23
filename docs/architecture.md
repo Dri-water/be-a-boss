@@ -123,9 +123,21 @@ fleet records (worker id, name, task brief, status log), orchestrator session id
 On restart: threads reattach lazily (`resume=` on next message), the supervisor
 rebuilds its inbox from unfinished worker records.
 
-## Delivery gates (later, optional)
+## Delivery (landing a worker's branch)
 
-A `ship` (produces a change) vs `scout` (investigates, reports) task distinction,
-and PR-vs-local-merge delivery modes, are worth adopting once the core loop is
-solid. They are explicitly out of scope for the first implementation — kept out to
-avoid over-engineering before the need is real.
+Work never dead-ends on a branch. `review_worker` returns a worker's committed diff
+plus which routes are available; the orchestrator surfaces the change to the boss and,
+**only on explicit approval**, calls `deliver_worker(method)`:
+
+- **`merge`** — a deterministic local merge of `worker/<id>` into the primary
+  checkout's current branch. Requires the checkout clean, aborts + rolls back on
+  conflict, never force-anything. The one irreversible step is boring, gated code —
+  not the LLM freehanding git.
+- **`pr`** — pushes the branch and opens a GitHub PR (`gh pr create`). Non-destructive,
+  so it's fine for the agent path; available only when a remote **and** an authenticated
+  `gh` exist, else it degrades to a local merge.
+
+The split is deliberate: **capability is detected, policy is the orchestrator's, the
+boss is the gate.** `gh` auth presence *is* the config — no delivery-mode flag. Deeper
+policy (ship/scout task types, required reviewers) can layer on later; the core loop
+now lands work end to end.

@@ -33,7 +33,7 @@ core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrat
   server (`mcp__chat__send_*`); `on_turn_done` hook fires the supervision wake; a
   `tap` lets the engine observe a worker thread.
 - **`Engine`** (`core/engine.py`) — three session roles: `orchestrator` (fleet
-  MCP tools: spawn/message/status/dismiss), `worker` (worktree cwd + STATUS
+  MCP tools: spawn/message/status/review/deliver/dismiss), `worker` (worktree cwd + STATUS
   protocol prompt), `direct` (the classic `/new`). The orchestrator lives in the
   transport's main thread ("general"). Worker turn-ends and human interjections
   land in `_inbox`; `_wake_orchestrator` coalesces them into one digest turn.

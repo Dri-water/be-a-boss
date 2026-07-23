@@ -87,3 +87,45 @@ def test_is_git_repo(tmp_path):
     plain.mkdir()
     assert asyncio.run(worktrees.is_git_repo(repo)) is True
     assert asyncio.run(worktrees.is_git_repo(plain)) is False
+
+
+def _commit_in_worktree(dest: Path, filename: str) -> None:
+    (dest / filename).write_text("x = 1\n")
+    _git(dest, "add", "-A")
+    _git(dest, "commit", "-m", f"add {filename}")
+
+
+def test_current_branch_and_no_remote(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    assert asyncio.run(worktrees.current_branch(repo))  # some real branch name
+    assert asyncio.run(worktrees.has_remote(repo)) is False
+
+
+def test_branch_diff_shows_worker_changes(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
+    _commit_in_worktree(dest, "feature.py")
+    base = asyncio.run(worktrees.current_branch(repo))
+    diff = asyncio.run(worktrees.branch_diff(repo, base, "worker/nova"))
+    assert "feature.py" in diff
+
+
+def test_merge_into_current_lands_the_branch(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
+    _commit_in_worktree(dest, "feature.py")
+    landed, detail = asyncio.run(worktrees.merge_into_current(repo, "worker/nova"))
+    assert landed is True
+    assert "merged" in detail
+    assert (repo / "feature.py").exists()  # the work is now in the primary checkout
+
+
+def test_merge_refuses_dirty_checkout(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
+    _commit_in_worktree(dest, "feature.py")
+    (repo / "dirty.txt").write_text("uncommitted\n")  # primary checkout not clean
+    landed, detail = asyncio.run(worktrees.merge_into_current(repo, "worker/nova"))
+    assert landed is False
+    assert "uncommitted" in detail
+    assert not (repo / "feature.py").exists()  # nothing landed

@@ -105,3 +105,92 @@ async def remove_worktree(repo: Path, worktree: Path) -> tuple[bool, str]:
             f"You may need to remove it manually (git worktree remove {worktree})"
         )
     return True, "removed"
+
+
+# --- delivery (landing a worker's branch) -------------------------------------
+#
+# Capability is a fact (is there a remote? is gh authed?), detected here; the
+# *choice* of route is the orchestrator's. The local merge — the one irreversible
+# step — is deterministic and gated (clean checkout, aborts on conflict, never
+# force-anything); opening a PR is non-destructive.
+
+
+async def current_branch(repo: Path) -> str | None:
+    """The branch checked out in the repo's primary working copy (None if detached)."""
+    code, out = await _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    return out if code == 0 and out and out != "HEAD" else None
+
+
+async def has_remote(repo: Path) -> bool:
+    code, out = await _git(repo, "remote")
+    return code == 0 and bool(out.strip())
+
+
+async def gh_available() -> bool:
+    """True if the GitHub CLI is installed AND authenticated — i.e. PR mode is on."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "auth", "status",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        return await asyncio.wait_for(proc.wait(), timeout=15) == 0
+    except (FileNotFoundError, OSError, asyncio.TimeoutError):
+        return False
+
+
+async def branch_diff(repo: Path, base: str, branch: str, max_chars: int = 3500) -> str:
+    """A readable summary of what `branch` changed relative to `base` (stat + patch)."""
+    _, stat = await _git(repo, "diff", "--stat", f"{base}...{branch}")
+    _, patch = await _git(repo, "diff", f"{base}...{branch}")
+    body = ((stat + "\n\n" + patch).strip()) if stat or patch else ""
+    if len(body) > max_chars:
+        body = body[:max_chars] + f"\n… (diff truncated at {max_chars} chars)"
+    return body or "(no changes on the branch yet)"
+
+
+async def merge_into_current(repo: Path, branch: str) -> tuple[bool, str]:
+    """Deterministically merge `branch` into the primary checkout's current branch.
+
+    Requires the checkout to be clean; aborts and rolls back on conflict. Never
+    force-pushes or discards anything — a refusal leaves the repo exactly as found.
+    """
+    base = await current_branch(repo)
+    if base is None:
+        return False, (f"{repo.name}'s main checkout is in a detached HEAD state — "
+                       f"check out a branch there first")
+    if not await is_clean(repo):
+        return False, (f"{repo.name}'s working copy has uncommitted changes on {base} — "
+                       f"commit or stash them first, then deliver again")
+    code, out = await _git(
+        repo, "merge", "--no-ff", "-m",
+        f"Merge {branch} (delivered by be-a-boss)", branch)
+    if code != 0:
+        await _git(repo, "merge", "--abort")  # leave the checkout as we found it
+        return False, (f"merging into {base} hit a conflict ({_tidy(out)}) — this one "
+                       f"needs a human to resolve, or open a PR instead")
+    return True, f"merged {branch} into {base}"
+
+
+async def open_pr(repo: Path, branch: str) -> tuple[bool, str]:
+    """Push `branch` and open a GitHub PR via gh. Non-destructive. Returns (ok, url|error)."""
+    if not await has_remote(repo):
+        return False, "no git remote is configured — add one, or deliver via a local merge"
+    if not await gh_available():
+        return False, ("the GitHub CLI isn't authenticated here — run `gh auth login` or "
+                       "set GH_TOKEN, or deliver via a local merge")
+    code, out = await _git(repo, "push", "-u", "origin", branch, timeout=120)
+    if code != 0:
+        return False, f"couldn't push {branch} to origin: {_tidy(out)}"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "pr", "create", "--head", branch, "--fill", cwd=str(repo),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        pout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except (FileNotFoundError, OSError):
+        return False, "the GitHub CLI (gh) isn't installed here"
+    except asyncio.TimeoutError:
+        proc.kill()
+        return False, "gh pr create timed out"
+    text = pout.decode(errors="replace").strip()
+    if (proc.returncode or 0) != 0:
+        return False, f"gh pr create failed: {_tidy(text)}"
+    return True, (text.splitlines()[-1] if text else "pull request opened")

@@ -1,4 +1,5 @@
 import asyncio
+import subprocess
 from pathlib import Path
 
 from beaboss.config import Settings
@@ -6,6 +7,23 @@ from beaboss.core import worktrees
 from beaboss.core.engine import Engine
 from beaboss.core.ports import InboundMessage, Outbound
 from beaboss.core.store import CoreStore, ThreadRecord
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _repo(tmp: Path, name: str) -> Path:
+    repo = tmp / "projects" / name
+    repo.mkdir(parents=True)
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@e.com")
+    _git(repo, "config", "user.name", "T")
+    (repo / "README.md").write_text("hi\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "init")
+    return repo
 
 
 def _settings(tmp: Path) -> Settings:
@@ -208,3 +226,42 @@ def test_listing_and_kill_direct(tmp_path):
     assert rows[0][2] == "dormant"
     assert asyncio.run(engine.kill("7")) is True
     assert engine.store.get("7") is None
+
+
+def test_review_then_deliver_merges_committed_work(tmp_path):
+    """End-to-end delivery: review surfaces the diff; deliver lands it in the
+    primary checkout, marks the worker delivered, and posts to the thread."""
+    engine, t = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "state" / "worktrees", "nova"))
+    (dest / "feature.py").write_text("x = 1\n")
+    _git(dest, "add", "-A")
+    _git(dest, "commit", "-m", "feat")
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(dest), worker_id="nova",
+        repo=str(repo), task="add feature"))
+
+    review = asyncio.run(engine._review_worker("nova"))["content"][0]["text"]
+    assert "feature.py" in review and "merge" in review
+
+    res = asyncio.run(engine._deliver_worker("nova", "merge"))
+    assert res.get("is_error") is not True
+    assert "delivered" in res["content"][0]["text"]
+    assert (repo / "feature.py").exists()  # landed in the primary checkout
+    assert engine.store.get("55").worker_status == "delivered"
+    assert any("📦" in p.text for p in t.posts)
+
+
+def test_deliver_refuses_uncommitted_work(tmp_path):
+    engine, t = _engine(tmp_path)
+    repo = _repo(tmp_path, "r2")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "state" / "worktrees", "kite"))
+    (dest / "wip.py").write_text("unfinished\n")  # uncommitted
+    engine.store.put("56", ThreadRecord(
+        role="worker", name="Kite", cwd=str(dest), worker_id="kite",
+        repo=str(repo), task="x"))
+
+    res = asyncio.run(engine._deliver_worker("kite", "merge"))
+    assert res.get("is_error") is True
+    assert "uncommitted" in res["content"][0]["text"]
+    assert not (repo / "wip.py").exists()  # nothing landed

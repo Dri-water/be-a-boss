@@ -46,12 +46,19 @@ A worker ends every turn with an honest one-line status — `done`, `working`,
 `blocked: <what it needs>`, or `needs-decision: <the options>`. `blocked` means the
 orchestrator should help; `needs-decision` is escalated to you with a recommendation.
 
-## A worker finishes / is dismissed
+## A worker finishes — and the work gets delivered
 
-Finished work lives on the worker's branch — it outlives the worker. Dismissing a
-worker cleans up its workspace **only if the work is committed**; a worker with
-un-committed changes is never quietly discarded — the tool refuses and tells you,
-so you decide.
+Finished work lives on the worker's branch; it outlives the worker. But it doesn't
+dead-end there. When a task is done, the orchestrator shows you the actual **diff**
+and, **only after your explicit go-ahead**, lands it — either a **local merge** into
+your checkout (deterministic; refuses a dirty checkout; rolls back a conflict) or, if
+you've set up a GitHub remote + `gh`, a **pull request** you review and merge. You are
+always the merge gate; the orchestrator just picks the route from what your box can
+actually do (no `gh` → it uses a local merge). Nothing lands without your word.
+
+Dismissing a worker then cleans up its workspace **only if the work is committed**; a
+worker with un-committed changes is never quietly discarded — the tool refuses and
+tells you, so you decide.
 
 ## Errors
 

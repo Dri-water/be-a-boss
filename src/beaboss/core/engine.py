@@ -51,6 +51,10 @@ ORCHESTRATOR_APPEND = (
     "- mcp__fleet__message_worker(worker_id, text) — speak to a worker (your message "
     "is visible in their thread)\n"
     "- mcp__fleet__worker_status(worker_id?) — current fleet state\n"
+    "- mcp__fleet__review_worker(worker_id) — inspect a worker's committed diff and "
+    "which delivery routes are available; use it to show the boss the change\n"
+    "- mcp__fleet__deliver_worker(worker_id, method) — land the work: 'merge' (local "
+    "merge into the checkout) or 'pr' (open a GitHub PR). Only after the boss approves\n"
     "- mcp__fleet__dismiss_worker(worker_id) — end a worker: clean worktrees are "
     "removed, dirty ones are preserved and reported\n\n"
     "Prime directives:\n"
@@ -80,6 +84,15 @@ ORCHESTRATOR_APPEND = (
     "unclear requirements), anything destructive/irreversible/security-sensitive, "
     "and finished work ready for review. Do NOT surface routine progress, "
     "retries, or internal mechanics.\n\n"
+    "Delivery (the last mile — never skip it):\n"
+    "- A finished task must not dead-end on a branch. review_worker to see the diff, "
+    "then show the boss the actual change (a short summary of what changed plus the "
+    "key parts of the diff) with your recommendation.\n"
+    "- Only after the boss's explicit go-ahead, call deliver_worker. Prefer 'pr' when "
+    "it's available (a remote + gh) so the change stays reviewable; otherwise 'merge' "
+    "for a local land. The merge is deterministic and refuses a dirty checkout — if it "
+    "refuses, relay the reason plainly, never force it.\n"
+    "- After a clean delivery you may dismiss the worker.\n\n"
     "Talk in outcomes, not mechanics. The boss cares about the project, not your "
     "internals: say 'isolated copy' not 'worktree', 'instructions' not 'brief', "
     "'cleanup' not 'teardown', name workers only when it matters. Lead with "
@@ -421,9 +434,41 @@ class Engine:
         async def dismiss_worker(args: dict[str, Any]) -> dict[str, Any]:
             return await engine._dismiss_worker(str(args.get("worker_id", "")))
 
+        @tool(
+            "review_worker",
+            "Inspect a worker's committed work before delivery: returns the diff of "
+            "their branch vs your checkout, whether everything is committed, and which "
+            "delivery routes are available (a local 'merge' always; 'pr' if a remote + "
+            "authenticated gh exist). Read-only — use it to surface the change to the boss.",
+            {"type": "object",
+             "properties": {"worker_id": {"type": "string"}},
+             "required": ["worker_id"]},
+        )
+        async def review_worker(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._review_worker(str(args.get("worker_id", "")))
+
+        @tool(
+            "deliver_worker",
+            "Land a worker's work — ONLY after the boss has explicitly approved. "
+            "method='merge' deterministically merges the worker's branch into your "
+            "checkout's current branch (requires it clean; aborts on conflict, never "
+            "force-anything). method='pr' pushes the branch and opens a GitHub PR "
+            "(requires a remote + authenticated gh). Refuses uncommitted work.",
+            {"type": "object",
+             "properties": {
+                 "worker_id": {"type": "string"},
+                 "method": {"type": "string", "enum": ["merge", "pr"]},
+             },
+             "required": ["worker_id", "method"]},
+        )
+        async def deliver_worker(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._deliver_worker(str(args.get("worker_id", "")),
+                                                str(args.get("method", "")))
+
         return create_sdk_mcp_server(
             "fleet",
-            tools=[list_repos, spawn_worker, message_worker, worker_status, dismiss_worker],
+            tools=[list_repos, spawn_worker, message_worker, worker_status,
+                   review_worker, deliver_worker, dismiss_worker],
         )
 
     # ---- fleet operations ------------------------------------------------
@@ -546,6 +591,58 @@ class Engine:
             except Exception:  # noqa: BLE001
                 pass
         return {"content": [{"type": "text", "text": f"dismissed {worker_id}{detail}"}]}
+
+    async def _review_worker(self, worker_id: str) -> dict[str, Any]:
+        def err(t: str) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": t}], "is_error": True}
+
+        found = self._find_worker(worker_id.strip())
+        if found is None:
+            return err(f"no such worker: {worker_id}")
+        _tid, rec = found
+        if not rec.repo or rec.cwd == rec.repo:
+            return err(f"{rec.name} isn't working in a git worktree — nothing to review or deliver")
+        repo = Path(rec.repo)
+        branch = f"worker/{rec.worker_id}"
+        base = await worktrees.current_branch(repo) or "the base branch"
+        committed = await worktrees.is_clean(Path(rec.cwd))
+        diff = await worktrees.branch_diff(repo, base, branch)
+        routes = ["merge"]
+        if await worktrees.has_remote(repo) and await worktrees.gh_available():
+            routes.insert(0, "pr")
+        commit_note = ("all changes committed" if committed else
+                       "⚠️ uncommitted changes remain — have the worker commit before delivery")
+        return {"content": [{"type": "text", "text":
+                f"Review of {rec.name} — branch {branch} vs {base}:\n"
+                f"- {commit_note}\n"
+                f"- delivery routes available: {', '.join(routes)}\n\n{diff}"}]}
+
+    async def _deliver_worker(self, worker_id: str, method: str) -> dict[str, Any]:
+        def err(t: str) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": t}], "is_error": True}
+
+        found = self._find_worker(worker_id.strip())
+        if found is None:
+            return err(f"no such worker: {worker_id}")
+        thread_id, rec = found
+        if not rec.repo or rec.cwd == rec.repo:
+            return err(f"{rec.name} isn't in a git worktree — nothing to deliver")
+        if not await worktrees.is_clean(Path(rec.cwd)):
+            return err(f"{rec.name} has uncommitted changes — have them commit before delivery")
+        branch = f"worker/{rec.worker_id}"
+        repo = Path(rec.repo)
+        if method == "pr":
+            landed, detail = await worktrees.open_pr(repo, branch)
+        elif method == "merge":
+            landed, detail = await worktrees.merge_into_current(repo, branch)
+        else:
+            return err("method must be 'merge' or 'pr'")
+        if not landed:
+            return err(f"delivery failed: {detail}")
+        self.store.update(thread_id, worker_status="delivered")
+        await self._post(Outbound(
+            thread_id=thread_id, speaker=SYSTEM, text=f"📦 {detail}."))
+        return {"content": [{"type": "text", "text": f"{rec.name}'s work delivered — {detail}"}]}
 
     # ---- direct sessions (orchestrator-less, via /new) -------------------
 

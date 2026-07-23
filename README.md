@@ -85,6 +85,10 @@ sender per message.
   can watch and interject into; both agents see your message.
 - **Isolated git worktrees** — each worker on its own `worker/<name>` branch;
   parallel same-repo work never collides, and un-landed work is never deleted.
+- **Delivery, not dead-ends** — a finished worker's branch doesn't just sit there:
+  the orchestrator shows you the diff and, on your explicit OK, lands it — a
+  deterministic local **merge**, or a **PR** (`gh pr create`) when you've set up a
+  remote + `GH_TOKEN`. Capability is detected, you stay the merge gate.
 - **Checkpoint supervision** — workers run autonomously; the orchestrator is woken
   only at meaningful checkpoints (done / blocked / needs-decision / interjection),
   never per token. Wakes are coalesced to save tokens.
