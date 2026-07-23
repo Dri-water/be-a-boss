@@ -180,9 +180,17 @@ class TelegramTransport:
                 await self.bot.edit_message_text(
                     chat_id=self.group_chat_id, message_id=mid, text=text)
                 return
+            except BadRequest as e:
+                if "not modified" in str(e).lower():
+                    return  # identical content — the board is already right
+                # message gone — unpin the corpse and recreate below
+                try:
+                    await self.bot.unpin_chat_message(
+                        chat_id=self.group_chat_id, message_id=mid)
+                except Exception:  # noqa: BLE001
+                    pass
             except Exception:  # noqa: BLE001
-                # message deleted / unmodified / transient — recreate below
-                pass
+                return  # transient — retry on the next state change, don't duplicate
         try:
             msg = await self.bot.send_message(chat_id=self.group_chat_id, text=text)
             try:
@@ -195,6 +203,33 @@ class TelegramTransport:
                 self.store.set_dashboard_msg_id(msg.message_id)
         except Exception:  # noqa: BLE001
             pass
+
+    async def delete_thread(self, thread_id: str) -> None:
+        """Factory reset: delete a worker/direct topic outright — the topic and all
+        its messages vanish. Group topics only; #general and DMs have no topic."""
+        chat_id, topic_id = self._route(thread_id)
+        if chat_id is None or topic_id is None:
+            return
+        try:
+            await self.bot.delete_forum_topic(
+                chat_id=chat_id, message_thread_id=topic_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def delete_dashboard(self) -> None:
+        """Factory reset: unpin + delete the status board."""
+        if self.group_chat_id is None:
+            return
+        mid = self.store.dashboard_msg_id if self.store else None
+        if not mid:
+            return
+        for op in ("unpin_chat_message", "delete_message"):
+            try:
+                await getattr(self.bot, op)(chat_id=self.group_chat_id, message_id=mid)
+            except Exception:  # noqa: BLE001
+                pass
+        if self.store:
+            self.store.set_dashboard_msg_id(None)
 
     # ---- rendering -------------------------------------------------------
 
@@ -240,8 +275,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "🧭 I'm the orchestrator. DM me for a private 1:1, or talk to me here in the "
         "group — either way, give me goals (\"fix the login bug in myapp, then audit "
         "deps\") and I hire worker agents, brief them, and supervise. Each worker gets "
-        "its own topic (or, in a DM, streams to you) — watch, and type in to steer us "
-        "both.\n"
+        "its own topic in the group — watch, and type in to steer us both.\n"
         "📋 #general is a live status board — what's running, blocked, and waiting on "
         "you, always current.\n\n"
         "🗂 Commands:\n"
@@ -250,7 +284,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "  /status — bot health\n"
         "  /approve <id> · /reject <id> — land or decline a worker's delivery\n"
         "  /setup — verify the group is configured right\n"
-        "  /whoami — your Telegram id + this chat's id\n\n"
+        "  /whoami — your Telegram id + this chat's id\n"
+        "  /reset — factory reset: wipe all my memory and state (asks to confirm)\n\n"
         "💬 In any session topic:\n"
         "  • text / photos / files → that session (images are seen as vision)\n"
         "  /stop — interrupt · /kill — end the session\n\n"
@@ -342,6 +377,23 @@ async def cmd_reject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("Usage: /reject <worker_id> — decline a pending delivery.")
         return
     await msg.reply_text(await engine.reject_delivery(ctx.args[0]))
+
+
+async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _ok(update, ctx):
+        return
+    engine: Engine = ctx.bot_data["engine"]
+    msg = update.effective_message
+    if not ctx.args or ctx.args[0].lower() != "confirm":
+        await msg.reply_text(
+            "🏭 Factory reset wipes EVERYTHING I know: all conversation memory, "
+            "every worker (topics deleted, worktrees discarded — committed "
+            "worker/* branches stay in your repos), the dashboard, all records. "
+            "Old #general/DM messages stay visible to you, but I can't read them — "
+            "a fresh me starts truly blank.\n\nThis cannot be undone. "
+            "Run /reset confirm to do it.")
+        return
+    await msg.reply_text(await engine.factory_reset())
 
 
 async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -525,7 +577,9 @@ async def _post_init(app: Application) -> None:
         BotCommand("whoami", "show your Telegram id (for setup)"),
         BotCommand("setup", "check this group is configured right"),
         BotCommand("approve", "approve a worker's delivery: /approve <id>"),
+        BotCommand("reject", "decline a worker's delivery: /reject <id>"),
         BotCommand("new", "direct session: /new <path> [name]"),
+        BotCommand("reset", "factory reset: wipe all bot memory/state"),
         BotCommand("list", "list all threads"),
         BotCommand("status", "bot health"),
         BotCommand("stop", "interrupt this thread's turn"),
@@ -585,6 +639,7 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
     app.add_handler(CommandHandler("setup", cmd_setup))
     app.add_handler(CommandHandler("approve", cmd_approve))
     app.add_handler(CommandHandler("reject", cmd_reject))
+    app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("status", cmd_status))

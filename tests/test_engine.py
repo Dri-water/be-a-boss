@@ -162,7 +162,7 @@ def test_wake_drains_notes_arriving_during_digest(tmp_path):
             self.pending = 0
             self.alive = True
 
-        async def submit(self, text):
+        async def submit(self, text, reply_to=None):
             self.digests.append(text)
             if len(self.digests) == 1:  # a worker finishes "during" the first digest
                 engine._note("worker kite finished late")
@@ -252,6 +252,80 @@ def test_dm_message_routes_to_one_orchestrator_replying_in_the_dm(tmp_path):
     assert "[fleet right now:" in fake.submitted[0]
     assert fake.submitted[0].endswith("change the button")
     assert fake.reply_tos == ["dm:42"]
+
+
+def test_status_parsed_from_full_reply_not_truncated_digest(tmp_path):
+    """Regression: a worker's STATUS line lives on the LAST line of a long reply —
+    it must be parsed before digest truncation, or workers freeze at 'working'."""
+    engine, t = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(tmp_path), task="x", worker_status="working"))
+
+    class LongDone:
+        result = ("summary line\n" * 200) + "STATUS: done"   # way past 600 chars
+        is_error = False
+
+    sess = FakeSession()
+    sess.thread_id = "55"
+    asyncio.run(engine._on_worker_turn_done(sess, LongDone()))
+    assert engine.store.get("55").worker_status == "done"
+
+
+def test_message_worker_unsticks_done_status(tmp_path):
+    """Sending a done/blocked worker back to work resets it to 'working' so the
+    fleet snapshot and dashboard tell the truth."""
+    engine, t = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(tmp_path), task="x", worker_status="done"))
+    engine.sessions["55"] = FakeSession()
+    asyncio.run(engine._message_worker("nova", "checks failed — fix them"))
+    assert engine.store.get("55").worker_status == "working"
+
+
+def test_digest_replies_follow_the_boss(tmp_path):
+    """A worker finishing a DM-initiated task reports back into that DM, not into a
+    silent #general — the digest turn carries the boss's last thread as reply_to."""
+    engine, t = _engine(tmp_path)
+    engine.store.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))
+    engine.store.set_orchestrator_thread("general")
+    fake = FakeSession()
+    engine.sessions["general"] = fake
+
+    # boss last spoke from a DM
+    asyncio.run(engine.on_inbound(InboundMessage(thread_id="dm:42", text="build it")))
+    # a worker event wakes the orchestrator
+    engine._note("worker nova finished: STATUS: done")
+    asyncio.run(engine._wake_orchestrator())
+
+    assert fake.reply_tos[-1] == "dm:42"      # digest replies land in the DM
+
+
+def test_factory_reset_wipes_everything(tmp_path):
+    """/reset confirm → blank slate: sessions stopped, records gone, dirty
+    worktrees force-removed, pending approvals cleared."""
+    engine, t = _engine(tmp_path)
+    repo = _repo(tmp_path, "resetme")
+    dest = asyncio.run(worktrees.create_worktree(
+        repo, tmp_path / "state" / "worktrees", "nova"))
+    (dest / "dirty.txt").write_text("uncommitted\n")   # dirty → normal removal refuses
+    engine.store.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))
+    engine.store.set_orchestrator_thread("general")
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova",
+        cwd=str(dest), repo=str(repo), task="x"))
+    engine.sessions["general"] = FakeSession()
+    engine._note("stale note")
+    engine._pending_delivery["nova"] = "merge"
+
+    result = asyncio.run(engine.factory_reset())
+    assert "blank slate" in result
+    assert engine.store.all() == {}
+    assert engine.store.orchestrator_thread is None
+    assert engine.sessions == {}
+    assert engine._inbox == [] and engine._pending_delivery == {}
+    assert not dest.exists()                   # dirty worktree force-removed
 
 
 def test_dismissed_worker_is_not_resummoned(tmp_path):

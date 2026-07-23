@@ -189,3 +189,21 @@ def test_guard_accepts_allowlisted_dm_but_not_foreign_group():
     assert _ok(grp, ctx) is True
     assert _thread_of(grp) == "general"
     assert _thread_of(_Upd(_U(1), _C(1, "supergroup"), _M(7))) == "7"
+
+
+def test_dashboard_not_modified_does_not_duplicate(tmp_path):
+    """An edit that Telegram answers 'message is not modified' is success — it must
+    NOT recreate + re-pin a duplicate board (that stacked pins on every restart)."""
+    from telegram.error import BadRequest
+
+    class NotModifiedBot(DashBot):
+        async def edit_message_text(self, **kw):
+            raise BadRequest("Message is not modified")
+
+    store = CoreStore(tmp_path / "state")
+    store.set_dashboard_msg_id(101)
+    bot = NotModifiedBot()
+    t = TelegramTransport(bot, _settings(), store)
+    asyncio.run(t.update_dashboard("same text"))
+    assert bot.sent == []                      # no new message created
+    assert store.dashboard_msg_id == 101       # board id unchanged

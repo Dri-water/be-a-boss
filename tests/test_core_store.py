@@ -73,3 +73,16 @@ def test_newer_schema_is_refused_not_mangled(tmp_path):
     s = CoreStore(d)
     assert s.all() == {}
     assert list(d.glob("core.json.corrupt-*"))
+
+
+def test_wipe_clears_everything_and_persists(tmp_path):
+    from beaboss.core.store import CoreStore, ThreadRecord
+    s = CoreStore(tmp_path / "state")
+    s.put("1", ThreadRecord(role="direct", name="d"))
+    s.set_orchestrator_thread("1")
+    s.set_dashboard_msg_id(42)
+    s.wipe()
+    reloaded = CoreStore(tmp_path / "state")
+    assert reloaded.all() == {}
+    assert reloaded.orchestrator_thread is None
+    assert reloaded.dashboard_msg_id is None

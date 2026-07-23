@@ -240,7 +240,7 @@ class CoreSession:
             return err(f"file too large to send (> {MAX_SEND_BYTES} bytes)")
         try:
             await self._post(Outbound(
-                thread_id=self.thread_id, speaker=self.speaker,
+                thread_id=self._reply_to, speaker=self.speaker,
                 media_path=p, media_kind=kind, caption=caption,
             ))
         except Exception as e:  # noqa: BLE001
@@ -343,12 +343,31 @@ class CoreSession:
                     self.status = "idle"
                 self._queue.task_done()
 
+    async def _keep_busy(self) -> None:
+        """Telegram's typing indicator dies after ~5s; keep it alive for the whole
+        turn so a long think never looks like dead air. Best-effort only."""
+        try:
+            while True:
+                await asyncio.sleep(4.5)
+                await self._busy(self._reply_to)
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+
     async def _do_turn(self, turn: Turn) -> None:
         # Reply to wherever this turn came from — so a DM to the orchestrator is
         # answered in that DM, not in the group. Workers/direct sessions leave
         # reply_to unset and post to their own thread as before.
         self._reply_to = turn.reply_to or self.thread_id
         await self._busy(self._reply_to)
+        keepalive = asyncio.create_task(self._keep_busy())
+        try:
+            await self._do_turn_inner(turn)
+        finally:
+            keepalive.cancel()
+
+    async def _do_turn_inner(self, turn: Turn) -> None:
         await self._backend.send(turn)
 
         result: ResultMessage | None = None
@@ -390,6 +409,10 @@ class CoreSession:
                             await self._emit_text(piece)
                     elif (message.result or "").strip():
                         await self._emit_text(message.result.strip())
+                    elif turn.reply_to:
+                        # A boss-initiated turn must never end in total silence.
+                        # (Digest turns may stay quiet on purpose.)
+                        await self._emit_text("✓ done")
                 else:
                     for piece in rendering.render_result(message):
                         await self._emit_text(piece)

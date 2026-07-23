@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -251,6 +252,10 @@ class Engine:
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-thread start lock
         self._pending_delivery: dict[str, str] = {}        # worker_id -> method, awaiting /approve
         self._last_dashboard = ""                          # last rendered board (skip no-op edits)
+        # Where the boss last spoke to the orchestrator (#general or a DM). Digest
+        # replies and approval prompts follow the boss there instead of stranding
+        # the conversation in #general while their DM goes silent.
+        self._last_boss_thread = "general"
         # The thread that is the orchestrator's "office". Transports may override;
         # the Telegram adapter's General topic maps to "general".
         self.main_thread = "general"
@@ -307,6 +312,7 @@ class Engine:
                 self.main_thread, self.store.get(self.main_thread))
             if session is None:
                 return
+            self._last_boss_thread = msg.thread_id
             # Ground every boss turn in reality: a code-generated snapshot of the
             # actual fleet rides along with the message, so the orchestrator can't
             # honestly claim "Nova is on it" when no one is.
@@ -540,15 +546,21 @@ class Engine:
         rec = self.store.get(session.thread_id)
         if rec is None:
             return
-        tail = (result.result or "").strip()
-        if len(tail) > 600:
-            tail = tail[:600] + "…"
-        # track the worker's self-reported status line if present
-        low = tail.lower()
-        if "status: done" in low:
+        full = (result.result or "").strip()
+        # Parse the STATUS from the FULL reply — the protocol puts it on the last
+        # line, which a digest-sized truncation would cut off (that bug silently
+        # froze workers at "working" and poisoned the fleet snapshot). Prefer a
+        # properly-anchored last line so a worker QUOTING the protocol mid-text
+        # can't be misread; fall back to a full-text scan.
+        last_line = next(
+            (ln.strip().lower() for ln in reversed(full.splitlines()) if ln.strip()), "")
+        status_src = last_line if last_line.startswith("status:") else full.lower()
+        if "status: done" in status_src or status_src.startswith("status:done"):
             self.store.update(session.thread_id, worker_status="done")
-        elif "status: blocked" in low or "status: needs-decision" in low:
+        elif ("status: blocked" in status_src or "status: needs-decision" in status_src
+              or status_src.startswith("status:blocked")):
             self.store.update(session.thread_id, worker_status="blocked")
+        tail = full if len(full) <= 600 else full[:600] + "…"
         status = "errored" if result.is_error else "finished a turn"
         self._note(f"worker {rec.worker_id} ({rec.name}, task: {rec.task[:80]}) "
                    f"{status}: {tail or '(no text)'}")
@@ -586,7 +598,8 @@ class Engine:
                 if not notes:
                     break
                 digest = "[fleet inbox]\n" + "\n".join(f"- {n}" for n in notes)
-                await session.submit(digest)
+                # reply where the boss actually is, not into a silent #general
+                await session.submit(digest, reply_to=self._last_boss_thread)
         finally:
             self._waking = False
 
@@ -872,6 +885,9 @@ class Engine:
         if not text.strip():
             return err("text is required")
         thread_id, rec = found
+        # being sent back to work un-sticks a done/blocked marker
+        if rec.worker_status in ("done", "blocked"):
+            self.store.update(thread_id, worker_status="working")
         await self._post(Outbound(
             thread_id=thread_id, speaker=self.orchestrator_speaker(), text=text.strip(),
         ))
@@ -1029,7 +1045,7 @@ class Engine:
         self._pending_delivery[rec.worker_id] = method
         verb = "open a pull request for" if method == "pr" else "locally merge"
         await self._post(Outbound(
-            thread_id=self.main_thread, speaker=SYSTEM,
+            thread_id=self._last_boss_thread, speaker=SYSTEM,
             text=(f"🚦 {rec.name} is ready to deliver. Approve to {verb} their work "
                   f"into '{base}'?{checks_note}\n"
                   f"    /approve {rec.worker_id}    ·    /reject {rec.worker_id}")))
@@ -1104,6 +1120,10 @@ class Engine:
         return thread_id, title
 
     async def interrupt(self, thread_id: str) -> bool:
+        # /stop in a DM should stop the orchestrator — its session lives under the
+        # main thread, not the DM's id.
+        if self._is_orchestrator_thread(thread_id):
+            thread_id = self.main_thread
         session = self.sessions.get(thread_id)
         if session is None:
             return False
@@ -1146,6 +1166,50 @@ class Engine:
         if pending:
             names = ", ".join(f"{r.name} ({r.worker_status})" for r in pending)
             self._note(f"[after restart] workers still awaiting you: {names}")
+
+    async def factory_reset(self) -> str:
+        """Wipe everything the bot knows: live sessions, all conversation memory
+        (session histories), fleet records, worktrees, worker topics, and the
+        dashboard. The next message starts from a true blank slate — a fresh
+        implementation sees zero old context. Only reachable via a human's
+        explicit `/reset confirm`."""
+        for session in list(self.sessions.values()):
+            try:
+                await session.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        self.sessions.clear()
+        self._inbox.clear()
+        self._waking = False
+        self._pending_delivery.clear()
+        self._last_dashboard = ""
+        self._last_boss_thread = self.main_thread
+
+        delete_thread = getattr(self.transport, "delete_thread", None)
+        for tid, rec in list(self.store.all().items()):
+            if rec.role == "worker" and rec.repo and rec.cwd and rec.cwd != rec.repo:
+                try:  # factory reset discards work in progress, dirty or not
+                    await worktrees.force_remove_worktree(Path(rec.repo), Path(rec.cwd))
+                except Exception:  # noqa: BLE001
+                    pass
+            if delete_thread is not None:
+                try:  # worker/direct topics vanish, messages and all
+                    await delete_thread(tid)
+                except Exception:  # noqa: BLE001
+                    pass
+        delete_dashboard = getattr(self.transport, "delete_dashboard", None)
+        if delete_dashboard is not None:
+            try:
+                await delete_dashboard()
+            except Exception:  # noqa: BLE001
+                pass
+
+        self.store.wipe()
+        for sub in ("orchestrator-home", "worktrees"):
+            shutil.rmtree(self.settings.state_dir / sub, ignore_errors=True)
+        log.warning("factory reset executed — all state wiped")
+        return ("🏭 Factory reset complete — blank slate. Committed worker/* "
+                "branches in your repos were left untouched.")
 
     async def shutdown(self) -> None:
         for session in list(self.sessions.values()):

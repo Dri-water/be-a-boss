@@ -148,5 +148,12 @@ class CoreStore:
             self.dashboard_msg_id = mid
             self._flush()
 
+    def wipe(self) -> None:
+        """Factory reset: forget every thread, the office, and the dashboard."""
+        self._threads.clear()
+        self.orchestrator_thread = None
+        self.dashboard_msg_id = None
+        self._flush()
+
     def workers(self) -> dict[str, ThreadRecord]:
         return {k: v for k, v in self._threads.items() if v.role == "worker"}

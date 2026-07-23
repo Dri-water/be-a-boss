@@ -234,6 +234,14 @@ async def open_pr(repo: Path, branch: str, base_branch: str) -> tuple[bool, str]
     return True, (text.splitlines()[-1] if text else "pull request opened")
 
 
+async def force_remove_worktree(repo: Path, worktree: Path) -> None:
+    """Factory-reset teardown: remove a worktree even if dirty. Deliberately
+    destructive — only reachable from an explicit human `/reset confirm`."""
+    if worktree.exists():
+        await _git(repo, "worktree", "remove", "--force", str(worktree))
+    await _git(repo, "worktree", "prune")
+
+
 CHECK_TIMEOUT = 600  # a verification command (tests/build) can be slow
 
 
