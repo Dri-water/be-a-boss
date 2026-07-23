@@ -547,7 +547,7 @@ class Engine:
                 pass
         return {"content": [{"type": "text", "text": f"dismissed {worker_id}{detail}"}]}
 
-    # ---- direct sessions (pre-orchestrator model, unchanged) -------------
+    # ---- direct sessions (orchestrator-less, via /new) -------------------
 
     async def new_direct(self, path_raw: str, name: str | None) -> tuple[str, str] | str:
         """Create a direct session thread. Returns (thread_id, name) or error str."""
