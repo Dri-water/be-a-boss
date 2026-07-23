@@ -233,6 +233,7 @@ class Engine:
         self._waking: set[str] = set()             # offices with a wake in flight
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-thread start lock
         self._pending_delivery: dict[str, str] = {}        # worker_id -> method, awaiting /approve
+        self._last_dashboard = ""                          # last rendered board (skip no-op edits)
         # The thread that is the orchestrator's "office". Transports may override;
         # the Telegram adapter's General topic maps to "general".
         self.main_thread = "general"
@@ -440,6 +441,69 @@ class Engine:
                         office, MAX_INBOX, drop)
         log.info("inbox[%s] note: %s", office, text[:160])
 
+    # ---- dashboard (the shared #general status board) -------------------
+
+    def _render_dashboard(self) -> str:
+        """A deterministic snapshot of the SHARED (group) fleet — DM-hired work is
+        private and never shown here. Rendered from the store in code, never authored
+        by the LLM, so the board is always exactly true."""
+        workers = [r for r in self.store.workers().values()
+                   if not r.origin.startswith("dm:") and r.worker_status != "dismissed"]
+
+        def bucket(r: ThreadRecord) -> str:
+            if r.worker_id in self._pending_delivery:
+                return "approve"
+            if r.worker_status == "blocked":
+                return "blocked"
+            if r.worker_status == "delivered":
+                return "delivered"
+            if r.worker_status == "done":
+                return "review"
+            return "running"
+
+        cats: dict[str, list[ThreadRecord]] = {
+            "running": [], "review": [], "approve": [], "blocked": [], "delivered": []}
+        for r in workers:
+            cats[bucket(r)].append(r)
+
+        def line(r: ThreadRecord) -> str:
+            return f"  • {r.name} · {Path(r.repo).name} — {r.task[:56]}"
+
+        out = [f"📋 {self.settings.bot_name} — live status",
+               f"🟢 {len(cats['running'])} running   🔎 {len(cats['review'])} in review"
+               f"   🚦 {len(cats['approve'])} to approve   ⛔ {len(cats['blocked'])} blocked"]
+        if cats["approve"]:
+            out += ["", "🚦 Awaiting your approval:"] + [
+                f"  • {r.name} · {Path(r.repo).name} — /approve {r.worker_id}"
+                for r in cats["approve"]]
+        if cats["blocked"]:
+            out += ["", "⛔ Blocked (need you):"] + [line(r) for r in cats["blocked"]]
+        if cats["running"]:
+            out += ["", "🟢 Running:"] + [line(r) for r in cats["running"]]
+        if cats["review"]:
+            out += ["", "🔎 Done, awaiting review:"] + [line(r) for r in cats["review"]]
+        if cats["delivered"]:
+            out += ["", "✅ Recently delivered:"] + [
+                f"  • {r.name} · {Path(r.repo).name}" for r in cats["delivered"][-5:]]
+        if not workers:
+            out += ["", "idle — no shared work running. Post here or DM me to start."]
+        return "\n".join(out)
+
+    async def _refresh_dashboard(self) -> None:
+        """Re-render the board and push it if it changed. A no-op on transports that
+        don't support a dashboard (web), and never allowed to break the flow."""
+        fn = getattr(self.transport, "update_dashboard", None)
+        if fn is None:
+            return
+        text = self._render_dashboard()
+        if text == self._last_dashboard:
+            return
+        self._last_dashboard = text
+        try:
+            await fn(text)
+        except Exception:  # noqa: BLE001
+            log.exception("dashboard refresh failed")
+
     async def _on_worker_turn_done(self, session: CoreSession, result: ResultMessage) -> None:
         rec = self.store.get(session.thread_id)
         if rec is None:
@@ -457,6 +521,7 @@ class Engine:
         status = "errored" if result.is_error else "finished a turn"
         self._note(f"worker {rec.worker_id} ({rec.name}, task: {rec.task[:80]}) "
                    f"{status}: {tail or '(no text)'}", office)
+        await self._refresh_dashboard()
         await self._wake_orchestrator(office)
 
     # Coalescing window: near-simultaneous worker events (e.g. two workers finish
@@ -770,6 +835,7 @@ class Engine:
         await session.submit(
             f"[Brief from the orchestrator]\n{task.strip()}"
         )
+        await self._refresh_dashboard()
         return {"content": [{"type": "text", "text":
                 f"spawned worker {worker_id} ({name}) in {iso_note}; "
                 f"thread created. They will report back via the fleet inbox."}]}
@@ -825,6 +891,7 @@ class Engine:
                 await self.transport.close_thread(thread_id)
             except Exception:  # noqa: BLE001
                 pass
+        await self._refresh_dashboard()
         return {"content": [{"type": "text", "text": f"dismissed {worker_id}{detail}"}]}
 
     async def _review_worker(self, worker_id: str) -> dict[str, Any]:
@@ -945,6 +1012,7 @@ class Engine:
             text=(f"🚦 {rec.name} is ready to deliver. Approve to {verb} their work "
                   f"into '{base}'?{checks_note}\n"
                   f"    /approve {rec.worker_id}    ·    /reject {rec.worker_id}")))
+        await self._refresh_dashboard()
         return {"content": [{"type": "text", "text":
                 f"delivery of {rec.name} via {method} requested — the boss must "
                 f"/approve {rec.worker_id} to authorize it (I can't land it myself)."}]}
@@ -967,6 +1035,7 @@ class Engine:
         name = found[1].name if found else wid
         office = found[1].origin or self.main_thread if found else self.main_thread
         self._note(f"the boss rejected delivery of {name}", office)
+        await self._refresh_dashboard()
         await self._wake_orchestrator(office)
         return f"Rejected {name}'s delivery; the orchestrator has been told."
 
@@ -991,6 +1060,7 @@ class Engine:
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM, text=f"📦 {detail}."))
         self._note(f"{rec.name}'s work delivered — {detail}", office)
+        await self._refresh_dashboard()
         await self._wake_orchestrator(office)
         return f"✅ {rec.name}'s work delivered — {detail}"
 
@@ -1036,6 +1106,8 @@ class Engine:
             if thread_id == self.store.orchestrator_thread:
                 self.store.set_orchestrator_thread(None)
         self.store.delete(thread_id)
+        if rec.role == "worker":
+            await self._refresh_dashboard()
         return True
 
     def listing(self) -> list[tuple[str, ThreadRecord, str]]:

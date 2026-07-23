@@ -307,6 +307,27 @@ def test_dismissed_worker_is_not_resummoned(tmp_path):
     assert any("dismissed" in p.text for p in t.posts)
 
 
+def test_dashboard_renders_shared_state_only(tmp_path):
+    """The #general board shows group work bucketed by state, and NEVER DM-hired
+    work (that's private to the DM)."""
+    engine, _ = _engine(tmp_path)
+    engine.store.put("1", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", repo="/r/app",
+        origin="general", worker_status="working", task="build X"))
+    engine.store.put("2", ThreadRecord(
+        role="worker", name="Kite", worker_id="kite", repo="/r/app",
+        origin="general", worker_status="blocked", task="fix Y"))
+    engine.store.put("dm:9#ada", ThreadRecord(
+        role="worker", name="Ada", worker_id="ada", repo="/r/secret",
+        origin="dm:9", worker_status="working", task="secret thing"))
+    engine._pending_delivery["nova"] = "merge"
+
+    board = engine._render_dashboard()
+    assert "Kite" in board and "Blocked" in board       # blocked shown
+    assert "/approve nova" in board                      # nova awaiting approval
+    assert "Ada" not in board and "secret" not in board  # DM work stays private
+
+
 def test_inspect_repo_grounds_the_orchestrator(tmp_path):
     """inspect_repo returns the repo's real guide docs, layout, and a detected check
     command — so the orchestrator briefs/reviews from knowledge, not the outside."""

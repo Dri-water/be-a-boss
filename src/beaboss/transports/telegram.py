@@ -58,9 +58,10 @@ class TelegramTransport:
     the supergroup (worker topics, #general, the dashboard) and per-boss DMs (private
     offices). A thread_id routes to one of them via `_route`."""
 
-    def __init__(self, bot, settings: Settings):
+    def __init__(self, bot, settings: Settings, store: CoreStore | None = None):
         self.bot = bot
         self.settings = settings
+        self.store = store   # for the persisted dashboard message id
         self.group_chat_id: int | None = settings.chat_id
 
     def ensure_group(self, chat_id: int) -> None:
@@ -156,6 +157,34 @@ class TelegramTransport:
             await self.bot.send_chat_action(
                 chat_id=chat_id, action=ChatAction.TYPING,
                 message_thread_id=topic_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def update_dashboard(self, text: str) -> None:
+        """Keep a single pinned status board in #general current — edit it in place,
+        or create+pin one the first time. A status board must never break the flow,
+        so every failure is swallowed."""
+        if self.group_chat_id is None:
+            return
+        mid = self.store.dashboard_msg_id if self.store else None
+        if mid:
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=self.group_chat_id, message_id=mid, text=text)
+                return
+            except Exception:  # noqa: BLE001
+                # message deleted / unmodified / transient — recreate below
+                pass
+        try:
+            msg = await self.bot.send_message(chat_id=self.group_chat_id, text=text)
+            try:
+                await self.bot.pin_chat_message(
+                    chat_id=self.group_chat_id, message_id=msg.message_id,
+                    disable_notification=True)
+            except Exception:  # noqa: BLE001
+                pass  # pinning may be denied; the message is still the board
+            if self.store:
+                self.store.set_dashboard_msg_id(msg.message_id)
         except Exception:  # noqa: BLE001
             pass
 
@@ -532,7 +561,7 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
     )
 
     engine = Engine(settings, store)
-    transport = TelegramTransport(app.bot, settings)
+    transport = TelegramTransport(app.bot, settings, store)
     engine.attach_transport(transport)
     engine.rehydrate()  # re-surface unfinished workers after a restart
 

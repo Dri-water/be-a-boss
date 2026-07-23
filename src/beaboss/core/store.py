@@ -48,6 +48,7 @@ class CoreStore:
         self.path = self.state_dir / "core.json"
         self._threads: dict[str, ThreadRecord] = {}
         self.orchestrator_thread: str | None = None
+        self.dashboard_msg_id: int | None = None   # the pinned #general status board
         self._load()
 
     # ---- persistence -----------------------------------------------------
@@ -69,6 +70,7 @@ class CoreStore:
                 f"refusing to load it with older code")
             return
         self.orchestrator_thread = raw.get("orchestrator_thread")
+        self.dashboard_msg_id = raw.get("dashboard_msg_id")
         # Restore every field the current schema knows about (ignoring any it no
         # longer has). Enumerating by hand here silently dropped base_branch/base_sha
         # on restart once — deriving from the dataclass means new fields persist for
@@ -96,6 +98,7 @@ class CoreStore:
         payload = {
             "version": SCHEMA_VERSION,
             "orchestrator_thread": self.orchestrator_thread,
+            "dashboard_msg_id": self.dashboard_msg_id,
             "threads": {k: asdict(v) for k, v in self._threads.items()},
         }
         try:
@@ -139,6 +142,11 @@ class CoreStore:
     def set_orchestrator_thread(self, thread_id: str | None) -> None:
         if self.orchestrator_thread != thread_id:
             self.orchestrator_thread = thread_id
+            self._flush()
+
+    def set_dashboard_msg_id(self, mid: int | None) -> None:
+        if self.dashboard_msg_id != mid:
+            self.dashboard_msg_id = mid
             self._flush()
 
     def workers(self) -> dict[str, ThreadRecord]:

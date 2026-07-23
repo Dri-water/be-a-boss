@@ -111,6 +111,41 @@ class _Ctx:
         self.bot_data = {"settings": settings, "transport": transport}
 
 
+class DashBot:
+    def __init__(self):
+        self.sent: list[dict] = []
+        self.edited: list[dict] = []
+        self.pinned: list[dict] = []
+        self._next = 100
+
+    async def send_message(self, **kw):
+        self._next += 1
+        self.sent.append(kw)
+        return type("M", (), {"message_id": self._next})()
+
+    async def edit_message_text(self, **kw):
+        self.edited.append(kw)
+
+    async def pin_chat_message(self, **kw):
+        self.pinned.append(kw)
+
+
+def test_dashboard_pins_once_then_edits_in_place(tmp_path):
+    """First update creates + pins the board (id persisted); later updates edit the
+    same message instead of spamming new ones."""
+    store = CoreStore(tmp_path / "state")
+    bot = DashBot()
+    t = TelegramTransport(bot, _settings(), store)  # group chat_id=1
+
+    asyncio.run(t.update_dashboard("board v1"))
+    assert len(bot.sent) == 1 and bot.pinned          # created + pinned
+    assert store.dashboard_msg_id == 101
+
+    asyncio.run(t.update_dashboard("board v2"))
+    assert len(bot.sent) == 1                          # no second message spawned
+    assert bot.edited and bot.edited[-1]["text"] == "board v2"
+
+
 def test_guard_accepts_allowlisted_dm_but_not_foreign_group():
     settings = _settings()  # allowed={1}, group chat_id=1
     ctx = _Ctx(settings, TelegramTransport(RecordingBot(), settings))
