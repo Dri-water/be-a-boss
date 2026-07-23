@@ -1,8 +1,9 @@
 """be-a-boss — run your own agent org over chat.
 
 An orchestrator session hires and supervises worker sessions; each conversation is
-a visible, joinable thread. The core is transport-agnostic (Telegram is one
-adapter). The bot's display persona is configurable via the BOT_NAME env var.
+a visible, joinable thread. The core is transport-agnostic AND backend-agnostic:
+surfaces (Telegram, web, VS Code) and agent backends (Claude Code, Codex) are both
+pluggable adapters. The display persona is configurable via the BOT_NAME env var.
 """
 
 DEFAULT_BOT_NAME = "Orchestrator"

@@ -1,4 +1,4 @@
-"""One live Claude Code session bound to a thread — transport-agnostic.
+"""One live coding-agent session bound to a thread — transport- and backend-agnostic.
 
 Ported from the original claude_session.py: same queue/worker/turn logic, but all
 output flows through a single `post(Outbound)` callback with a Speaker identity,
@@ -32,12 +32,12 @@ from .ports import MediaIn, Outbound, Speaker
 log = logging.getLogger("beaboss.core.session")
 
 SETTING_SOURCES = ["project", "local"]
-INBOX_DIRNAME = ".tg-inbox"
+INBOX_DIRNAME = ".beaboss-inbox"
 MAX_SEND_BYTES = 50 * 1024 * 1024
 
 DEFAULT_SESSION_APPEND = (
-    "Runtime context: you are a headless Claude Code session driven over a chat "
-    "bot, not an interactive terminal. You typically run inside a Linux container, "
+    "Runtime context: you are a headless coding-agent session driven programmatically, "
+    "not an interactive terminal. You typically run inside a Linux container, "
     "and your working directory may be a bind-mounted host folder (on Windows/macOS "
     "this crosses a VM boundary). Implications:\n"
     "- File reads/writes are reliable, but filesystem WATCHING (inotify) may not "
@@ -79,7 +79,7 @@ TapFn = Callable[[str, str, str], Awaitable[None]]  # (thread_id, kind, text)
 
 
 class CoreSession:
-    """A live Claude session that posts as `speaker` into `thread_id`."""
+    """A live coding-agent session that posts as `speaker` into `thread_id`."""
 
     def __init__(
         self,
@@ -379,4 +379,4 @@ class CoreSession:
             self._on_session_id(sid)
 
     def _on_stderr(self, line: str) -> None:
-        log.debug("claude stderr thread=%s: %s", self.thread_id, line.rstrip())
+        log.debug("backend stderr thread=%s: %s", self.thread_id, line.rstrip())

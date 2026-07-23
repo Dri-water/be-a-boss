@@ -45,8 +45,8 @@ thrown away.
 
 Only two things are pluggable, on purpose:
 
-- the **surface** — how you drive it (Telegram today; web, VS Code, Slack next);
-- the **agent backend** — what a worker actually runs (Claude Code today; Codex next).
+- the **surface** — how you drive it (Telegram, web, and VS Code today; Slack next);
+- the **agent backend** — what a worker actually runs (Claude Code and Codex today).
 
 Everything in between — the org logic, supervision, isolation — is one small core
 that knows about neither. Keeping the seams few and the core simple is what keeps

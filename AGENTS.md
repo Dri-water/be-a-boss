@@ -4,28 +4,32 @@ Guidance for AI agents working on this repo.
 
 ## What this is
 
-A self-hosted **agent org over chat** (persona via `BOT_NAME`): an orchestrator
-session hires/briefs/supervises worker sessions, each visible in its own thread.
-The core is **transport-agnostic**; Telegram is one adapter. See
+A self-hosted **agent org** (persona via `BOT_NAME`): an orchestrator session
+hires/briefs/supervises worker sessions, each visible in its own thread. The core
+is **transport-agnostic AND backend-agnostic** — surfaces (Telegram, web, VS Code)
+and agent backends (Claude Code, Codex) are pluggable adapters. See
 [docs/architecture.md](docs/architecture.md) for the full picture.
 
 ## Architecture
 
 ```
-transports/telegram.py  (adapter: topics ⇄ threads, header cards, commands)
+transports/telegram.py    (adapter: topics ⇄ threads, header cards, commands)
+transports/websocket.py   (adapter: web app + VS Code, one shared client)
         │  InboundMessage ▲ Outbound (via core.ports.Transport)
         ▼                 │
 core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrator
-   ├─ core/session.py  CoreSession — one ClaudeSDKClient, posts via a callback
-   ├─ core/store.py    thread registry + fleet records (restart-proof)
-   └─ core/worktrees.py isolated git worktree per worker
+   ├─ core/session.py       CoreSession — one backend session, posts via a callback
+   ├─ core/agent_backend.py backend seam: ClaudeAgentBackend | CodexBackend
+   ├─ core/store.py         thread registry + fleet records (restart-proof)
+   └─ core/worktrees.py     isolated git worktree per worker
 ```
 
 - **`core/` imports no chat platform.** It speaks `Speaker`/`Outbound`/
   `InboundMessage` (`core/ports.py`). A transport implements `Transport`
   (create/close thread, `post`, busy) and calls `engine.on_inbound(...)`.
-- **`CoreSession`** (`core/session.py`) — the old ClaudeSession, decoupled: all
-  output goes through `post(Outbound(speaker=…))`; media tools are the `chat` MCP
+- **`CoreSession`** (`core/session.py`) — one coding-agent session, backend- and
+  transport-decoupled (runs on `ClaudeAgentBackend` or `CodexBackend`): all output
+  goes through `post(Outbound(speaker=…))`; media tools are the `chat` MCP
   server (`mcp__chat__send_*`); `on_turn_done` hook fires the supervision wake; a
   `tap` lets the engine observe a worker thread.
 - **`Engine`** (`core/engine.py`) — three session roles: `orchestrator` (fleet
@@ -39,7 +43,7 @@ core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrat
 ## Media flow
 
 - **Inbound**: adapter `_collect_media` → `engine.on_inbound(InboundMessage)` →
-  `CoreSession.submit_media`, which saves files under `<cwd>/.tg-inbox/` and
+  `CoreSession.submit_media`, which saves files under `<cwd>/.beaboss-inbox/` and
   queues a `Turn(text, images)`. Images ride as base64 image blocks.
 - **Outbound**: session calls `mcp__chat__send_*`; `_tool_send` resolves the path
   **inside cwd** (refuses escapes) and emits an `Outbound` with `media_path`. 50 MB.
@@ -64,7 +68,9 @@ core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrat
 
 ```
 uv sync
-cp .env.example .env   # fill TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_USER_IDS
+uv run python -m beaboss.web            # web / VS Code surface — no Telegram needed
+# ...or the Telegram bot:
+cp .env.example .env                    # set TELEGRAM_BOT_TOKEN (allowlist via /whoami)
 uv run boss
 ```
 

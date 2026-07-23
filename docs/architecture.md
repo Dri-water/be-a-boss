@@ -1,16 +1,15 @@
 # Architecture
 
-> Status: target architecture for the `orchestrator` branch. The pre-orchestrator
-> design (direct sessions only) is described in the README and remains supported —
-> the orchestrator is layered on top of it, not a replacement.
+> The orchestrator is the default model. Direct (orchestrator-less) sessions via
+> `/new` remain supported — they are layered underneath, not replaced.
 
 ## Principles
 
 1. **Transport-agnostic core.** Everything that matters — sessions, the
    orchestrator, the fleet, supervision — lives in `core/` and speaks in its own
    vocabulary (`Thread`, `Speaker`, `OutboundEvent`). It never imports a chat
-   platform. Telegram is one adapter in `transports/`; Slack or a VSCode
-   extension would be new adapters with zero core changes.
+   platform. Telegram and a WebSocket surface (web app + VS Code) are adapters in
+   `transports/`; Slack would be another, with zero core changes.
 2. **Glass-walled delegation.** The orchestrator drives worker sessions, and every
    conversation happens in a visible thread. The human can watch any exchange and
    type into it as a third party — both agents see the interjection.
@@ -29,14 +28,14 @@
 flowchart TB
     subgraph transports/
         TG[telegram adapter<br/>topics ⇄ threads, header cards]
-        SLACK[slack adapter<br/>future]
-        VSC[vscode adapter<br/>future]
+        WS[websocket adapter<br/>web app + VS Code]
+        SLACK[slack adapter<br/>next]
     end
     subgraph core/
         ENG[engine<br/>routes events, owns fleet]
         ORC[orchestrator<br/>one privileged session]
         FLEET[fleet<br/>worker registry + state]
-        CS[ClaudeSession<br/>one per thread]
+        CS[CoreSession<br/>one per thread<br/>Claude / Codex backend]
         SUP[supervisor<br/>checkpoint inbox]
         ST[store<br/>restart-proof state]
     end
@@ -85,11 +84,11 @@ flowchart LR
 |---|---|---|---|
 | Lifetime | persistent | per task | until `/kill` |
 | cwd | none (fleet root) | git worktree of target repo | repo itself |
-| Tools | fleet MCP tools (spawn/brief/status/…) | telegram media tools | telegram media tools |
+| Tools | fleet MCP tools (spawn/brief/status/…) | chat media tools | chat media tools |
 | Speaks in | main thread + any worker thread | its own thread | its own thread |
 | Supervised by | human | orchestrator (checkpoints) | human |
 
-The orchestrator is itself a Claude session — its "powers" are MCP tools exposed
+The orchestrator is itself a coding-agent session — its "powers" are MCP tools exposed
 by the engine: `spawn_worker(repo, task, name?)`, `message_worker(id, text)`,
 `worker_status(id?)`, `dismiss_worker(id)`, `report(text)`. Its system prompt
 teaches briefing etiquette: self-contained briefs, explicit report-back markers,

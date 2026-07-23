@@ -1,8 +1,9 @@
 # Security
 
-This tool gives a Telegram chat the ability to run **Claude Code sessions with
+be-a-boss runs **coding-agent sessions (Claude Code or Codex) with
 `bypassPermissions`** — i.e. it executes code and shell commands on the host that
-runs it. Read this before deploying.
+runs it — driven from whichever surface you choose (Telegram, web, or VS Code).
+Read this before deploying.
 
 ## Threat model
 

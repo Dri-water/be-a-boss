@@ -89,7 +89,7 @@ sender per message.
   only at meaningful checkpoints (done / blocked / needs-decision / interjection),
   never per token. Wakes are coalesced to save tokens.
 - **Full media, both directions** — send photos/files/video *to* a session (images
-  become vision input; everything lands in `./.tg-inbox/`), and any session can
+  become vision input; everything lands in `./.beaboss-inbox/`), and any session can
   send photos/video/documents/messages *back* (see [Media & agent tools](#media--agent-tools)).
 - **Resumable** across restarts, **always-on** in Docker, **container-isolated**,
   **batteries-included image** (node/python/git/ffmpeg/chromium; agents can
@@ -132,10 +132,11 @@ sequenceDiagram
     O-->>You: reports outcome in General
 ```
 
-Sessions are driven by the official
-[`claude-agent-sdk`](https://code.claude.com/docs/en/agent-sdk/overview) running
-the standalone `claude` CLI. See **[docs/architecture.md](docs/architecture.md)**
-for the full design and [AGENTS.md](AGENTS.md) for internals.
+Worker sessions run on your chosen backend — by default the official
+[`claude-agent-sdk`](https://code.claude.com/docs/en/agent-sdk/overview) driving
+the standalone `claude` CLI, or the Codex CLI with `BEABOSS_BACKEND=codex`. See
+**[docs/architecture.md](docs/architecture.md)** for the full design and
+[AGENTS.md](AGENTS.md) for internals.
 
 ## Requirements
 
@@ -247,7 +248,7 @@ In any **session/worker topic**:
 | Command | Effect |
 |---|---|
 | *(any message)* | Sent to that session; in a worker topic the orchestrator sees it too |
-| *(a photo / file / video)* | Saved to `./.tg-inbox/` and handed to the session (images also as vision) |
+| *(a photo / file / video)* | Saved to `./.beaboss-inbox/` and handed to the session (images also as vision) |
 | `/stop` | Interrupt the current turn |
 | `/kill` | End the session (a worker's clean worktree is removed; dirty ones kept) |
 
@@ -255,8 +256,8 @@ In any **session/worker topic**:
 
 **You → session.** Send a photo, document, video, animation, audio, or voice note
 into a topic (optionally with a caption). The bot downloads it, saves it under
-`<repo>/.tg-inbox/`, and hands it to the session. Images are additionally attached
-as **vision input** so Claude can see them. (Telegram bots can fetch files up to
+`<repo>/.beaboss-inbox/`, and hands it to the session. Images are additionally attached
+as **vision input** so the agent can see them. (Telegram bots can fetch files up to
 20 MB.)
 
 **Session → you.** Each session gets in-process tools it can call to push content
