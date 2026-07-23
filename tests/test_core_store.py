@@ -1,3 +1,5 @@
+import json
+
 from beaboss.core.store import CoreStore, ThreadRecord
 
 
@@ -41,3 +43,33 @@ def test_delete_and_update_unknown(tmp_path):
     assert s.get("1") is None
     s.update("missing", session_id="sid")  # no raise, no create
     assert s.get("missing") is None
+
+
+def test_flush_writes_schema_version(tmp_path):
+    s = CoreStore(tmp_path / "state")
+    s.put("1", ThreadRecord(role="direct", name="x"))
+    raw = json.loads((tmp_path / "state" / "core.json").read_text())
+    assert raw["version"] == 1
+
+
+def test_corrupt_state_is_quarantined_not_wiped(tmp_path):
+    """A corrupt core.json is preserved (not silently overwritten with empty
+    state) and the store starts fresh, so the org can be recovered by hand."""
+    d = tmp_path / "state"
+    d.mkdir()
+    (d / "core.json").write_text("{ this is not valid json")
+    s = CoreStore(d)
+    assert s.all() == {}                                  # started fresh
+    assert len(list(d.glob("core.json.corrupt-*"))) == 1  # bad file preserved
+
+
+def test_newer_schema_is_refused_not_mangled(tmp_path):
+    """State written by a newer (self-developed) version isn't loaded with older
+    code — it's quarantined, not silently misread."""
+    d = tmp_path / "state"
+    d.mkdir()
+    (d / "core.json").write_text(
+        '{"version": 999, "threads": {"1": {"role": "worker", "name": "X"}}}')
+    s = CoreStore(d)
+    assert s.all() == {}
+    assert list(d.glob("core.json.corrupt-*"))

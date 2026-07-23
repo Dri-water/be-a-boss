@@ -5,12 +5,19 @@ rewrite on change (small data, single event loop — same approach as before).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .ports import Role
+
+log = logging.getLogger("beaboss.core.store")
+
+# Bump when the on-disk shape changes incompatibly; guards a self-developed change
+# from silently mangling state written by a different version of the code.
+SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -45,7 +52,16 @@ class CoreStore:
             return
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            # Don't silently start empty and then overwrite the bad file on the next
+            # write — preserve it and say so, so the org can be recovered by hand.
+            self._quarantine(f"unreadable or corrupt ({e})")
+            return
+        version = raw.get("version", 1)
+        if version > SCHEMA_VERSION:
+            self._quarantine(
+                f"written by a newer schema (v{version} > v{SCHEMA_VERSION}); "
+                f"refusing to load it with older code")
             return
         self.orchestrator_thread = raw.get("orchestrator_thread")
         for k, v in raw.get("threads", {}).items():
@@ -61,14 +77,29 @@ class CoreStore:
                 worker_status=v.get("worker_status", ""),
             )
 
+    def _quarantine(self, why: str) -> None:
+        log.error("core state %s — starting fresh: %s", self.path.name, why)
+        try:
+            backup = self.path.with_name(f"core.json.corrupt-{int(time.time())}")
+            os.replace(self.path, backup)
+            log.error("previous state preserved at %s (recover by hand if needed)", backup)
+        except OSError:
+            pass
+
     def _flush(self) -> None:
         tmp = self.path.with_suffix(".json.tmp")
         payload = {
+            "version": SCHEMA_VERSION,
             "orchestrator_thread": self.orchestrator_thread,
             "threads": {k: asdict(v) for k, v in self._threads.items()},
         }
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        try:
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError as e:
+            # Persistence failed (disk full / read-only): keep running on the
+            # in-memory state and log loudly, rather than crashing the loop.
+            log.error("could not persist core state (kept in memory): %s", e)
 
     # ---- API -------------------------------------------------------------
 

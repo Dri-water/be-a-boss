@@ -482,6 +482,7 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
     engine = Engine(settings, store)
     transport = TelegramTransport(app.bot, settings)
     engine.attach_transport(transport)
+    engine.rehydrate()  # re-surface unfinished workers after a restart
 
     app.bot_data["settings"] = settings
     app.bot_data["engine"] = engine

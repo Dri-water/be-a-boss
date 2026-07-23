@@ -744,6 +744,20 @@ class Engine:
             rows.append((tid, rec, live.status if live else "dormant"))
         return rows
 
+    def rehydrate(self) -> None:
+        """After a restart, re-surface workers still awaiting the orchestrator.
+
+        The supervision inbox is in-memory and does not survive a restart, so an
+        unfinished worker (finished-but-not-landed, or blocked) could otherwise be
+        silently forgotten. Re-enqueue a reminder; it's delivered on the
+        orchestrator's next wake (a boss message or a live worker event).
+        """
+        pending = [rec for rec in self.store.workers().values()
+                   if rec.worker_status in ("blocked", "done")]
+        if pending:
+            names = ", ".join(f"{r.name} ({r.worker_status})" for r in pending)
+            self._note(f"[after restart] workers still awaiting you: {names}")
+
     async def shutdown(self) -> None:
         for session in list(self.sessions.values()):
             await session.stop()

@@ -30,6 +30,7 @@ def main() -> None:
     engine = Engine(settings, store)
     transport = WebSocketTransport()
     engine.attach_transport(transport)
+    engine.rehydrate()  # re-surface unfinished workers after a restart
 
     host = os.getenv("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.getenv("WEB_PORT", "8765").strip() or "8765")

@@ -120,8 +120,11 @@ reports dirty ones instead of deleting them.
 
 `state/` holds JSON: thread registry (thread ⇄ role ⇄ session_id ⇄ cwd/worktree),
 fleet records (worker id, name, task brief, status log), orchestrator session id.
-On restart: threads reattach lazily (`resume=` on next message), the supervisor
-rebuilds its inbox from unfinished worker records.
+On restart: threads reattach lazily (`resume=` on next message). The supervision
+inbox itself is in-memory and does not survive a restart, so `Engine.rehydrate()`
+re-surfaces workers still awaiting the orchestrator (blocked, or finished-but-not-
+landed) — delivered on its next wake — rather than silently forgetting them.
+Per-worker committed work always survives, on its branch.
 
 ## Delivery (landing a worker's branch)
 

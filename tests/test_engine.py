@@ -213,6 +213,22 @@ def test_spawn_worker_worktree_failure_is_clean(tmp_path, monkeypatch):
     assert t.threads == []       # nothing half-created
 
 
+def test_rehydrate_resurfaces_pending_workers(tmp_path):
+    """After a restart, blocked / finished-but-not-landed workers are re-surfaced to
+    the orchestrator; terminal (dismissed) ones are not."""
+    engine, t = _engine(tmp_path)
+    engine.store.put("9", ThreadRecord(role="worker", name="Nova", worker_id="nova",
+                                       worker_status="blocked"))
+    engine.store.put("10", ThreadRecord(role="worker", name="Kite", worker_id="kite",
+                                        worker_status="done"))
+    engine.store.put("11", ThreadRecord(role="worker", name="Ada", worker_id="ada",
+                                        worker_status="dismissed"))
+    engine.rehydrate()
+    assert len(engine._inbox) == 1
+    note = engine._inbox[0]
+    assert "Nova" in note and "Kite" in note and "Ada" not in note
+
+
 def test_dismissed_worker_is_not_resummoned(tmp_path):
     """A message to a dismissed worker (worktree gone) must not rebuild a session
     into a torn-down workspace — it gets a clean explanation instead."""
