@@ -12,6 +12,11 @@ dependencies = [
     "websockets>=16.1.1",
 ]
 
+[project.optional-dependencies]
+# The beautiful terminal cockpit. Optional so the Telegram/Docker base stays lean
+# and agents (who drive with `--json`) need nothing extra: pip install be-a-boss[tui]
+tui = ["textual>=0.80"]
+
 [project.urls]
 Homepage = "https://github.com/Dri-water/be-a-boss"
 Repository = "https://github.com/Dri-water/be-a-boss"

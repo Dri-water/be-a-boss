@@ -251,6 +251,28 @@ async def run(json_mode: bool) -> None:
     await engine.shutdown()
 
 
+async def _build_engine(emit):
+    """Wire the engine + CLI transport for a fresh cockpit and hand it the emit sink."""
+    settings = Settings.from_env()
+    store = CoreStore(settings.state_dir)
+    transport = CLITransport(emit, store)
+    engine = Engine(settings, store)
+    engine.attach_transport(transport)
+    engine.rehydrate()
+    await emit(transport.snapshot())
+    try:
+        await engine._refresh_dashboard()
+    except Exception:  # noqa: BLE001
+        pass
+    return engine, transport, State()
+
+
+def _run_tui() -> None:
+    from .tui import Cockpit
+    bot_name = Settings.from_env().bot_name
+    Cockpit(bot_name=bot_name, engine_builder=_build_engine).run()
+
+
 def main() -> None:
     # UTF-8 in/out everywhere: agents and humans both emit emoji, and Windows
     # consoles/pipes default to a legacy codepage that can't encode them.
@@ -262,9 +284,26 @@ def main() -> None:
     # Logs to stderr so stdout stays clean (JSON in --json mode, chat in interactive).
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    json_mode = "--json" in sys.argv[1:]
+    args = sys.argv[1:]
+    if "--json" in args:
+        mode = "json"
+    elif "--plain" in args:
+        mode = "plain"
+    elif "--tui" in args or sys.stdout.isatty():
+        mode = "tui"
+    else:
+        mode = "plain"  # piped/redirected → line mode by default
+
     try:
-        asyncio.run(run(json_mode))
+        if mode == "tui":
+            try:
+                _run_tui()
+            except ImportError:
+                print("The cockpit needs the TUI extra:  pip install be-a-boss[tui]\n"
+                      "Falling back to plain mode.", file=sys.stderr)
+                asyncio.run(run(json_mode=False))
+        else:
+            asyncio.run(run(json_mode=(mode == "json")))
     except KeyboardInterrupt:
         pass
 

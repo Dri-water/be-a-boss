@@ -142,3 +142,25 @@ def test_bad_json_is_reported_not_fatal():
     _run(engine, transport, State(), '{"type": broken')
     assert any("not valid JSON" in e.get("text", "") for e in events)
     assert engine.inbound == [] and engine.calls == []
+
+
+def test_tui_reveals_frames_as_work_appears():
+    """The self-assembling cockpit: idle it's minimal; the sidebar + dashboard reveal
+    only once a worker exists and the fleet is moving."""
+    import pytest
+    pytest.importorskip("textual")
+    from beaboss.cli.tui import Cockpit
+
+    async def go():
+        app = Cockpit(bot_name="X")
+        async with app.run_test(size=(90, 26)):
+            assert not app.query_one("#sidebar").has_class("show")   # idle: hidden
+            assert not app.query_one("#dash").has_class("show")
+            await app.apply_event({"type": "thread", "id": "1",
+                                   "title": "⚙️ Nova · app", "open": True})
+            await app.apply_event({"type": "dashboard",
+                                   "text": "📋 status\n🟢 1 running"})
+            assert app.query_one("#sidebar").has_class("show")       # revealed
+            assert app.query_one("#dash").has_class("show")
+
+    asyncio.run(go())
