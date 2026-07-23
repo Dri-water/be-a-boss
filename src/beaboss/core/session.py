@@ -104,6 +104,7 @@ class CoreSession:
         max_turns: int | None = None,
         backend: AgentBackend | None = None,
         final_only: bool = False,
+        footer_fn: Callable[[], str | None] | None = None,
     ):
         self.thread_id = thread_id
         self.cwd = cwd
@@ -122,6 +123,10 @@ class CoreSession:
         # orchestrator, who should text the boss like a person, not narrate.
         # (Workers keep streaming into their topics: that's the glass wall.)
         self._final_only = final_only
+        # footer_fn: called at reply time; whatever it returns is appended to the
+        # reply as code-generated ground truth (e.g. the fleet actions this turn).
+        self._footer_fn = footer_fn
+        self._tool_buf: list[str] = []   # batched 🔧 lines (streaming sessions)
         # The agent runtime is a swappable seam; default to the Claude Code SDK.
         self._backend = backend or ClaudeAgentBackend(self._build_options)
         self._queue: asyncio.Queue[Turn] = asyncio.Queue()
@@ -214,9 +219,12 @@ class CoreSession:
                 await session._emit_text(text)
             return {"content": [{"type": "text", "text": "sent"}]}
 
-        return create_sdk_mcp_server(
-            "chat", tools=[send_photo, send_video, send_file, send_message]
-        )
+        tools = [send_photo, send_video, send_file]
+        if not self._final_only:
+            # send_message would let a final_only session narrate around its
+            # one-reply-per-turn contract — don't mount it there.
+            tools.append(send_message)
+        return create_sdk_mcp_server("chat", tools=tools)
 
     async def _tool_send(self, args: dict[str, Any], kind: str) -> dict[str, Any]:
         def err(msg: str) -> dict[str, Any]:
@@ -360,6 +368,7 @@ class CoreSession:
         # answered in that DM, not in the group. Workers/direct sessions leave
         # reply_to unset and post to their own thread as before.
         self._reply_to = turn.reply_to or self.thread_id
+        self._tool_buf = []
         await self._busy(self._reply_to)
         keepalive = asyncio.create_task(self._keep_busy())
         try:
@@ -395,24 +404,36 @@ class CoreSession:
             elif isinstance(message, AssistantMessage):
                 if not self._final_only:
                     for piece in rendering.render_assistant(message):
-                        await self._emit_text(piece)
+                        # Batch consecutive 🔧 one-liners into a single message —
+                        # a 40-tool worker turn must not be 40 notifications.
+                        if piece.startswith("🔧"):
+                            self._tool_buf.append(piece)
+                        else:
+                            await self._flush_tools()
+                            await self._emit_text(piece)
             elif isinstance(message, ResultMessage):
                 if message.session_id:
                     self._capture_session_id(message.session_id)
                 self.turns += 1
                 result = message
+                await self._flush_tools()
                 if self._final_only:
-                    # One clean message: the final reply. Errors still surface;
-                    # the success footer (turn count / cost) is noise here.
+                    # One clean message: the final reply (+ the code-generated
+                    # action footer, if any). Errors still surface; the success
+                    # footer (turn count / cost) is noise here.
+                    footer = self._footer_fn() if self._footer_fn else None
                     if message.is_error or (message.subtype and message.subtype != "success"):
                         for piece in rendering.render_result(message):
                             await self._emit_text(piece)
                     elif (message.result or "").strip():
-                        await self._emit_text(message.result.strip())
+                        text = message.result.strip()
+                        if footer:
+                            text = f"{text}\n\n{footer}"
+                        await self._emit_text(text)
                     elif turn.reply_to:
                         # A boss-initiated turn must never end in total silence.
                         # (Digest turns may stay quiet on purpose.)
-                        await self._emit_text("✓ done")
+                        await self._emit_text(footer or "✓ done")
                 else:
                     for piece in rendering.render_result(message):
                         await self._emit_text(piece)
@@ -422,6 +443,11 @@ class CoreSession:
                 await self.on_turn_done(self, result)
             except Exception:  # noqa: BLE001
                 log.exception("on_turn_done hook failed thread=%s", self.thread_id)
+
+    async def _flush_tools(self) -> None:
+        if self._tool_buf:
+            buf, self._tool_buf = self._tool_buf, []
+            await self._emit_text("\n".join(buf))
 
     async def _emit_text(self, text: str) -> None:
         if not text.strip():

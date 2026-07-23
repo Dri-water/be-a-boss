@@ -179,7 +179,7 @@ def test_fake_backend_drives_a_turn(tmp_path):
     assert [t.text for t in backend.sent] == ["hi there"]
     texts = [o.text for o in post.out]
     assert any("hello from fake" in t for t in texts)
-    assert any("done · 2 turns" in t for t in texts)
+    assert any("turn ended · 2 turns" in t for t in texts)
     assert sess.session_id == "sess-xyz" and captured_sids == ["sess-xyz"]
     assert sess.turns == 1
     assert done and done[0].session_id == "sess-xyz"
@@ -284,3 +284,69 @@ def test_tool_send_posts_outbound_with_speaker(tmp_path):
     out = post.out[0]
     assert out.media_kind == "photo" and out.speaker.name == "Nova"
     assert out.thread_id == "t1" and out.caption == "c"
+
+
+def test_final_only_appends_action_footer(tmp_path):
+    """The code-generated ⚙ action line rides on the reply itself — the boss sees
+    what actually happened in the same message."""
+    post = SinkPost()
+    backend = FakeBackend([
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=2, session_id="s1", total_cost_usd=0.01,
+            result="Nova is on it.",
+        ),
+    ])
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+        footer_fn=lambda: "⚙ spawn_worker → Nova · myapp",
+    )
+
+    async def drive():
+        await sess.start()
+        await sess.submit("build it", reply_to="dm:1")
+        await sess._queue.join()
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert [o.text for o in post.out] == ["Nova is on it.\n\n⚙ spawn_worker → Nova · myapp"]
+
+
+def test_streaming_session_batches_tool_lines(tmp_path):
+    """A many-tool worker turn must not be a message per tool call — consecutive 🔧
+    lines are flushed as one message."""
+    from claude_agent_sdk import ToolUseBlock
+    post = SinkPost()
+    backend = FakeBackend([
+        AssistantMessage(content=[
+            ToolUseBlock(id="1", name="Bash", input={"command": "ls"}),
+            ToolUseBlock(id="2", name="Read", input={"file_path": "a.py"}),
+            ToolUseBlock(id="3", name="Bash", input={"command": "pytest"}),
+        ], model="fake"),
+        AssistantMessage(content=[TextBlock(text="all tests pass")], model="fake"),
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=2, session_id="s1", total_cost_usd=0.01,
+        ),
+    ])
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend,
+    )
+
+    async def drive():
+        await sess.start()
+        await sess.submit("run the tests")
+        await sess._queue.join()
+        await sess.stop()
+
+    asyncio.run(drive())
+    texts = [o.text for o in post.out]
+    assert len(texts) == 3                          # tools batch + reply + footer
+    assert texts[0].count("🔧") == 3                # one message, three tool lines
+    assert texts[1] == "all tests pass"

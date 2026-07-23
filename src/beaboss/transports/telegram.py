@@ -235,6 +235,8 @@ class TelegramTransport:
 
     @staticmethod
     def _header(out: Outbound) -> str:
+        if out.thread_id.startswith("dm:"):
+            return ""  # a 1:1 chat — a name card on every message is noise
         if out.speaker.role in ("orchestrator", "worker"):
             return f"{out.speaker.label}:"
         if out.speaker.role == "system":
@@ -588,6 +590,10 @@ async def _post_init(app: Application) -> None:
     ])
     me = await app.bot.get_me()
     log.info("%s online as @%s", app.bot_data["settings"].bot_name, me.username)
+    try:  # make the pinned board current from the moment we're online
+        await app.bot_data["engine"]._refresh_dashboard()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def _post_shutdown(app: Application) -> None:

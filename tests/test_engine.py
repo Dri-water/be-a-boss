@@ -510,3 +510,13 @@ def test_passing_checks_surface_in_approval_prompt(tmp_path):
     assert req.get("is_error") is not True
     assert engine._pending_delivery.get("ada") == "merge"
     assert any("🚦" in p.text and "✅ checks passed" in p.text for p in t.posts)
+
+
+def test_turn_actions_drain_into_footer_once(tmp_path):
+    engine, _ = _engine(tmp_path)
+    assert engine._drain_turn_actions() is None            # nothing ran → no footer
+    engine._action("spawn_worker → Nova · myapp")
+    engine._action("message_worker(nova)")
+    footer = engine._drain_turn_actions()
+    assert footer == "⚙ spawn_worker → Nova · myapp · message_worker(nova)"
+    assert engine._drain_turn_actions() is None            # drained — no stale leak

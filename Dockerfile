@@ -43,6 +43,15 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 # refuse them with "dubious ownership".
 RUN git config --system --add safe.directory '*'
 
+# Engine-side git operations (delivery merges, branch pushes) need an identity and
+# credentials: a neutral bot identity for merge commits (repo/global config still
+# wins where set — and it keeps personal emails out of public history), and gh as
+# the credential helper — it reads GH_TOKEN when present. Workers never see the
+# token: it's scrubbed from their environment.
+RUN git config --system user.name "be-a-boss" \
+    && git config --system user.email "be-a-boss@localhost" \
+    && git config --system credential.helper '!gh auth git-credential'
+
 # Claude Code refuses bypassPermissions (--dangerously-skip-permissions) when
 # running as root, UNLESS it knows it's sandboxed. The container is the sandbox,
 # and we keep root so sessions can apt/npm/pip install freely.

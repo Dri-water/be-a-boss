@@ -98,7 +98,9 @@ def render_result(msg: ResultMessage) -> list[str]:
     cost = ""
     if msg.total_cost_usd:
         cost = f" · ${msg.total_cost_usd:.4f}"
-    return [f"— done · {msg.num_turns} turns{cost}"]
+    # Status-neutral on purpose: "done" here would contradict a worker that just
+    # reported "STATUS: blocked" in the same breath.
+    return [f"— turn ended · {msg.num_turns} turns{cost}"]
 
 
 def chunk(text: str, size: int = _CHUNK) -> list[str]:

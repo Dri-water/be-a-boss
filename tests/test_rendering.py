@@ -54,12 +54,12 @@ def test_render_assistant_drops_thinking_and_blank():
 
 def test_render_result_success_footer_with_cost():
     assert rendering.render_result(R(num_turns=3, total_cost_usd=0.0123)) == [
-        "— done · 3 turns · $0.0123"
+        "— turn ended · 3 turns · $0.0123"
     ]
 
 
 def test_render_result_success_footer_no_cost():
-    assert rendering.render_result(R(num_turns=2)) == ["— done · 2 turns"]
+    assert rendering.render_result(R(num_turns=2)) == ["— turn ended · 2 turns"]
 
 
 def test_render_result_error_from_result():

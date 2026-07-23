@@ -81,7 +81,10 @@ ORCHESTRATOR_APPEND = (
     "the boss (that line is code-generated ground truth; trust it over your "
     "memory). When the boss asks for something, CALL THE TOOL in the same turn, "
     "then report what actually happened — or say plainly that you haven't started. "
-    "A claimed action that didn't happen is the worst possible failure.\n\n"
+    "A claimed action that didn't happen is the worst possible failure. A "
+    "code-generated ⚙ action line is appended to your replies whenever fleet tools "
+    "ran this turn; the boss sees it — a claim with no matching ⚙ line is visibly "
+    "false.\n\n"
     "Where you work:\n"
     "- The boss talks to you in the group's #general or by DM — same you either way; "
     "just reply wherever they spoke (a DM keeps small talk out of #general).\n"
@@ -112,7 +115,9 @@ ORCHESTRATOR_APPEND = (
     "- You are woken with [fleet inbox] digests when a worker finishes a turn, "
     "gets blocked, needs a decision, or the boss interjects in a worker thread. "
     "React to the digest: answer the worker, re-brief, dismiss, or report to the "
-    "boss. Do not poll; do not micro-manage a working worker.\n"
+    "boss. Do not poll; do not micro-manage a working worker. If a digest needs "
+    "nothing boss-facing, reply with NOTHING — an empty reply posts no message "
+    "(never narrate 'noted').\n"
     "- A worker's 'STATUS: blocked' means they need YOUR help now. A "
     "'needs-decision' belongs to the boss — relay it with options and your "
     "recommendation.\n"
@@ -256,6 +261,10 @@ class Engine:
         # replies and approval prompts follow the boss there instead of stranding
         # the conversation in #general while their DM goes silent.
         self._last_boss_thread = "general"
+        # Fleet actions taken during the current orchestrator turn — drained into a
+        # code-generated footer on its reply, so the boss can SEE what actually
+        # happened (a claim with no matching ⚙ line is visibly false).
+        self._turn_actions: list[str] = []
         # The thread that is the orchestrator's "office". Transports may override;
         # the Telegram adapter's General topic maps to "general".
         self.main_thread = "general"
@@ -298,8 +307,21 @@ class Engine:
             live = self.sessions.get(tid)
             run = live.status if live else "dormant"
             state = rec.worker_status or "working"
+            if rec.worker_id in self._pending_delivery:
+                state += ", awaiting /approve"
             rows.append(f"{rec.worker_id}={state}/{run} on {Path(rec.repo).name}")
         return "; ".join(rows) if rows else "no workers exist"
+
+    def _action(self, line: str) -> None:
+        """Record a fleet action for the current orchestrator turn's footer."""
+        self._turn_actions.append(line)
+
+    def _drain_turn_actions(self) -> str | None:
+        """The code-generated footer for the orchestrator's reply: what it actually
+        DID this turn. None (no footer) when no fleet tools ran — so the absence of
+        a ⚙ line is itself information."""
+        acts, self._turn_actions = self._turn_actions, []
+        return ("⚙ " + " · ".join(acts)) if acts else None
 
     # ---- inbound routing -------------------------------------------------
 
@@ -436,6 +458,7 @@ class Engine:
             system_append=append,
             extra_mcp_servers={"fleet": self._build_fleet_server()},
             final_only=True,  # text the boss one clean reply, don't narrate
+            footer_fn=self._drain_turn_actions,  # …plus a truthful ⚙ action line
         )
 
     def _make_worker_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
@@ -871,6 +894,7 @@ class Engine:
             f"[Brief from the orchestrator]\n{task.strip()}"
         )
         await self._refresh_dashboard()
+        self._action(f"spawn_worker → {name} · {repo.name}")
         return {"content": [{"type": "text", "text":
                 f"spawned worker {worker_id} ({name}) in {iso_note}; "
                 f"thread created. They will report back via the fleet inbox."}]}
@@ -895,6 +919,7 @@ class Engine:
         if session is None:
             return err("worker session unavailable")
         await session.submit(f"[From the orchestrator]: {text.strip()}")
+        self._action(f"message_worker({rec.worker_id})")
         return {"content": [{"type": "text", "text": "delivered"}]}
 
     async def _dismiss_worker(self, worker_id: str) -> dict[str, Any]:
@@ -930,6 +955,7 @@ class Engine:
             except Exception:  # noqa: BLE001
                 pass
         await self._refresh_dashboard()
+        self._action(f"dismiss_worker({worker_id})")
         return {"content": [{"type": "text", "text": f"dismissed {worker_id}{detail}"}]}
 
     async def _review_worker(self, worker_id: str) -> dict[str, Any]:
@@ -993,6 +1019,7 @@ class Engine:
         self.store.update(thread_id,
                           checks=("pass" if code == 0 else "fail"), checks_sha=sha)
         verdict = "✅ passed" if code == 0 else f"❌ FAILED (exit {code})"
+        self._action(f"run_checks({rec.worker_id}): {'✅' if code == 0 else '❌'}")
         # Surface the REAL result into the worker's own thread so the boss sees proof.
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM,
@@ -1050,6 +1077,7 @@ class Engine:
                   f"into '{base}'?{checks_note}\n"
                   f"    /approve {rec.worker_id}    ·    /reject {rec.worker_id}")))
         await self._refresh_dashboard()
+        self._action(f"deliver_worker({rec.worker_id}, {method}) → 🚦")
         return {"content": [{"type": "text", "text":
                 f"delivery of {rec.name} via {method} requested — the boss must "
                 f"/approve {rec.worker_id} to authorize it (I can't land it myself)."}]}
