@@ -519,3 +519,37 @@ def test_quiet_turn_still_signals_idle(tmp_path):
     assert post.out == []               # confirmed: the quiet digest posted nothing
     assert busy_calls == ["general"]    # working was shown…
     assert idle_calls == ["general"]    # …and cleared at turn-end (no stuck indicator)
+
+
+def test_safe_name_strips_nul_and_stays_basename():
+    """Security-review follow-up: _safe_name keeps only the basename (never a
+    traversal) AND strips NULs, which pass through Path().name but make write_bytes
+    raise ValueError."""
+    from beaboss.core.session import _safe_name
+    assert _safe_name("../../etc/passwd") == "passwd"
+    assert _safe_name("a\x00b.png") == "ab.png"
+    assert _safe_name("../../x\x00y") == "xy"
+    assert _safe_name("\x00") == "file" and _safe_name("") == "file"
+
+
+def test_submit_media_nul_filename_is_saved_not_crashed(tmp_path):
+    """A crafted NUL filename must not raise out of submit_media (which would drop the
+    web client's socket); it's sanitized and saved."""
+    sess = _session(tmp_path)
+    asyncio.run(sess.submit_media(
+        "", [MediaIn("file", "ev\x00il.bin", "application/octet-stream", b"x")]))
+    assert (tmp_path / ".beaboss-inbox" / "evil.bin").is_file()
+    assert sess._queue.get_nowait().text  # a turn was still queued
+
+
+def test_submit_media_unsupported_image_mime_saved_but_not_vision(tmp_path):
+    """An image type the API can't see (svg/bmp/tiff) is saved as a file, not sent as
+    a vision block that would 400 the boss's own turn."""
+    sess = _session(tmp_path)
+    asyncio.run(sess.submit_media("look", [
+        MediaIn("image", "logo.svg", "image/svg+xml", b"<svg/>"),
+        MediaIn("image", "shot.png", "image/png", b"\x89PNG"),
+    ]))
+    turn = sess._queue.get_nowait()
+    assert [i["media_type"] for i in turn.images] == ["image/png"]   # svg excluded
+    assert (tmp_path / ".beaboss-inbox" / "logo.svg").is_file()      # …but still saved

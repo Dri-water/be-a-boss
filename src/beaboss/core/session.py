@@ -32,6 +32,9 @@ log = logging.getLogger("beaboss.core.session")
 SETTING_SOURCES = ["project", "local"]
 INBOX_DIRNAME = ".beaboss-inbox"
 MAX_SEND_BYTES = 50 * 1024 * 1024
+# Image types the model's vision actually accepts — anything else is saved as a plain
+# file (readable from its path) rather than sent as a vision block the API would 400 on.
+VISION_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 DEFAULT_SESSION_APPEND = (
     "Runtime context: you are a headless coding-agent session driven programmatically, "
@@ -70,7 +73,10 @@ class Turn:
 
 
 def _safe_name(name: str) -> str:
-    return Path(name).name or "file"
+    # Path(name).name keeps only the final path component — no separator can survive,
+    # so the result is always a direct child of the inbox, never a traversal. Also
+    # strip NULs: they pass through .name but make write_bytes raise ValueError.
+    return Path(name).name.replace("\x00", "") or "file"
 
 
 PostFn = Callable[[Outbound], Awaitable[None]]
@@ -312,13 +318,15 @@ class CoreSession:
             dest = inbox / _safe_name(it.filename)
             try:
                 dest.write_bytes(it.data)
-            except OSError as e:
+            except (OSError, ValueError) as e:  # ValueError: e.g. NUL in a crafted name
                 log.warning("could not save inbox file %s: %s", dest, e)
                 continue
             saved.append((dest, it.mime))
-            if it.kind == "image":
+            # Only send a vision block for image types the API accepts; other images
+            # (svg/tiff/bmp) are still saved as files the agent can open by path.
+            if it.kind == "image" and (it.mime or "").lower() in VISION_MIMES:
                 images.append({
-                    "media_type": it.mime or "image/jpeg",
+                    "media_type": it.mime,
                     "data": base64.b64encode(it.data).decode("ascii"),
                 })
 
