@@ -42,10 +42,13 @@ class Cockpit(App):
     #dash { height: auto; max-height: 10; background: $panel; color: $text;
             padding: 0 1; display: none; border-top: solid $boost; }
     #dash.show { display: block; }
+    #activity { height: 1; color: $text-muted; padding: 0 1; background: $boost; }
     #prompt { border: none; border-top: solid $boost; height: 3; background: $surface; }
     ListItem { padding: 0 1; color: $text; }
     ListItem.-active { background: $accent 40%; text-style: bold; }
     """
+
+    _WORKING = "#ffaf00"  # amber: a thread is mid-turn
 
     BINDINGS = [Binding("ctrl+q", "quit", "quit"),
                 Binding("ctrl+c", "quit", "quit")]
@@ -60,6 +63,8 @@ class Cockpit(App):
         self.msgs: dict[str, list[tuple[dict, str]]] = {OFFICE: []}
         self.titles: dict[str, str] = {OFFICE: "🧭 Orchestrator"}
         self.unread: dict[str, int] = {}
+        self.working: set[str] = set()   # threads mid-turn (busy → next message)
+        self._activity_text = ""
         self._dash_text = ""
         self.active = OFFICE
         self.engine = self.transport = self.state = None
@@ -72,11 +77,13 @@ class Cockpit(App):
                 yield ListView(id="threads")
             yield RichLog(id="convo", wrap=True, markup=True, highlight=False)
         yield Static("", id="dash")
+        yield Static("", id="activity")
         yield Input(placeholder="Message the orchestrator…   (/help for commands)",
                     id="prompt")
 
     async def on_mount(self) -> None:
         self.query_one("#prompt", Input).focus()
+        self._refresh_activity()
         if self._engine_builder is not None:
             self.engine, self.transport, self.state = \
                 await self._engine_builder(self.apply_event)
@@ -101,7 +108,12 @@ class Cockpit(App):
                     self.msgs.setdefault(th["id"], [])
             self._reveal_frames()
             self._refresh_sidebar()
-        # "busy": nothing to paint in this view
+        elif t == "busy":
+            # a thread just started a turn — show it's working until its reply lands
+            tid = event.get("thread_id", OFFICE)
+            self.working.add(tid)
+            self._refresh_sidebar()
+            self._refresh_activity()
 
     def _ingest_message(self, event: dict) -> None:
         tid = event.get("thread_id", OFFICE)
@@ -115,11 +127,16 @@ class Cockpit(App):
             self._reveal_frames()
             self._refresh_sidebar()
         self.msgs.setdefault(tid, []).append((event.get("speaker", {}), text))
+        was_working = tid in self.working
+        self.working.discard(tid)   # the reply landed — the turn is over
         if tid == self.active:
             self._write(event.get("speaker", {}), text)
         else:
             self.unread[tid] = self.unread.get(tid, 0) + 1
+        if was_working or tid != self.active:
             self._refresh_sidebar()
+        if was_working:
+            self._refresh_activity()
 
     def _write(self, speaker: dict, text: str) -> None:
         log = self.query_one("#convo", RichLog)
@@ -135,9 +152,11 @@ class Cockpit(App):
         if event.get("removed"):
             self.titles.pop(tid, None)
             self.msgs.pop(tid, None)
+            self.working.discard(tid)
             if self.active == tid:
                 self.active = OFFICE
                 self._render_active()
+                self._refresh_activity()
         else:
             self.titles[tid] = event["title"]
             self.msgs.setdefault(tid, [])
@@ -160,12 +179,31 @@ class Cockpit(App):
         lv = self.query_one("#threads", ListView)
         lv.clear()
         for tid, title in self.titles.items():
-            badge = f"  [b]●{self.unread[tid]}[/b]" if self.unread.get(tid) else ""
-            item = ListItem(Label(f"{title}{badge}"))
+            dot = f"[{self._WORKING}]●[/] " if tid in self.working else ""
+            # the active thread is by definition read — never badge it
+            badge = (f"  [b]●{self.unread[tid]}[/b]"
+                     if self.unread.get(tid) and tid != self.active else "")
+            item = ListItem(Label(f"{dot}{title}{badge}"))
             item._tid = tid
             if tid == self.active:
                 item.add_class("-active")
             lv.append(item)
+
+    def _refresh_activity(self) -> None:
+        """The one-line bar above the prompt: what's moving, or a quiet hint."""
+        working = [tid for tid in self.working if tid in self.titles]
+        if self.active in working:
+            who = self.titles[self.active].split(" · ")[0]
+            more = f"   [dim]+{len(working) - 1} more busy[/]" if len(working) > 1 else ""
+            text = f"[{self._WORKING}]⋯ {who} is working…[/]{more}"
+        elif working:
+            names = ", ".join(self.titles[t].split(" · ")[0] for t in working[:3])
+            text = f"[{self._WORKING}]⋯ working:[/] [dim]{names}[/]"
+        else:
+            text = ("[dim]enter to send · click a thread to switch · "
+                    "/help for commands[/]")
+        self._activity_text = text
+        self.query_one("#activity", Static).update(text)
 
     def _render_active(self) -> None:
         log = self.query_one("#convo", RichLog)
@@ -184,6 +222,7 @@ class Cockpit(App):
                 self.state.active = tid
             self._render_active()
             self._refresh_sidebar()
+            self._refresh_activity()
             self.query_one("#prompt", Input).focus()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -208,3 +247,4 @@ class Cockpit(App):
                 self.unread.pop(self.active, None)
                 self._render_active()
                 self._refresh_sidebar()
+                self._refresh_activity()

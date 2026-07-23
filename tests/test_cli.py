@@ -208,3 +208,27 @@ def test_tui_snapshot_seeds_sidebar_on_restart():
             assert app.query_one("#sidebar").has_class("show")
 
     asyncio.run(go())
+
+
+def test_tui_busy_indicator_lifecycle():
+    """A `busy` event marks a thread working (sidebar dot + activity bar); its next
+    message clears it. This is the 'is anything happening?' signal for a live worker."""
+    import pytest
+    pytest.importorskip("textual")
+    from beaboss.cli.tui import Cockpit
+
+    async def go():
+        app = Cockpit(bot_name="X", demo_events=[
+            {"type": "thread", "id": "7", "title": "⚙️ Nova · app", "open": True}])
+        async with app.run_test():
+            app.active = "7"                                   # watch the worker thread
+            await app.apply_event({"type": "busy", "thread_id": "7"})
+            assert "7" in app.working
+            assert "working" in app._activity_text
+            await app.apply_event({"type": "message", "thread_id": "7",
+                                   "speaker": {"role": "worker", "name": "Nova"},
+                                   "text": "done"})
+            assert "7" not in app.working                      # reply landed → cleared
+            assert "working" not in app._activity_text
+
+    asyncio.run(go())
