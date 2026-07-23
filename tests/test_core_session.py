@@ -353,10 +353,18 @@ def test_streaming_session_batches_tool_lines(tmp_path):
 
 
 def test_interrupted_turn_says_stopped_not_diagnostics(tmp_path):
-    """A human /stop must render as '⏹ stopped.' — not leak the backend's internal
-    diagnostic result (observed: '⚠️ [ede_diagnostic] result_type=user …')."""
+    """A human /stop MID-TURN must render as '⏹ stopped.' — not leak the backend's
+    internal diagnostic result (observed: '⚠️ [ede_diagnostic] result_type=user …').
+    The flag is set during the turn (after the per-turn reset), as interrupt() does."""
     post = SinkPost()
-    backend = FakeBackend([
+    holder = {}
+
+    class StopMidTurn(FakeBackend):
+        async def send(self, turn):
+            await super().send(turn)
+            holder["sess"]._interrupted = True   # boss hits /stop while busy
+
+    backend = StopMidTurn([
         ResultMessage(
             subtype="error_during_execution", duration_ms=1, duration_api_ms=1,
             is_error=True, num_turns=1, session_id="s1",
@@ -369,7 +377,7 @@ def test_interrupted_turn_says_stopped_not_diagnostics(tmp_path):
         settings=_settings(tmp_path), post=post, busy=_noop_busy,
         on_session_id=lambda _s: None, backend=backend, final_only=True,
     )
-    sess._interrupted = True   # what interrupt() sets while the turn is busy
+    holder["sess"] = sess
 
     async def drive():
         await sess.start()
@@ -381,9 +389,10 @@ def test_interrupted_turn_says_stopped_not_diagnostics(tmp_path):
     assert [o.text for o in post.out] == ["⏹ stopped."]
 
 
-def test_literal_nothing_reply_is_suppressed(tmp_path):
-    """The digest-guidance sentinel must never leak: a reply of literally 'NOTHING'
-    posts no message (digest turn) — observed leak in live testing."""
+def test_quiet_digest_posts_nothing_on_the_real_path(tmp_path):
+    """The production path: a digest carries reply_to (never None) AND quiet_ok — an
+    empty/sentinel reply must post NOTHING. (The old test used reply_to=None, a path
+    the engine never takes, so it masked the '✓ done' spam bug.)"""
     post = SinkPost()
     backend = FakeBackend([
         ResultMessage(
@@ -392,7 +401,7 @@ def test_literal_nothing_reply_is_suppressed(tmp_path):
         ),
     ])
     sess = CoreSession(
-        thread_id="t1", cwd=tmp_path,
+        thread_id="general", cwd=tmp_path,
         speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
         settings=_settings(tmp_path), post=post, busy=_noop_busy,
         on_session_id=lambda _s: None, backend=backend, final_only=True,
@@ -400,12 +409,71 @@ def test_literal_nothing_reply_is_suppressed(tmp_path):
 
     async def drive():
         await sess.start()
-        await sess.submit("[fleet inbox]\n- worker nova finished")  # digest: no reply_to
+        # exactly what _wake_orchestrator does: reply_to set + quiet_ok=True
+        await sess.submit("[fleet inbox]\n- worker nova finished",
+                          reply_to="general", quiet_ok=True)
         await sess._queue.join()
         await sess.stop()
 
     asyncio.run(drive())
-    assert post.out == []          # nothing posted — the sentinel is not a message
+    assert post.out == []          # quiet checkpoint → no message, no "✓ done"
+
+
+def test_boss_turn_never_ends_silent(tmp_path):
+    """The counterpart: a BOSS turn (reply_to set, quiet_ok False) with an empty
+    reply must still post something — never leave the boss hanging."""
+    post = SinkPost()
+    backend = FakeBackend([
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s1", result="",
+        ),
+    ])
+    sess = CoreSession(
+        thread_id="general", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True)
+
+    async def drive():
+        await sess.start()
+        await sess.submit("hi", reply_to="dm:1")     # boss turn: quiet_ok defaults False
+        await sess._queue.join()
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert post.out and post.out[0].text == "✓ done"
+
+
+def test_stale_interrupt_flag_does_not_eat_the_next_reply(tmp_path):
+    """Regression: an interrupted turn that ends with no ResultMessage must not leave
+    _interrupted set and replace the NEXT turn's real reply with '⏹ stopped.'"""
+    post = SinkPost()
+    backend = FakeBackend([
+        # turn 1: streams a block then ends with NO ResultMessage (racy interrupt)
+        AssistantMessage(content=[TextBlock(text="partial…")], model="fake"),
+        # turn 2: a normal successful reply
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s1", result="here is the real answer"),
+    ])
+    sess = CoreSession(
+        thread_id="general", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True)
+
+    async def drive():
+        await sess.start()
+        sess._interrupted = True            # leaked from a prior interrupted turn
+        await sess.submit("do it", reply_to="dm:1")
+        await sess._queue.join()
+        await sess.stop()
+
+    asyncio.run(drive())
+    # the reset at turn-start cleared the stale flag → the real answer survives
+    assert any("real answer" in o.text for o in post.out)
+    assert not any(o.text.startswith("⏹ stopped") for o in post.out)
 
 
 def test_interrupt_sets_flag_only_when_busy(tmp_path):

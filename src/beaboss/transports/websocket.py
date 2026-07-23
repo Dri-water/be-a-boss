@@ -50,15 +50,24 @@ class WebSocketTransport:
     """Implements core.ports.Transport, fanning core events out to browsers."""
 
     _MEDIA_CAP = 8 * 1024 * 1024  # keep ws frames browser-friendly
+    _HISTORY_CAP = 300            # recent messages replayed to a (re)connecting client
 
     def __init__(self, store=None) -> None:
         self.clients: set[ServerConnection] = set()
         self.threads: dict[str, dict] = {}  # id -> {"title", "open"}
         self.dashboard = ""                 # latest rendered status board
+        self.history: list[dict] = []       # recent message events for reconnect replay
         self._next = 0
         self._add_thread(OFFICE, "Orchestrator")
         if store is not None:
             self._rehydrate(store)
+
+    def record(self, event: dict) -> None:
+        """Keep a bounded scrollback so a reconnecting/reloading client isn't
+        amnesiac — the whole conversation shouldn't vanish on a dropped socket."""
+        self.history.append(event)
+        if len(self.history) > self._HISTORY_CAP:
+            del self.history[:-self._HISTORY_CAP]
 
     def _rehydrate(self, store) -> None:
         """Restart-proof: re-seed the thread list from the store so a web restart
@@ -106,24 +115,28 @@ class WebSocketTransport:
 
     async def post(self, out: Outbound) -> None:
         if out.media_path is not None:
-            event = self._media_event(out)
-            if event is not None:
-                await self._broadcast(event)
+            live = self._media_event(out)
+            if live is not None:
+                # history keeps a light placeholder (no base64) so scrollback stays bounded
+                self.record({"type": "message", "thread_id": out.thread_id,
+                             "speaker": _speaker_json(out.speaker),
+                             "text": f"{out.caption or ''}\n[image: {out.media_path.name}]".strip()})
+                await self._broadcast(live)
                 return
             # unreadable / oversized → a readable placeholder, never silence
             note = (f"{out.caption or ''}\n[{out.media_kind or 'file'}: "
                     f"{out.media_path.name} — too large for the browser]").strip()
-            await self._broadcast({
-                "type": "message", "thread_id": out.thread_id,
-                "speaker": _speaker_json(out.speaker), "text": note,
-            })
+            event = {"type": "message", "thread_id": out.thread_id,
+                     "speaker": _speaker_json(out.speaker), "text": note}
+            self.record(event)
+            await self._broadcast(event)
             return
         if not out.text.strip():
             return
-        await self._broadcast({
-            "type": "message", "thread_id": out.thread_id,
-            "speaker": _speaker_json(out.speaker), "text": out.text,
-        })
+        event = {"type": "message", "thread_id": out.thread_id,
+                 "speaker": _speaker_json(out.speaker), "text": out.text}
+        self.record(event)
+        await self._broadcast(event)
 
     def _media_event(self, out: Outbound) -> dict | None:
         """A worker's screenshot/file as a real inline event — the same proof the
@@ -173,6 +186,8 @@ class WebSocketTransport:
             for tid, t in self.threads.items()
         ]}
         await ws.send(json.dumps(snapshot))
+        for event in self.history:            # replay recent conversation (no amnesia)
+            await ws.send(json.dumps(event))
         if self.dashboard:
             await ws.send(json.dumps({"type": "dashboard", "text": self.dashboard}))
 
@@ -219,6 +234,10 @@ def make_handler(engine, transport: WebSocketTransport):
                     thread_id = str(msg.get("thread_id") or "").strip()
                     text = str(msg.get("text") or "")
                     if thread_id and text.strip():
+                        # record the boss's own line so a reload shows both sides
+                        transport.record({"type": "message", "thread_id": thread_id,
+                                          "speaker": {"role": "you", "name": "You",
+                                                      "emoji": ""}, "text": text})
                         await engine.on_inbound(InboundMessage(
                             thread_id=thread_id, text=text,
                             sender_name=str(msg.get("sender_name") or "the boss")))
@@ -243,12 +262,22 @@ def make_handler(engine, transport: WebSocketTransport):
                             thread_id=tid, speaker=SYSTEM, text="🗑 Session ended."))
                         await transport.close_thread(tid)
                 elif mtype == "new":
-                    result = await engine.new_direct(
-                        str(msg.get("path") or ""),
-                        str(msg.get("name") or "").strip() or None)
-                    if isinstance(result, str):  # an error message
+                    path = str(msg.get("path") or "").strip()
+                    if not path:
                         await transport.post(Outbound(
-                            thread_id=OFFICE, speaker=SYSTEM, text=result))
+                            thread_id=OFFICE, speaker=SYSTEM,
+                            text="Usage: /new <path> [name]"))
+                    else:
+                        result = await engine.new_direct(
+                            path, str(msg.get("name") or "").strip() or None)
+                        if isinstance(result, str):  # an error message
+                            await transport.post(Outbound(
+                                thread_id=OFFICE, speaker=SYSTEM, text=result))
+                        else:
+                            tid, title = result
+                            await transport.post(Outbound(
+                                thread_id=tid, speaker=SYSTEM,
+                                text=f"✅ direct session ready: {title}. Type to talk to it."))
                 elif mtype in ("approve", "reject"):
                     wid = str(msg.get("worker_id") or "").strip()
                     if wid:
@@ -300,6 +329,10 @@ async def serve_forever(engine, transport: WebSocketTransport,
     """Run the WebSocket server until cancelled, gated by Origin + handshake token."""
     allowed = {"null", f"http://{host}:{port}",
                f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
+    try:  # show the idle status board from the moment we're up (parity with Telegram)
+        await engine._refresh_dashboard()
+    except Exception:  # noqa: BLE001
+        pass
     async with serve(make_handler(engine, transport), host, port,
                      process_request=_gatekeeper(token, allowed)):
         log.info("websocket transport listening on ws://%s:%s", host, port)

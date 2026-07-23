@@ -247,3 +247,49 @@ def test_dashboard_broadcasts_and_snapshots(tmp_path):
                 assert json.loads(await ws2.recv())["type"] == "dashboard"
 
     asyncio.run(scenario())
+
+
+def test_history_replayed_on_reconnect(tmp_path):
+    """A reconnecting/reloading client is not amnesiac: the server replays recent
+    messages after the threads snapshot (HIGH-2 from the UX review)."""
+    from beaboss.core.ports import Outbound, Speaker
+
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            # first client sends a message + gets a reply, then disconnects
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await ws.recv()  # snapshot
+                await ws.send(json.dumps({"type": "message", "thread_id": "general",
+                                          "text": "build X"}))
+                await _wait_for(lambda: len(engine.inbound) == 1)
+                await transport.post(Outbound(
+                    thread_id="general",
+                    speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+                    text="on it"))
+            # a fresh client replays the whole exchange
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws2:
+                assert json.loads(await ws2.recv())["type"] == "threads"
+                replay = [json.loads(await ws2.recv()) for _ in range(2)]
+        texts = [e["text"] for e in replay]
+        assert texts == ["build X", "on it"]        # both sides, in order
+
+    asyncio.run(scenario())
+
+
+def test_web_new_empty_path_is_guarded(tmp_path):
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await ws.recv()
+                await ws.send(json.dumps({"type": "new", "path": ""}))
+                evt = json.loads(await ws.recv())
+        assert "Usage" in evt["text"]
+        assert not any(c[0] == "new" for c in engine.calls)   # no session opened
+
+    asyncio.run(scenario())

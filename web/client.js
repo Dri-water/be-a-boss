@@ -23,10 +23,18 @@
     connect() {
       const ws = new WebSocket(this.url);
       this.ws = ws;
-      ws.onopen = () => this._emit("open");
-      ws.onclose = () => this._emit("close");
+      ws.onopen = () => { this._backoff = 500; this._emit("open"); };
+      ws.onclose = () => { this._emit("close"); this._reconnect(); };
       ws.onmessage = (e) => this._recv(JSON.parse(e.data));
       return this;
+    }
+
+    // The server may drop us (eviction, restart, WiFi blip). Reconnect with backoff
+    // instead of dying — on reconnect the server replays recent history.
+    _reconnect() {
+      const delay = Math.min(this._backoff || 500, 10000);
+      this._backoff = delay * 2;
+      setTimeout(() => this.connect(), delay);
     }
 
     send(threadId, text) {
@@ -55,6 +63,9 @@
     _recv(msg) {
       if (msg.type === "threads") {
         this.threads.clear();
+        // A snapshot arrives on every (re)connect; clear the log so the server's
+        // history replay that follows rebuilds it cleanly instead of duplicating.
+        this.messages.clear();
         msg.threads.forEach((t) => this._upsertThread(t));
         this._emit("threads");
       } else if (msg.type === "thread") {

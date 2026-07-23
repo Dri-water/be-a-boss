@@ -66,6 +66,7 @@ class Turn:
     text: str
     images: list[dict] = field(default_factory=list)  # {media_type, data}
     reply_to: str | None = None  # where to post this turn's reply (default: own thread)
+    quiet_ok: bool = False       # may end with no reply text (digest wakes) — no "✓ done"
 
 
 def _safe_name(name: str) -> str:
@@ -74,6 +75,14 @@ def _safe_name(name: str) -> str:
 
 PostFn = Callable[[Outbound], Awaitable[None]]
 BusyFn = Callable[[str], Awaitable[None]]
+
+# The words a quiet digest may reply with to post nothing (the model resists
+# emitting truly empty text, so it's given an explicit token instead).
+_QUIET_SENTINELS = {"nothing", "none", "noreply", "noupdate", "quiet"}
+
+
+def _is_quiet_reply(text: str) -> bool:
+    return "".join(c for c in text.lower() if c.isalpha()) in _QUIET_SENTINELS
 
 
 class CoreSession:
@@ -285,8 +294,9 @@ class CoreSession:
 
     # ---- messaging -------------------------------------------------------
 
-    async def submit(self, text: str, reply_to: str | None = None) -> None:
-        await self._queue.put(Turn(text=text, reply_to=reply_to))
+    async def submit(self, text: str, reply_to: str | None = None,
+                     quiet_ok: bool = False) -> None:
+        await self._queue.put(Turn(text=text, reply_to=reply_to, quiet_ok=quiet_ok))
 
     async def submit_media(self, caption: str, items: list[MediaIn],
                            reply_to: str | None = None) -> None:
@@ -364,6 +374,13 @@ class CoreSession:
         # reply_to unset and post to their own thread as before.
         self._reply_to = turn.reply_to or self.thread_id
         self._tool_buf = []
+        # Reset per-turn state so a turn that ends WITHOUT a ResultMessage (a racy
+        # interrupt, a wedge) can't leak into the next turn: a stale _interrupted
+        # would replace the next real reply with "⏹ stopped.", and stale actions
+        # would append a wrong ⚙ footer. Drain both at the boundary.
+        self._interrupted = False
+        if self._footer_fn:
+            self._footer_fn()
         await self._busy(self._reply_to)
         keepalive = asyncio.create_task(self._keep_busy())
         try:
@@ -414,28 +431,30 @@ class CoreSession:
                 await self._flush_tools()
                 if self._interrupted:
                     # A human /stop ended this turn: say so plainly instead of
-                    # surfacing the backend's internal diagnostics.
+                    # surfacing the backend's internal diagnostics — but keep the
+                    # footer, so actions taken before the stop stay visible.
                     self._interrupted = False
-                    if self._footer_fn:
-                        self._footer_fn()  # drain — a stopped turn's actions are moot
-                    await self._emit_text("⏹ stopped.")
+                    footer = self._footer_fn() if self._footer_fn else None
+                    await self._emit_text(
+                        f"⏹ stopped.\n\n{footer}" if footer else "⏹ stopped.")
                 elif self._final_only:
                     # One clean message: the final reply (+ the code-generated
                     # action footer, if any). Errors still surface; the success
                     # footer (turn count / cost) is noise here.
                     footer = self._footer_fn() if self._footer_fn else None
                     reply = (message.result or "").strip()
-                    if reply.strip("()*_ ").upper() == "NOTHING":
-                        reply = ""  # a literal sentinel is a leak, not a reply
+                    if _is_quiet_reply(reply):
+                        reply = ""  # the "no boss-facing update" sentinel → silence
+                    # A boss-initiated turn must never end silent; a digest wake may.
+                    must_answer = bool(turn.reply_to) and not turn.quiet_ok
                     if message.is_error or (message.subtype and message.subtype != "success"):
                         for piece in rendering.render_result(message):
                             await self._emit_text(piece)
                     elif reply:
                         await self._emit_text(f"{reply}\n\n{footer}" if footer else reply)
-                    elif turn.reply_to:
-                        # A boss-initiated turn must never end in total silence.
-                        # (Digest turns may stay quiet on purpose.)
+                    elif must_answer:
                         await self._emit_text(footer or "✓ done")
+                    # else: quiet digest, nothing boss-facing → post nothing
                 else:
                     for piece in rendering.render_result(message):
                         await self._emit_text(piece)

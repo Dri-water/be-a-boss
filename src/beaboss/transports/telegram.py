@@ -279,9 +279,18 @@ def _ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _ok(update, ctx):
-        return
     settings: Settings = ctx.bot_data["settings"]
+    if not _ok(update, ctx):
+        # Don't leave a first-timer's /start or /help in silence: if we're in setup
+        # mode (no allowlist yet), guide them to bootstrap instead of ignoring them.
+        msg = update.effective_message
+        if msg and not settings.allowed_user_ids:
+            await msg.reply_text(
+                f"👋 {settings.bot_name} isn't configured yet. DM me /whoami to get "
+                "your Telegram id, add it to TELEGRAM_ALLOWED_USER_IDS, and restart. "
+                "Then add me to a Topics-enabled supergroup as admin and run /setup "
+                "there. (/setup anywhere gives the full checklist.)")
+        return
     await update.effective_message.reply_text(
         f"👋 {settings.bot_name} — your agent org, in one place.\n\n"
         "🧭 I'm the orchestrator. DM me for a private 1:1, or talk to me here in the "

@@ -149,8 +149,8 @@ class Engine:
         """One compact line of ground truth, injected into every boss turn."""
         rows = []
         for tid, rec in self.store.workers().items():
-            if rec.worker_status == "dismissed":
-                continue
+            if rec.worker_status in ("dismissed", "delivered"):
+                continue  # terminal — not "right now" work; keeps the line bounded
             live = self.sessions.get(tid)
             run = live.status if live else "dormant"
             state = rec.worker_status or "working"
@@ -233,6 +233,9 @@ class Engine:
         who = msg.sender_name or "the boss"
         text = (f"[Interjection from {who} — visible to you and the orchestrator]: "
                 f"{msg.text}")
+        # a boss follow-up un-sticks a done/blocked marker (the worker is back at it)
+        if rec.worker_status in ("done", "blocked"):
+            self.store.update(msg.thread_id, worker_status="working")
         if msg.media:
             await session.submit_media(text, msg.media)
         else:
@@ -425,19 +428,20 @@ class Engine:
         if rec is None:
             return
         full = (result.result or "").strip()
-        # Parse the STATUS from the FULL reply — the protocol puts it on the last
-        # line, which a digest-sized truncation would cut off (that bug silently
-        # froze workers at "working" and poisoned the fleet snapshot). Prefer a
-        # properly-anchored last line so a worker QUOTING the protocol mid-text
-        # can't be misread; fall back to a full-text scan.
+        # Parse STATUS from ONLY the last non-empty line of the full (untruncated)
+        # reply. Anchoring to the last line — never a substring scan of the whole
+        # text — is what stops a worker QUOTING the protocol menu mid-reply
+        # ("STATUS: done | working | blocked") from being misread as done.
         last_line = next(
             (ln.strip().lower() for ln in reversed(full.splitlines()) if ln.strip()), "")
-        status_src = last_line if last_line.startswith("status:") else full.lower()
-        if "status: done" in status_src or status_src.startswith("status:done"):
-            self.store.update(session.thread_id, worker_status="done")
-        elif ("status: blocked" in status_src or "status: needs-decision" in status_src
-              or status_src.startswith("status:blocked")):
-            self.store.update(session.thread_id, worker_status="blocked")
+        if last_line.startswith("status:"):
+            value = last_line.split("status:", 1)[1].strip()
+            if value.startswith("done"):
+                self.store.update(session.thread_id, worker_status="done")
+            elif value.startswith(("blocked", "needs-decision")):
+                self.store.update(session.thread_id, worker_status="blocked")
+            elif value.startswith("working"):
+                self.store.update(session.thread_id, worker_status="working")  # un-stick
         tail = full if len(full) <= 600 else full[:600] + "…"
         status = "errored" if result.is_error else "finished a turn"
         self._note(f"worker {rec.worker_id} ({rec.name}, task: {rec.task[:80]}) "
@@ -476,8 +480,10 @@ class Engine:
                 if not notes:
                     break
                 digest = "[fleet inbox]\n" + "\n".join(f"- {n}" for n in notes)
-                # reply where the boss actually is, not into a silent #general
-                await session.submit(digest, reply_to=self._last_boss_thread)
+                # reply where the boss actually is, not into a silent #general;
+                # quiet_ok: a checkpoint needing nothing boss-facing posts no message.
+                await session.submit(
+                    digest, reply_to=self._last_boss_thread, quiet_ok=True)
         finally:
             self._waking = False
 
@@ -659,13 +665,21 @@ class Engine:
         return None
 
     def _resolve_repo(self, repo_raw: str) -> Path | None:
-        """A repo name under the projects root, or an absolute path → a real dir."""
+        """A repo name or path → a real dir, CONSTRAINED to the projects root. The
+        orchestrator ingests untrusted text (repo docs via inspect_repo, worker
+        diffs via review_worker), so it is itself an injection surface — an absolute
+        path must never let it root a bypassPermissions worker over host creds or
+        other mounts outside the projects root."""
         if not repo_raw.strip():
             return None
         repo = Path(repo_raw)
         if not repo.is_absolute():
             repo = self.settings.projects_root / repo_raw
         repo = repo.resolve()
+        try:
+            repo.relative_to(self.settings.projects_root.resolve())
+        except ValueError:
+            return None  # outside the projects root — refused
         return repo if repo.is_dir() else None
 
     async def _inspect_repo(self, repo_raw: str) -> dict[str, Any]:
@@ -730,7 +744,7 @@ class Engine:
         )
         self.store.put(thread_id, rec)
 
-        iso_note = ("isolated worktree, branch worker/" + worker_id if isolated
+        iso_note = ("its own isolated copy · branch worker/" + worker_id if isolated
                     else "⚠️ not a git repo — working directly in the project dir")
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM,
@@ -1027,6 +1041,7 @@ class Engine:
         if rec.role == "orchestrator":
             self.store.set_orchestrator_thread(None)
         self.store.delete(thread_id)
+        self._session_locks.pop(thread_id, None)  # don't accumulate dead locks
         if rec.role == "worker":
             await self._refresh_dashboard()
         return True
@@ -1044,7 +1059,9 @@ class Engine:
         The supervision inbox is in-memory and does not survive a restart, so an
         unfinished worker (finished-but-not-landed, or blocked) could otherwise be
         silently forgotten. Re-enqueue a reminder; it's delivered on the
-        orchestrator's next wake (a boss message or a live worker event).
+        orchestrator's next wake (a live worker event). If every worker is dormant,
+        the note waits — but the [fleet right now: …] snapshot on the next boss
+        message surfaces the same state, so nothing is actually lost.
         """
         pending = [rec for rec in self.store.workers().values()
                    if rec.worker_status in ("blocked", "done")]

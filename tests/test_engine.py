@@ -69,7 +69,7 @@ class FakeSession:
         self.pending = 0
         self.alive = True
 
-    async def submit(self, text, reply_to=None):
+    async def submit(self, text, reply_to=None, quiet_ok=False):
         self.submitted.append(text)
         self.reply_tos.append(reply_to)
 
@@ -159,7 +159,7 @@ def test_wake_drains_notes_arriving_during_digest(tmp_path):
             self.pending = 0
             self.alive = True
 
-        async def submit(self, text, reply_to=None):
+        async def submit(self, text, reply_to=None, quiet_ok=False):
             self.digests.append(text)
             if len(self.digests) == 1:  # a worker finishes "during" the first digest
                 engine._note("worker kite finished late")
@@ -537,3 +537,72 @@ def test_interrupt_is_honest_about_idle_sessions(tmp_path):
     assert asyncio.run(engine.interrupt("dm:42")) is False   # idle → nothing to stop
     fake.status = "busy"
     assert asyncio.run(engine.interrupt("dm:42")) is True    # busy → interrupted
+
+
+def test_spawn_repo_cannot_escape_projects_root(tmp_path):
+    """Security: an injected orchestrator must not root a worker outside the projects
+    root (e.g. over mounted /root/.claude creds). Absolute out-of-root → refused."""
+    engine, _ = _engine(tmp_path)
+    _repo(tmp_path, "legit")                                   # projects/legit
+    assert engine._resolve_repo("legit") is not None          # in-root name: ok
+    outside = tmp_path / "secrets"                             # sibling of projects/
+    outside.mkdir()
+    assert engine._resolve_repo(str(outside)) is None         # abs out-of-root: refused
+    assert engine._resolve_repo("../secrets") is None         # traversal: refused
+
+
+def test_status_menu_quote_is_not_misread_as_done(tmp_path):
+    """A worker QUOTING the STATUS menu mid-reply, then ending on a real status,
+    must be read by the last line only — not a substring scan."""
+    engine, _ = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(tmp_path), task="x", worker_status="working"))
+
+    class MenuThenBlocked:
+        result = ("I'll end with one of STATUS: done | working | blocked as required.\n"
+                  "Waiting on the API key.\n"
+                  "STATUS: blocked: need the API key")
+        is_error = False
+
+    sess = FakeSession(); sess.thread_id = "55"
+    asyncio.run(engine._on_worker_turn_done(sess, MenuThenBlocked()))
+    assert engine.store.get("55").worker_status == "blocked"   # the LAST line wins
+
+
+def test_working_status_unsticks_a_done_worker(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(tmp_path), task="x", worker_status="done"))
+
+    class BackToWork:
+        result = "picking the follow-up back up.\nSTATUS: working"
+        is_error = False
+
+    sess = FakeSession(); sess.thread_id = "55"
+    asyncio.run(engine._on_worker_turn_done(sess, BackToWork()))
+    assert engine.store.get("55").worker_status == "working"
+
+
+def test_interjection_unsticks_done_worker(tmp_path):
+    """A boss follow-up typed straight into a done worker's thread un-sticks it so
+    the snapshot/dashboard don't lie while it works again."""
+    engine, _ = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(tmp_path), task="x", worker_status="done"))
+    engine.sessions["55"] = FakeSession()
+    asyncio.run(engine.on_inbound(InboundMessage(
+        thread_id="55", text="also handle negatives", sender_name="Jon")))
+    assert engine.store.get("55").worker_status == "working"
+
+
+def test_delivered_worker_drops_out_of_snapshot(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.store.put("1", ThreadRecord(role="worker", name="A", worker_id="a",
+        repo="/r/x", worker_status="delivered"))
+    engine.store.put("2", ThreadRecord(role="worker", name="B", worker_id="b",
+        repo="/r/x", worker_status="working"))
+    snap = engine._fleet_snapshot()
+    assert "b=" in snap and "a=" not in snap

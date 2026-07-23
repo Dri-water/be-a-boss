@@ -37,14 +37,14 @@ def main() -> None:
 
     # Safe by default: the web surface has no client auth yet, so refuse a public
     # bind unless the operator explicitly accepts the risk (e.g. behind their own
-    # auth/proxy). Localhost is fine for dev, SSH tunnels, and the VS Code extension.
+    # auth/proxy). Localhost is fine for dev and SSH tunnels.
     local = {"127.0.0.1", "localhost", "::1", ""}
     if host not in local and os.getenv("WEB_ALLOW_INSECURE_BIND") != "1":
         raise SystemExit(
             f"Refusing to bind the web surface to {host!r}: it has no client "
             "authentication yet, so a public bind would let anyone drive your "
             "agents. Bind to 127.0.0.1 (the default) and reach it via an SSH "
-            "tunnel or the VS Code extension. If you front it with your own "
+            "tunnel. If you front it with your own "
             "auth/proxy, set WEB_ALLOW_INSECURE_BIND=1 to override."
         )
 
