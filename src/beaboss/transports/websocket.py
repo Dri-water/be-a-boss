@@ -55,8 +55,9 @@ class WebSocketTransport:
     _MEDIA_CAP = 8 * 1024 * 1024  # keep ws frames browser-friendly
     _HISTORY_CAP = 300            # recent messages replayed to a (re)connecting client
 
-    def __init__(self, store=None) -> None:
+    def __init__(self, store=None, bot_name: str = "be-a-boss") -> None:
         self.clients: set[ServerConnection] = set()
+        self.bot_name = bot_name            # the org's name — shown as the UI brand
         self.threads: dict[str, dict] = {}  # id -> {"title", "open"}
         self.dashboard = ""                 # latest rendered status board
         self.history: list[dict] = []       # recent message events for reconnect replay
@@ -194,7 +195,7 @@ class WebSocketTransport:
         # time means no message is missed and none is delivered twice.
         history = list(self.history)
         dashboard = self.dashboard
-        snapshot = {"type": "threads", "threads": [
+        snapshot = {"type": "threads", "bot_name": self.bot_name, "threads": [
             {"id": tid, "title": t["title"], "open": t["open"]}
             for tid, t in self.threads.items()
         ]}

@@ -68,6 +68,7 @@
         // A snapshot arrives on every (re)connect; clear the log so the server's
         // history replay that follows rebuilds it cleanly instead of duplicating.
         this.messages.clear();
+        if (msg.bot_name) this.botName = msg.bot_name;   // the org's brand name
         msg.threads.forEach((t) => this._upsertThread(t));
         this._emit("threads");
       } else if (msg.type === "thread") {
@@ -250,6 +251,10 @@
     client.on("threads", () => {
       if (active === null && client.threads.size) {
         active = client.threads.keys().next().value;
+      }
+      if (client.botName) {
+        const brand = document.querySelector("#brand .org");
+        if (brand) brand.textContent = client.botName;    // brand = the org's name
       }
       renderThreads(); renderLog(); renderTopbar();
     });
