@@ -1,16 +1,21 @@
 """WebSocket adapter: browser clients ⇄ core threads over one JSON socket.
 
-The reusable base for any browser-style surface (web app, VS Code extension).
-The wire protocol is deliberately tiny and platform-neutral:
+The reusable base for any browser-style surface. The wire protocol is
+deliberately tiny and platform-neutral:
 
 server → client
   {"type": "threads",  "threads": [{"id", "title", "open"}]}   snapshot on connect
-  {"type": "thread",   "id", "title", "open"}                  create / rename / close
+  {"type": "thread",   "id", "title", "open", "removed"?}      create / close / delete
   {"type": "message",  "thread_id", "speaker": {...}, "text"}  an Outbound
+  {"type": "media",    "thread_id", "speaker", "kind",
+                       "filename", "mime", "data_b64", "caption"}  real files inline
+  {"type": "dashboard","text"}                                 the live status board
   {"type": "busy",     "thread_id"}                            best-effort typing hint
 
 client → server
   {"type": "message",  "thread_id", "text"}                    a human message
+  {"type": "interrupt"|"kill", "thread_id"} · {"type": "approve"|"reject", "worker_id"}
+  {"type": "new", "path", "name"?} · {"type": "reset", "confirm": bool}
 
 Every connected client sees every thread — the core's threads map straight onto
 the client's thread list. Speaker identity rides in the message body (role, name,
@@ -20,8 +25,10 @@ emoji) so the client can render header cards, exactly like the Telegram adapter.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
 from urllib.parse import parse_qs, urlsplit
 
 from websockets.asyncio.server import ServerConnection, serve
@@ -42,9 +49,12 @@ def _speaker_json(s: Speaker) -> dict:
 class WebSocketTransport:
     """Implements core.ports.Transport, fanning core events out to browsers."""
 
+    _MEDIA_CAP = 8 * 1024 * 1024  # keep ws frames browser-friendly
+
     def __init__(self, store=None) -> None:
         self.clients: set[ServerConnection] = set()
         self.threads: dict[str, dict] = {}  # id -> {"title", "open"}
+        self.dashboard = ""                 # latest rendered status board
         self._next = 0
         self._add_thread(OFFICE, "Orchestrator")
         if store is not None:
@@ -95,21 +105,64 @@ class WebSocketTransport:
         await self._broadcast(self._thread_event(thread_id))
 
     async def post(self, out: Outbound) -> None:
-        # Media has no browser transport yet; surface the caption/filename so the
-        # thread still reads coherently rather than dropping the event silently.
-        text = out.text
         if out.media_path is not None:
-            note = out.caption or f"[{out.media_kind or 'file'}: {out.media_path.name}]"
-            text = f"{text}\n{note}".strip() if text else note
-        if not text.strip():
+            event = self._media_event(out)
+            if event is not None:
+                await self._broadcast(event)
+                return
+            # unreadable / oversized → a readable placeholder, never silence
+            note = (f"{out.caption or ''}\n[{out.media_kind or 'file'}: "
+                    f"{out.media_path.name} — too large for the browser]").strip()
+            await self._broadcast({
+                "type": "message", "thread_id": out.thread_id,
+                "speaker": _speaker_json(out.speaker), "text": note,
+            })
+            return
+        if not out.text.strip():
             return
         await self._broadcast({
             "type": "message", "thread_id": out.thread_id,
-            "speaker": _speaker_json(out.speaker), "text": text,
+            "speaker": _speaker_json(out.speaker), "text": out.text,
         })
+
+    def _media_event(self, out: Outbound) -> dict | None:
+        """A worker's screenshot/file as a real inline event — the same proof the
+        Telegram surface gets, not a placeholder line."""
+        try:
+            data = out.media_path.read_bytes()
+        except OSError:
+            return None
+        if len(data) > self._MEDIA_CAP:
+            return None
+        mime, _ = mimetypes.guess_type(out.media_path.name)
+        return {
+            "type": "media", "thread_id": out.thread_id,
+            "speaker": _speaker_json(out.speaker),
+            "kind": out.media_kind or "document",
+            "filename": out.media_path.name,
+            "mime": mime or "application/octet-stream",
+            "data_b64": base64.b64encode(data).decode("ascii"),
+            "caption": out.caption or "",
+        }
 
     async def indicate_busy(self, thread_id: str) -> None:
         await self._broadcast({"type": "busy", "thread_id": thread_id})
+
+    async def update_dashboard(self, text: str) -> None:
+        """The live status board, as a broadcast — web parity with the pinned
+        Telegram message. New clients get it in their connect snapshot."""
+        self.dashboard = text
+        await self._broadcast({"type": "dashboard", "text": text})
+
+    async def delete_dashboard(self) -> None:
+        self.dashboard = ""
+        await self._broadcast({"type": "dashboard", "text": ""})
+
+    async def delete_thread(self, thread_id: str) -> None:
+        """Factory reset: drop the thread from every client's list."""
+        if self.threads.pop(thread_id, None) is not None:
+            await self._broadcast({"type": "thread", "id": thread_id,
+                                   "title": "", "open": False, "removed": True})
 
     # ---- client plumbing -------------------------------------------------
 
@@ -120,6 +173,8 @@ class WebSocketTransport:
             for tid, t in self.threads.items()
         ]}
         await ws.send(json.dumps(snapshot))
+        if self.dashboard:
+            await ws.send(json.dumps({"type": "dashboard", "text": self.dashboard}))
 
     def unregister(self, ws: ServerConnection) -> None:
         self.clients.discard(ws)
@@ -128,9 +183,12 @@ class WebSocketTransport:
         if not self.clients:
             return
         data = json.dumps(payload)
+        # Snapshot the set ONCE: a client (un)registering mid-broadcast must not
+        # misalign the results zip and evict the wrong connection.
+        clients = list(self.clients)
         results = await asyncio.gather(
-            *(c.send(data) for c in self.clients), return_exceptions=True)
-        for c, r in zip(list(self.clients), results):
+            *(c.send(data) for c in clients), return_exceptions=True)
+        for c, r in zip(clients, results):
             if isinstance(r, Exception):
                 self.clients.discard(c)
 
@@ -160,7 +218,13 @@ def make_handler(engine, transport: WebSocketTransport):
                         await engine.interrupt(tid)
                 elif mtype == "kill":
                     tid = str(msg.get("thread_id") or "").strip()
-                    if tid:
+                    if tid == OFFICE or tid.startswith("dm:"):
+                        # killing the office would wipe the orchestrator's memory
+                        await transport.post(Outbound(
+                            thread_id=OFFICE, speaker=SYSTEM,
+                            text="Can't kill the orchestrator's office — "
+                                 "/reset confirm is the full wipe."))
+                    elif tid:
                         await engine.kill(tid)
                         await transport.post(Outbound(
                             thread_id=tid, speaker=SYSTEM, text="🗑 Session ended."))
@@ -179,6 +243,16 @@ def make_handler(engine, transport: WebSocketTransport):
                               else engine.reject_delivery)
                         await transport.post(Outbound(
                             thread_id=OFFICE, speaker=SYSTEM, text=await fn(wid)))
+                elif mtype == "reset":
+                    if msg.get("confirm") is True:
+                        await transport.post(Outbound(
+                            thread_id=OFFICE, speaker=SYSTEM,
+                            text=await engine.factory_reset()))
+                    else:
+                        await transport.post(Outbound(
+                            thread_id=OFFICE, speaker=SYSTEM,
+                            text="🏭 Factory reset wipes ALL bot memory and state. "
+                                 "This cannot be undone — send /reset confirm."))
         finally:
             transport.unregister(ws)
 

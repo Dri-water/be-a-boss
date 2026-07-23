@@ -1,10 +1,10 @@
 [project]
 name = "be-a-boss"
 version = "0.1.0"
-description = "Run your own agent org: an orchestrator hires and supervises worker agents you watch and steer, each a visible, joinable thread. Self-hosted; pluggable surfaces (Telegram/Web/VS Code) and agent backends (Claude Code/Codex)."
+description = "Run your own agent org: an orchestrator hires and supervises worker agents you watch and steer, each a visible, joinable thread. Self-hosted; pluggable surfaces (Telegram/Web) and agent backends (Claude Code/Codex)."
 readme = "README.md"
 requires-python = ">=3.11"
-keywords = ["ai-agents", "agent-orchestration", "coding-agent", "claude-code", "codex", "self-hosted", "telegram-bot", "vscode-extension"]
+keywords = ["ai-agents", "agent-orchestration", "coding-agent", "claude-code", "codex", "self-hosted", "telegram-bot", ]
 dependencies = [
     "claude-agent-sdk>=0.1.0",
     "python-telegram-bot[rate-limiter]>=21.6",

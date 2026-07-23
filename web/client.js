@@ -1,6 +1,6 @@
 // Minimal beaboss WebSocket client. Speaks the tiny JSON protocol from
 // transports/websocket.py. The socket/protocol layer (BeabossClient) is kept
-// free of DOM concerns so a VS Code extension can reuse it with its own view;
+// free of DOM concerns so any embedding UI can reuse it with its own view;
 // the DOM wiring below is this page's view over that client.
 
 (function () {
@@ -58,13 +58,24 @@
         msg.threads.forEach((t) => this._upsertThread(t));
         this._emit("threads");
       } else if (msg.type === "thread") {
-        this._upsertThread({ id: msg.id, title: msg.title, open: msg.open });
+        if (msg.removed) this.threads.delete(msg.id);
+        else this._upsertThread({ id: msg.id, title: msg.title, open: msg.open });
         this._emit("threads");
       } else if (msg.type === "message") {
         const list = this.messages.get(msg.thread_id) || [];
         list.push({ speaker: msg.speaker, text: msg.text });
         this.messages.set(msg.thread_id, list);
         this._emit("message", msg.thread_id);
+      } else if (msg.type === "media") {
+        const list = this.messages.get(msg.thread_id) || [];
+        list.push({ speaker: msg.speaker, text: msg.caption || "",
+                    media: { kind: msg.kind, filename: msg.filename,
+                             mime: msg.mime, data_b64: msg.data_b64 } });
+        this.messages.set(msg.thread_id, list);
+        this._emit("message", msg.thread_id);
+      } else if (msg.type === "dashboard") {
+        this.dashboard = msg.text || "";
+        this._emit("dashboard");
       } else if (msg.type === "busy") {
         this._emit("busy", msg.thread_id);
       }
@@ -99,6 +110,13 @@
       }
       renderThreads();
       renderLog();
+    });
+    // The live status board — same content as Telegram's pinned message.
+    client.on("dashboard", () => {
+      const dash = $("dash");
+      if (!dash) return;
+      dash.textContent = client.dashboard || "";
+      dash.style.display = client.dashboard ? "block" : "none";
     });
     // "working…" indicator: instant confirmation the message landed, even before
     // the first reply. Set when the agent's turn starts (or when you hit send),
@@ -139,6 +157,19 @@
         body.className = "text";
         body.textContent = m.text;
         wrap.append(head, body);
+        if (m.media) {
+          const url = "data:" + m.media.mime + ";base64," + m.media.data_b64;
+          if (m.media.mime.startsWith("image/")) {
+            const img = document.createElement("img");
+            img.src = url; img.alt = m.media.filename; img.className = "media";
+            wrap.appendChild(img);
+          } else {
+            const a = document.createElement("a");
+            a.href = url; a.download = m.media.filename;
+            a.textContent = "⬇ " + m.media.filename;
+            wrap.appendChild(a);
+          }
+        }
         log.appendChild(wrap);
       }
       if (busyThreads.has(active)) {
@@ -181,6 +212,7 @@
       else if (cmd === "approve") client.sendRaw({ type: "approve", worker_id: rest[0] || "" });
       else if (cmd === "reject") client.sendRaw({ type: "reject", worker_id: rest[0] || "" });
       else if (cmd === "new") client.sendRaw({ type: "new", path: rest[0] || "", name: rest.slice(1).join(" ") });
+      else if (cmd === "reset") client.sendRaw({ type: "reset", confirm: rest[0] === "confirm" });
       else { client.addLocalMessage(active, { role: "system", name: "sys" }, "unknown command: /" + cmd); return; }
       client.addLocalMessage(active, { role: "you", name: "You" }, text);
     }

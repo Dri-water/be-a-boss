@@ -30,6 +30,9 @@
     .role-system .speaker { color: #888; font-style: italic; }
     .text { white-space: pre-wrap; word-wrap: break-word; }
     .msg.busy .text { opacity: .55; font-style: italic; }
+    .msg img.media { max-width: 100%; border-radius: 8px; margin-top: 6px; }
+    #dash { display: none; white-space: pre-wrap; font-size: 13px; padding: 10px 16px;
+            border-bottom: 1px solid #8883; background: #8881; }
     form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #8883; }
     #box { flex: 1; padding: 9px 12px; border: 1px solid #8886; border-radius: 8px;
            background: transparent; color: inherit; font: inherit; }
@@ -46,6 +49,7 @@
     <div id="status">connecting…</div>
   </aside>
   <main>
+    <div id="dash"></div>
     <div id="log"></div>
     <form id="send">
       <input id="box" placeholder="Message…" autocomplete="off" disabled>

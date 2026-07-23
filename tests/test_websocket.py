@@ -179,3 +179,71 @@ def test_create_thread_broadcasts_to_clients():
                 assert evt["open"] is True
 
     asyncio.run(scenario())
+
+
+def test_media_posts_as_real_inline_event(tmp_path):
+    """A worker's screenshot reaches the browser as an actual image event — parity
+    with Telegram's send_photo, not a placeholder line."""
+    import base64
+    from beaboss.core.ports import Outbound, Speaker
+
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        pic = tmp_path / "shot.png"
+        pic.write_bytes(b"\x89PNG\r\nfakedata")
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await ws.recv()  # snapshot
+                await transport.post(Outbound(
+                    thread_id="general",
+                    speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
+                    media_path=pic, media_kind="photo", caption="the result"))
+                evt = json.loads(await ws.recv())
+        assert evt["type"] == "media" and evt["kind"] == "photo"
+        assert evt["filename"] == "shot.png" and evt["caption"] == "the result"
+        assert base64.b64decode(evt["data_b64"]).startswith(b"\x89PNG")
+
+    asyncio.run(scenario())
+
+
+def test_ws_kill_cannot_kill_the_office():
+    """Regression: web kill of 'general' must be refused — it would wipe the
+    orchestrator's memory (Telegram already guards this)."""
+
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await ws.recv()  # snapshot
+                await ws.send(json.dumps({"type": "kill", "thread_id": "general"}))
+                evt = json.loads(await ws.recv())     # the refusal message
+        assert not any(c[0] == "kill" for c in engine.calls)   # engine.kill NOT called
+        assert "office" in evt["text"]
+
+    asyncio.run(scenario())
+
+
+def test_dashboard_broadcasts_and_snapshots(tmp_path):
+    """The live board reaches connected clients and is included in the connect
+    snapshot for late joiners — web parity with the pinned Telegram message."""
+
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await ws.recv()  # snapshot
+                await transport.update_dashboard("📋 live status: 1 running")
+                evt = json.loads(await ws.recv())
+                assert evt == {"type": "dashboard", "text": "📋 live status: 1 running"}
+            # a late joiner gets the board right in its snapshot
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws2:
+                assert json.loads(await ws2.recv())["type"] == "threads"
+                assert json.loads(await ws2.recv())["type"] == "dashboard"
+
+    asyncio.run(scenario())

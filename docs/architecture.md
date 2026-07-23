@@ -8,7 +8,7 @@
 1. **Transport-agnostic core.** Everything that matters — sessions, the
    orchestrator, the fleet, supervision — lives in `core/` and speaks in its own
    vocabulary (`Thread`, `Speaker`, `Outbound`). It never imports a chat
-   platform. Telegram and a WebSocket surface (web app + VS Code) are adapters in
+   platform. Telegram and a WebSocket surface (the web app) are adapters in
    `transports/`; Slack would be another, with zero core changes.
 2. **Glass-walled delegation.** The orchestrator drives worker sessions, and every
    conversation happens in a visible thread. The human can watch any exchange and
@@ -28,7 +28,7 @@
 flowchart TB
     subgraph transports/
         TG[telegram adapter<br/>topics ⇄ threads, header cards]
-        WS[websocket adapter<br/>web app + VS Code]
+        WS[websocket adapter<br/>web app / any UI]
         SLACK[slack adapter<br/>next]
     end
     subgraph core/
@@ -51,7 +51,7 @@ flowchart TB
 
 A transport implements one small interface and receives one callback:
 
-- `create_thread(title) -> thread_id` · `rename_thread` · `close_thread`
+- `create_thread(title) -> thread_id` · `close_thread`
 - `post(thread_id, speaker, content)` — content is text or media; the transport
   renders the speaker (headers, emojis, quoting) however fits the platform
 - it calls `engine.on_inbound(InboundMessage)` for every human message
