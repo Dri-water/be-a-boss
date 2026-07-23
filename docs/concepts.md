@@ -26,9 +26,9 @@ is what makes delegation trustworthy: nothing happens in a black box.
 
 A **thread** is one conversation. There are three kinds:
 
-- an **office thread** — where you talk to the orchestrator. There can be more than
-  one: the shared group thread and each boss's private DM. Each keeps its own
-  conversation but shares one view of the fleet.
+- the **orchestrator thread** — where you talk to the one orchestrator. Reach it in
+  the shared group thread or by DM; both drive the same orchestrator, which replies
+  wherever you spoke.
 - a **worker thread** — one worker being directed (the glass wall above);
 - a **direct thread** — you talking straight to a single agent, no orchestrator in
   the middle. For quick, hands-on work where a manager would just be overhead.

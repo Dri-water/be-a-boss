@@ -73,11 +73,9 @@ class TelegramTransport:
         """thread_id → (chat_id, message_thread_id). DMs go to the user's chat with
         no topic; #general + worker topics go to the supergroup."""
         if thread_id.startswith("dm:"):
-            # 'dm:<uid>' is the office; 'dm:<uid>#<worker>' is a worker that streams
-            # into that same DM (DMs have no sub-threads) — both route to the chat.
-            rest = thread_id[3:].split("#", 1)[0]
+            # 'dm:<uid>' — a private chat with the orchestrator; no topic.
             try:
-                return int(rest), None
+                return int(thread_id[3:]), None
             except ValueError:
                 return None, None
         if thread_id == GENERAL:

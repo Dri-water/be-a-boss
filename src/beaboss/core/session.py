@@ -67,6 +67,7 @@ class Turn:
 
     text: str
     images: list[dict] = field(default_factory=list)  # {media_type, data}
+    reply_to: str | None = None  # where to post this turn's reply (default: own thread)
 
 
 def _safe_name(name: str) -> str:
@@ -119,6 +120,7 @@ class CoreSession:
         self._backend = backend or ClaudeAgentBackend(self._build_options)
         self._queue: asyncio.Queue[Turn] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
+        self._reply_to = thread_id   # current turn's reply target (see _do_turn)
         self.status = "new"  # new | idle | busy | error | stopped
         self.turns = 0
         self.on_turn_done: Callable[["CoreSession", ResultMessage], Awaitable[None]] | None = None
@@ -274,10 +276,11 @@ class CoreSession:
 
     # ---- messaging -------------------------------------------------------
 
-    async def submit(self, text: str) -> None:
-        await self._queue.put(Turn(text=text))
+    async def submit(self, text: str, reply_to: str | None = None) -> None:
+        await self._queue.put(Turn(text=text, reply_to=reply_to))
 
-    async def submit_media(self, caption: str, items: list[MediaIn]) -> None:
+    async def submit_media(self, caption: str, items: list[MediaIn],
+                           reply_to: str | None = None) -> None:
         """Save incoming files under the workspace inbox and queue a turn."""
         inbox = self.cwd / INBOX_DIRNAME
         inbox.mkdir(parents=True, exist_ok=True)
@@ -307,7 +310,7 @@ class CoreSession:
             for dest, mime in saved:
                 lines.append(f"- {dest.relative_to(self.cwd)} ({mime or 'unknown type'})")
         text = "\n".join(lines) if lines else "(the user sent media with no caption)"
-        await self._queue.put(Turn(text=text, images=images))
+        await self._queue.put(Turn(text=text, images=images, reply_to=reply_to))
 
     @property
     def pending(self) -> int:
@@ -335,7 +338,11 @@ class CoreSession:
                 self._queue.task_done()
 
     async def _do_turn(self, turn: Turn) -> None:
-        await self._busy(self.thread_id)
+        # Reply to wherever this turn came from — so a DM to the orchestrator is
+        # answered in that DM, not in the group. Workers/direct sessions leave
+        # reply_to unset and post to their own thread as before.
+        self._reply_to = turn.reply_to or self.thread_id
+        await self._busy(self._reply_to)
         await self._backend.send(turn)
 
         result: ResultMessage | None = None
@@ -382,7 +389,7 @@ class CoreSession:
             return
         for part in rendering.chunk(text):
             await self._post(Outbound(
-                thread_id=self.thread_id, speaker=self.speaker, text=part
+                thread_id=self._reply_to, speaker=self.speaker, text=part
             ))
         if self._tap is not None:
             try:

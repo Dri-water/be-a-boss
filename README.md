@@ -56,18 +56,17 @@ flowchart LR
     H -.->|"interject any time —<br/>both see it"| C1
 ```
 
-- **Talk to the orchestrator by DM or in the group.** DM the bot for a private 1:1,
-  or talk to it in the group — same orchestrator, one memory of the work, but a
-  private DM stays private (it won't repeat it in the group). Give it goals in plain
-  language ("fix the login 500 in myapp, then audit deps"). It splits the work, hires
-  workers, briefs them, supervises at checkpoints, and reports outcomes.
+- **Talk to the orchestrator in #general or by DM.** Same one orchestrator either
+  way — it just replies wherever you spoke, so a DM keeps small talk (a button-colour
+  tweak) out of #general. Give it goals in plain language ("fix the login 500 in
+  myapp, then audit deps"). It splits the work, hires workers, briefs them, supervises
+  at checkpoints, and reports outcomes.
 - **#general is a live status board** — a single pinned message, always current,
   showing what's running, what's blocked, and what's awaiting your `/approve`. It's
   code-rendered from state, not chatter.
-- **Every group-hired worker gets its own topic** named after it (`⚙️ Nova · myapp`);
-  the orchestrator's instructions and the worker's work stream into that topic live —
-  you literally watch the manager drive the worker. (A worker you hire from a DM
-  streams into that DM instead, keeping the work private — no group needed.)
+- **Every worker gets its own topic** named after it (`⚙️ Nova · myapp`); the
+  orchestrator's instructions and the worker's work stream into that topic live —
+  you literally watch the manager drive the worker.
 - **You can interject in any worker topic.** Your message reaches the worker as
   input *and* the orchestrator's inbox — both see it, like walking up to a desk.
 - **Isolated worktrees.** Each worker works on its own branch (`worker/<name>`) in

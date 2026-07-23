@@ -69,18 +69,15 @@ flowchart LR
     H -.->|"interject in any<br/>worker thread"| C1
 ```
 
-- **Office** = where a human talks to the orchestrator. There can be several: the
-  group's `general` thread (shared) and each boss's private DM (`dm:<user_id>`).
-  Each office is its own orchestrator session with its own conversation memory, but
-  they share one fleet (store + tools). A worker records the office that hired it
-  (`origin`), so its events, digests, and `/approve` prompts route back there — a
-  DM's work never leaks into the group. Supervision inboxes/wakes are per-office.
-- **#general is a live dashboard**, not a chat office: a single pinned message
+- **One orchestrator per deployment.** You reach it in the group's `general` thread
+  or by DM (`dm:<user_id>`); both drive the *same* session, and it replies to
+  whichever you used (a DM just keeps chatter out of #general). Not a security
+  boundary — for an isolated context, run a separate deployment (own bot + group).
+- **#general is a live dashboard** as well as a chat surface: a single pinned message
   rendered from the store in code (never by the LLM) and edited in place on every
-  state change — the shared fleet at a glance.
+  state change — the fleet at a glance.
 - **Worker thread** = one worker session + the orchestrator's side of that
-  conversation. A group-hired worker gets its own topic; a DM-hired worker streams
-  into that DM (DMs have no sub-threads). Everything either says posts to the thread.
+  conversation, as its own topic in the group. Everything either says posts there.
 - **Interjection**: a human message in a worker thread is delivered to the worker
   as user input *and* recorded in the orchestrator's inbox, so both see it.
 - The human can still run direct (orchestrator-less) sessions — the pre-existing

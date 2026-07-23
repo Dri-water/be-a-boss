@@ -73,7 +73,6 @@ class RecordingBot:
 def test_route_maps_dm_general_and_topic():
     t = TelegramTransport(RecordingBot(), _settings())  # group chat_id=1
     assert t._route("dm:42") == (42, None)     # a DM → the user's chat, no topic
-    assert t._route("dm:42#nova") == (42, None)  # a DM worker streams into that DM
     assert t._route("general") == (1, None)    # #general → the group, no topic
     assert t._route("777") == (1, 777)         # a worker topic → the group + topic id
 

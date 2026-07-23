@@ -66,16 +66,19 @@ class FakeSession:
 
     def __init__(self):
         self.submitted: list[str] = []
+        self.reply_tos: list[str | None] = []
         self.media: list[tuple[str, int]] = []
         self.status = "idle"
         self.pending = 0
         self.alive = True
 
-    async def submit(self, text):
+    async def submit(self, text, reply_to=None):
         self.submitted.append(text)
+        self.reply_tos.append(reply_to)
 
-    async def submit_media(self, caption, items):
+    async def submit_media(self, caption, items, reply_to=None):
         self.media.append((caption, len(items)))
+        self.reply_tos.append(reply_to)
 
     async def stop(self):
         self.status = "stopped"
@@ -124,8 +127,7 @@ def test_interjection_reaches_worker_and_inbox(tmp_path):
     assert len(fake.submitted) == 1
     assert "Interjection from Jon" in fake.submitted[0]
     assert "check the TTL too" in fake.submitted[0]
-    assert any("Jon said in nova's thread" in n
-               for n in engine._inboxes.get("general", []))
+    assert any("Jon said in nova's thread" in n for n in engine._inbox)
 
 
 def test_orchestrator_wake_digest_drains_inbox(tmp_path):
@@ -135,15 +137,15 @@ def test_orchestrator_wake_digest_drains_inbox(tmp_path):
     fake = FakeSession()
     engine.sessions["general"] = fake
 
-    engine._note("worker nova finished: STATUS: done", "general")
-    engine._note("worker kite blocked: STATUS: blocked: need creds", "general")
-    asyncio.run(engine._wake_orchestrator("general"))
+    engine._note("worker nova finished: STATUS: done")
+    engine._note("worker kite blocked: STATUS: blocked: need creds")
+    asyncio.run(engine._wake_orchestrator())
 
     assert len(fake.submitted) == 1
     digest = fake.submitted[0]
     assert digest.startswith("[fleet inbox]")
     assert "nova finished" in digest and "kite blocked" in digest
-    assert engine._inboxes.get("general", []) == []
+    assert engine._inbox == []
 
 
 def test_wake_drains_notes_arriving_during_digest(tmp_path):
@@ -171,12 +173,12 @@ def test_wake_drains_notes_arriving_during_digest(tmp_path):
     fake = LateNoteSession()
     engine.sessions["general"] = fake
 
-    engine._note("worker nova finished", "general")
-    asyncio.run(engine._wake_orchestrator("general"))
+    engine._note("worker nova finished")
+    asyncio.run(engine._wake_orchestrator())
 
     assert len(fake.digests) == 2, fake.digests
     assert "nova" in fake.digests[0] and "kite" in fake.digests[1]
-    assert engine._inboxes.get("general", []) == []
+    assert engine._inbox == []
 
 
 def test_orchestrator_message_routes_plain(tmp_path):
@@ -225,74 +227,25 @@ def test_rehydrate_resurfaces_pending_workers(tmp_path):
     engine.store.put("11", ThreadRecord(role="worker", name="Ada", worker_id="ada",
                                         worker_status="dismissed"))
     engine.rehydrate()
-    notes = engine._inboxes.get("general", [])
-    assert len(notes) == 1
-    note = notes[0]
+    assert len(engine._inbox) == 1
+    note = engine._inbox[0]
     assert "Nova" in note and "Kite" in note and "Ada" not in note
 
 
-def test_worker_events_route_to_hiring_office(tmp_path):
-    """A worker hired from a DM office reports back to THAT DM, not the group — its
-    turn-done digest is delivered to the DM's orchestrator, keeping offices isolated."""
+def test_dm_message_routes_to_one_orchestrator_replying_in_the_dm(tmp_path):
+    """A DM drives the single orchestrator (thread 'general') and its reply is
+    targeted back to the DM — one brain, no separate office."""
     engine, t = _engine(tmp_path)
-    dm = "dm:42"
-    engine.store.put(dm, ThreadRecord(role="orchestrator", name="orchestrator (DM)"))
     engine.store.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))
-    dm_office, group_office = FakeSession(), FakeSession()
-    engine.sessions[dm] = dm_office
-    engine.sessions["general"] = group_office
-    engine.store.put("55", ThreadRecord(
-        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
-        repo=str(tmp_path), origin=dm, task="fix"))
+    engine.store.set_orchestrator_thread("general")
+    fake = FakeSession()
+    engine.sessions["general"] = fake
 
-    class DoneResult:
-        result = "all set. STATUS: done"
-        is_error = False
+    asyncio.run(engine.on_inbound(InboundMessage(thread_id="dm:42", text="change the button")))
 
-    sess = FakeSession()
-    sess.thread_id = "55"
-    asyncio.run(engine._on_worker_turn_done(sess, DoneResult()))
-
-    assert any("nova" in d for d in dm_office.submitted)   # digest delivered to the DM
-    assert group_office.submitted == []                    # the group got nothing
-
-
-def test_dm_hired_worker_streams_into_the_dm(tmp_path, monkeypatch):
-    """A worker hired from a DM streams into that DM (no group topic is created) —
-    so DM work stays private and a DM-only deployment needs no group at all."""
-    engine, t = _engine(tmp_path)
-    _repo(tmp_path, "dmapp")
-
-    async def fake_ensure(thread_id, rec):   # skip the real backend start
-        s = FakeSession()
-        s.thread_id = thread_id
-        engine.sessions[thread_id] = s
-        return s
-    monkeypatch.setattr(engine, "_ensure_session", fake_ensure)
-
-    res = asyncio.run(engine._spawn_worker("dmapp", "do it", office="dm:42"))
-    assert res.get("is_error") is not True
-    assert t.threads == []                                   # no group topic created
-    assert any(tid.startswith("dm:42#") for tid in engine.store.workers())
-    assert any(p.thread_id.startswith("dm:42") for p in t.posts)  # posts into the DM
-
-
-def test_delivery_request_goes_to_hiring_office(tmp_path):
-    """The 🚦 approval prompt is posted in the office that hired the worker."""
-    engine, t = _engine(tmp_path)
-    repo = _repo(tmp_path, "dmrepo")
-    dest = asyncio.run(worktrees.create_worktree(
-        repo, tmp_path / "state" / "worktrees", "nova"))
-    (dest / "f.py").write_text("x=1\n")
-    _git(dest, "add", "-A"); _git(dest, "commit", "-m", "c")
-    base = asyncio.run(worktrees.current_branch(repo))
-    engine.store.put("55", ThreadRecord(
-        role="worker", name="Nova", cwd=str(dest), worker_id="nova",
-        repo=str(repo), base_branch=base, origin="dm:42", task="x"))
-
-    asyncio.run(engine._deliver_worker("nova", "merge"))
-    flag = [p for p in t.posts if "🚦" in p.text]
-    assert flag and flag[0].thread_id == "dm:42"   # asked in the DM, not #general
+    # went to the ONE orchestrator session, carrying the DM as its reply target
+    assert fake.submitted == ["change the button"]
+    assert fake.reply_tos == ["dm:42"]
 
 
 def test_dismissed_worker_is_not_resummoned(tmp_path):
@@ -307,25 +260,20 @@ def test_dismissed_worker_is_not_resummoned(tmp_path):
     assert any("dismissed" in p.text for p in t.posts)
 
 
-def test_dashboard_renders_shared_state_only(tmp_path):
-    """The #general board shows group work bucketed by state, and NEVER DM-hired
-    work (that's private to the DM)."""
+def test_dashboard_buckets_the_fleet(tmp_path):
+    """The #general board shows the fleet bucketed by state, rendered from the store."""
     engine, _ = _engine(tmp_path)
     engine.store.put("1", ThreadRecord(
         role="worker", name="Nova", worker_id="nova", repo="/r/app",
-        origin="general", worker_status="working", task="build X"))
+        worker_status="working", task="build X"))
     engine.store.put("2", ThreadRecord(
         role="worker", name="Kite", worker_id="kite", repo="/r/app",
-        origin="general", worker_status="blocked", task="fix Y"))
-    engine.store.put("dm:9#ada", ThreadRecord(
-        role="worker", name="Ada", worker_id="ada", repo="/r/secret",
-        origin="dm:9", worker_status="working", task="secret thing"))
+        worker_status="blocked", task="fix Y"))
     engine._pending_delivery["nova"] = "merge"
 
     board = engine._render_dashboard()
-    assert "Kite" in board and "Blocked" in board       # blocked shown
-    assert "/approve nova" in board                      # nova awaiting approval
-    assert "Ada" not in board and "secret" not in board  # DM work stays private
+    assert "Kite" in board and "Blocked" in board   # blocked shown
+    assert "/approve nova" in board                  # nova awaiting approval
 
 
 def test_inspect_repo_grounds_the_orchestrator(tmp_path):

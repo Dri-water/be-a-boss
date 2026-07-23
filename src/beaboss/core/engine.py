@@ -74,18 +74,14 @@ ORCHESTRATOR_APPEND = (
     "teardown is a stop-and-investigate, not an obstacle.\n"
     "4. Report outcomes faithfully. If work failed, say so plainly with the "
     "evidence.\n\n"
-    "Where you work — and discretion:\n"
-    "- The boss reaches you two ways: a private DM (your 1:1 line with that person) "
-    "and the shared group. Reply where you were spoken to. You are one person with one "
-    "memory of the WORK, but keep confidences like a trusted colleague — never repeat "
-    "what someone told you in a private DM into the group or another person's DM.\n"
-    "- #general is a LIVE STATUS BOARD, kept current for you automatically — it "
-    "already shows what's running, blocked, and awaiting approval. Don't post status "
-    "chatter there; speak in #general only when something genuinely needs a human's "
-    "eye. Otherwise talk to the boss in their DM or thread, not on the board.\n"
-    "- Each worker is visible to the boss — its own topic in the group, or streamed "
-    "into the DM that hired it. They can watch and interject; treat that as "
-    "authoritative.\n\n"
+    "Where you work:\n"
+    "- The boss talks to you in the group's #general or by DM — same you either way; "
+    "just reply wherever they spoke (a DM keeps small talk out of #general).\n"
+    "- #general also carries a LIVE STATUS BOARD, kept current for you automatically "
+    "(what's running, blocked, awaiting approval). Don't post status chatter there — "
+    "the board already shows it; speak up only when something needs a human's eye.\n"
+    "- Each worker gets its own topic in the group; the boss watches and can "
+    "interject there — treat that as authoritative.\n\n"
     "Be a technical lead, not a message router:\n"
     "- Before you brief a worker or judge their work, UNDERSTAND the codebase. "
     "inspect_repo for its guide docs, layout, and test command, and Read/Grep the "
@@ -243,8 +239,8 @@ class Engine:
         self.store = store
         self.transport: Transport | None = None
         self.sessions: dict[str, CoreSession] = {}
-        self._inboxes: dict[str, list[str]] = {}   # office thread -> pending notes
-        self._waking: set[str] = set()             # offices with a wake in flight
+        self._inbox: list[str] = []          # pending supervision notes for the orchestrator
+        self._waking = False                 # digest wake in flight
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-thread start lock
         self._pending_delivery: dict[str, str] = {}        # worker_id -> method, awaiting /approve
         self._last_dashboard = ""                          # last rendered board (skip no-op edits)
@@ -275,30 +271,35 @@ class Engine:
     def worker_speaker(name: str) -> Speaker:
         return Speaker(role="worker", name=name, emoji=WORKER_EMOJI)
 
-    @staticmethod
-    def _is_office(thread_id: str) -> bool:
-        """An office is where you talk to the orchestrator: the group #general, or a
-        private DM ('dm:<user_id>'). Worker threads (incl. a DM worker's
-        'dm:<uid>#<worker>') are not offices."""
-        return thread_id == "general" or (
-            thread_id.startswith("dm:") and "#" not in thread_id)
+    def _is_orchestrator_thread(self, thread_id: str) -> bool:
+        """Where you talk to the (single) orchestrator: the shared #general, or any
+        DM. Both drive the same one orchestrator; its reply goes back to whichever
+        you used, so a DM keeps chatter out of #general — no separate 'office'."""
+        return thread_id == self.main_thread or thread_id.startswith("dm:")
 
     # ---- inbound routing -------------------------------------------------
 
     async def on_inbound(self, msg: InboundMessage) -> None:
+        # Talking to the orchestrator (#general or any DM) → the one orchestrator
+        # session, replying back to wherever you spoke.
+        if self._is_orchestrator_thread(msg.thread_id):
+            await self._ensure_orchestrator(self.main_thread)
+            session = await self._ensure_session(
+                self.main_thread, self.store.get(self.main_thread))
+            if session is None:
+                return
+            if msg.media:
+                await session.submit_media(msg.text, msg.media, reply_to=msg.thread_id)
+            else:
+                await session.submit(msg.text, reply_to=msg.thread_id)
+            return
+
         rec = self.store.get(msg.thread_id)
-
-        if rec is None and self._is_office(msg.thread_id):
-            # First contact in an office (the group #general or a private DM):
-            # bring an orchestrator to life for it.
-            await self._ensure_orchestrator(msg.thread_id)
-            rec = self.store.get(msg.thread_id)
-
         if rec is None:
             await self._post(Outbound(
                 thread_id=msg.thread_id, speaker=SYSTEM,
-                text="This thread isn't active. Talk to the orchestrator in the "
-                     "main thread, or use /new for a direct session.",
+                text="This thread isn't active. Talk to the orchestrator in #general "
+                     "or a DM, or use /new for a direct session.",
             ))
             return
 
@@ -321,7 +322,7 @@ class Engine:
             await self._interject(msg, rec, session)
             return
 
-        # orchestrator or direct: plain turn
+        # direct session: plain turn
         if msg.media:
             await session.submit_media(msg.text, msg.media)
         else:
@@ -338,8 +339,7 @@ class Engine:
             await session.submit_media(text, msg.media)
         else:
             await session.submit(text)
-        self._note(f"{who} said in {rec.worker_id}'s thread: {msg.text}",
-                   rec.origin or self.main_thread)
+        self._note(f"{who} said in {rec.worker_id}'s thread: {msg.text}")
 
     # ---- session management ---------------------------------------------
 
@@ -405,7 +405,7 @@ class Engine:
             settings=self.settings, post=self._post, busy=self._busy,
             on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
             system_append=append,
-            extra_mcp_servers={"fleet": self._build_fleet_server(thread_id)},
+            extra_mcp_servers={"fleet": self._build_fleet_server()},
         )
 
     def _make_worker_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
@@ -436,33 +436,27 @@ class Engine:
 
     async def _ensure_orchestrator(self, thread_id: str) -> None:
         if self.store.get(thread_id) is None:
-            name = "orchestrator" if thread_id == self.main_thread else "orchestrator (DM)"
-            self.store.put(thread_id, ThreadRecord(role="orchestrator", name=name))
-        # The single orchestrator_thread field marks the GROUP office (where the
-        # dashboard lives). DM offices are their own records, found structurally.
-        if thread_id == self.main_thread:
-            self.store.set_orchestrator_thread(thread_id)
+            self.store.put(thread_id, ThreadRecord(
+                role="orchestrator", name="orchestrator"))
+        self.store.set_orchestrator_thread(thread_id)
 
-    # ---- supervision inbox (one per office) -----------------------------
+    # ---- supervision inbox ----------------------------------------------
 
-    def _note(self, text: str, office: str = "general") -> None:
-        box = self._inboxes.setdefault(office, [])
-        box.append(text)
-        if len(box) > MAX_INBOX:
-            drop = len(box) - MAX_INBOX
-            self._inboxes[office] = box[-MAX_INBOX:]
-            log.warning("inbox[%s] exceeded %d notes; dropped %d oldest",
-                        office, MAX_INBOX, drop)
-        log.info("inbox[%s] note: %s", office, text[:160])
+    def _note(self, text: str) -> None:
+        self._inbox.append(text)
+        if len(self._inbox) > MAX_INBOX:
+            drop = len(self._inbox) - MAX_INBOX
+            self._inbox = self._inbox[-MAX_INBOX:]
+            log.warning("inbox exceeded %d notes; dropped %d oldest", MAX_INBOX, drop)
+        log.info("inbox note: %s", text[:160])
 
     # ---- dashboard (the shared #general status board) -------------------
 
     def _render_dashboard(self) -> str:
-        """A deterministic snapshot of the SHARED (group) fleet — DM-hired work is
-        private and never shown here. Rendered from the store in code, never authored
-        by the LLM, so the board is always exactly true."""
+        """A deterministic snapshot of the fleet, rendered from the store in code
+        (never authored by the LLM), so the board is always exactly true."""
         workers = [r for r in self.store.workers().values()
-                   if not r.origin.startswith("dm:") and r.worker_status != "dismissed"]
+                   if r.worker_status != "dismissed"]
 
         def bucket(r: ThreadRecord) -> str:
             if r.worker_id in self._pending_delivery:
@@ -500,7 +494,7 @@ class Engine:
             out += ["", "✅ Recently delivered:"] + [
                 f"  • {r.name} · {Path(r.repo).name}" for r in cats["delivered"][-5:]]
         if not workers:
-            out += ["", "idle — no shared work running. Post here or DM me to start."]
+            out += ["", "idle — nothing running. Post here or DM me to start something."]
         return "\n".join(out)
 
     async def _refresh_dashboard(self) -> None:
@@ -531,52 +525,50 @@ class Engine:
             self.store.update(session.thread_id, worker_status="done")
         elif "status: blocked" in low or "status: needs-decision" in low:
             self.store.update(session.thread_id, worker_status="blocked")
-        office = rec.origin or self.main_thread
         status = "errored" if result.is_error else "finished a turn"
         self._note(f"worker {rec.worker_id} ({rec.name}, task: {rec.task[:80]}) "
-                   f"{status}: {tail or '(no text)'}", office)
+                   f"{status}: {tail or '(no text)'}")
         await self._refresh_dashboard()
-        await self._wake_orchestrator(office)
+        await self._wake_orchestrator()
 
     # Coalescing window: near-simultaneous worker events (e.g. two workers finish
     # together, or a boss interjection followed by the worker's reply) become one
     # orchestrator turn instead of several.
     WAKE_COALESCE_SECS = 2.0
 
-    async def _wake_orchestrator(self, office: str) -> None:
-        """Deliver an office's accumulated inbox to ITS orchestrator as one digest
-        turn. Offices are independent: a DM's digest never lands in the group, and
-        two offices can wake concurrently."""
-        if office in self._waking or not self._inboxes.get(office):
+    async def _wake_orchestrator(self) -> None:
+        """Deliver the accumulated inbox to the orchestrator as one digest turn."""
+        if self._waking or not self._inbox:
             return
-        rec = self.store.get(office)
-        if rec is None or rec.role != "orchestrator":
+        othread = self.store.orchestrator_thread
+        if othread is None:
             return
-        # Claim the wake for THIS office before any await, or a second worker of the
-        # same office finishing during the (suspending) session start passes the
-        # guard and double-drains its inbox.
-        self._waking.add(office)
+        rec = self.store.get(othread)
+        if rec is None:
+            return
+        # Claim the wake BEFORE any await, or a second worker finishing during the
+        # (suspending) session start passes the guard and double-drains the inbox.
+        self._waking = True
         try:
-            session = await self._ensure_session(office, rec)
+            session = await self._ensure_session(othread, rec)
             if session is None:
                 return
-            # Loop-drain: a worker finishing while we're mid-digest appends to this
-            # office's inbox; the while-check re-runs with no await between it and the
-            # `finally`, so no completion note can be stranded.
-            while self._inboxes.get(office):
+            # Loop-drain: a worker finishing while we're mid-digest appends to
+            # _inbox; the while-check re-runs with no await between it and the
+            # `finally` below, so no completion note can be stranded.
+            while self._inbox:
                 await asyncio.sleep(self.WAKE_COALESCE_SECS)
-                notes = self._inboxes.get(office) or []
-                self._inboxes[office] = []
+                notes, self._inbox = self._inbox, []
                 if not notes:
                     break
                 digest = "[fleet inbox]\n" + "\n".join(f"- {n}" for n in notes)
                 await session.submit(digest)
         finally:
-            self._waking.discard(office)
+            self._waking = False
 
     # ---- fleet tools (the orchestrator's powers) -------------------------
 
-    def _build_fleet_server(self, office: str):
+    def _build_fleet_server(self):
         engine = self
 
         def ok(text: str) -> dict[str, Any]:
@@ -638,10 +630,8 @@ class Engine:
              "required": ["repo", "task"]},
         )
         async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
-            # office is bound per orchestrator session, so a worker's events route
-            # back to the office that hired it (a DM's worker reports to that DM).
             return await engine._spawn_worker(str(args.get("repo", "")),
-                                             str(args.get("task", "")), office)
+                                             str(args.get("task", "")))
 
         @tool(
             "message_worker",
@@ -785,8 +775,7 @@ class Engine:
             body = body[:6000] + "\n…(truncated — Read/Grep the repo directly for more)"
         return {"content": [{"type": "text", "text": body}]}
 
-    async def _spawn_worker(self, repo_raw: str, task: str,
-                            office: str = "general") -> dict[str, Any]:
+    async def _spawn_worker(self, repo_raw: str, task: str) -> dict[str, Any]:
         def err(text: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": text}], "is_error": True}
 
@@ -817,17 +806,12 @@ class Engine:
             return err(f"couldn't set up an isolated workspace for {repo.name}: {e}")
 
         assert self.transport is not None
-        if office.startswith("dm:"):
-            # A DM has no sub-threads, so a DM-hired worker streams into that same DM,
-            # tagged by name — the work stays private to the DM, no group needed.
-            thread_id = f"{office}#{worker_id}"
-        else:
-            thread_id = await self.transport.create_thread(
-                f"{WORKER_EMOJI} {name} · {repo.name}")
+        thread_id = await self.transport.create_thread(
+            f"{WORKER_EMOJI} {name} · {repo.name}")
 
         rec = ThreadRecord(
             role="worker", name=name, cwd=str(cwd), worker_id=worker_id,
-            repo=str(repo), origin=office, base_branch=base_branch, base_sha=base_sha,
+            repo=str(repo), base_branch=base_branch, base_sha=base_sha,
             task=task.strip(), worker_status="working",
         )
         self.store.put(thread_id, rec)
@@ -1017,12 +1001,11 @@ class Engine:
                            "consider run_checks again before approving")
         else:
             checks_note = "\n⚠️ no checks recorded — consider run_checks first to verify"
-        # Hard gate: record the request and ask the boss to confirm with a command,
-        # in the office that hired the worker (a DM's delivery is asked in that DM).
+        # Hard gate: record the request and ask the boss to confirm with a command.
         self._pending_delivery[rec.worker_id] = method
         verb = "open a pull request for" if method == "pr" else "locally merge"
         await self._post(Outbound(
-            thread_id=rec.origin or self.main_thread, speaker=SYSTEM,
+            thread_id=self.main_thread, speaker=SYSTEM,
             text=(f"🚦 {rec.name} is ready to deliver. Approve to {verb} their work "
                   f"into '{base}'?{checks_note}\n"
                   f"    /approve {rec.worker_id}    ·    /reject {rec.worker_id}")))
@@ -1047,10 +1030,9 @@ class Engine:
             return f"No pending delivery for '{wid}'."
         found = self._find_worker(wid)
         name = found[1].name if found else wid
-        office = found[1].origin or self.main_thread if found else self.main_thread
-        self._note(f"the boss rejected delivery of {name}", office)
+        self._note(f"the boss rejected delivery of {name}")
         await self._refresh_dashboard()
-        await self._wake_orchestrator(office)
+        await self._wake_orchestrator()
         return f"Rejected {name}'s delivery; the orchestrator has been told."
 
     async def _execute_delivery(self, worker_id: str, method: str) -> str:
@@ -1058,7 +1040,6 @@ class Engine:
         if found is None:
             return f"Worker '{worker_id}' is gone; nothing delivered."
         thread_id, rec = found
-        office = rec.origin or self.main_thread
         repo = Path(rec.repo)
         branch = f"worker/{rec.worker_id}"
         base = rec.base_branch or await worktrees.current_branch(repo) or ""
@@ -1067,15 +1048,15 @@ class Engine:
         else:
             landed, detail = await worktrees.merge_into_base(repo, branch, base)
         if not landed:
-            self._note(f"delivery of {rec.name} failed: {detail}", office)
-            await self._wake_orchestrator(office)
+            self._note(f"delivery of {rec.name} failed: {detail}")
+            await self._wake_orchestrator()
             return f"⚠️ delivery of {rec.name} failed: {detail}"
         self.store.update(thread_id, worker_status="delivered")
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM, text=f"📦 {detail}."))
-        self._note(f"{rec.name}'s work delivered — {detail}", office)
+        self._note(f"{rec.name}'s work delivered — {detail}")
         await self._refresh_dashboard()
-        await self._wake_orchestrator(office)
+        await self._wake_orchestrator()
         return f"✅ {rec.name}'s work delivered — {detail}"
 
     # ---- direct sessions (orchestrator-less, via /new) -------------------
@@ -1115,10 +1096,7 @@ class Engine:
         if rec.role == "worker" and rec.repo and rec.cwd != rec.repo:
             await worktrees.remove_worktree(Path(rec.repo), Path(rec.cwd))
         if rec.role == "orchestrator":
-            self._inboxes.pop(thread_id, None)
-            self._waking.discard(thread_id)
-            if thread_id == self.store.orchestrator_thread:
-                self.store.set_orchestrator_thread(None)
+            self.store.set_orchestrator_thread(None)
         self.store.delete(thread_id)
         if rec.role == "worker":
             await self._refresh_dashboard()
@@ -1139,14 +1117,11 @@ class Engine:
         silently forgotten. Re-enqueue a reminder; it's delivered on the
         orchestrator's next wake (a boss message or a live worker event).
         """
-        by_office: dict[str, list[str]] = {}
-        for rec in self.store.workers().values():
-            if rec.worker_status in ("blocked", "done"):
-                office = rec.origin or self.main_thread
-                by_office.setdefault(office, []).append(f"{rec.name} ({rec.worker_status})")
-        for office, names in by_office.items():
-            self._note(f"[after restart] workers still awaiting you: {', '.join(names)}",
-                       office)
+        pending = [rec for rec in self.store.workers().values()
+                   if rec.worker_status in ("blocked", "done")]
+        if pending:
+            names = ", ".join(f"{r.name} ({r.worker_status})" for r in pending)
+            self._note(f"[after restart] workers still awaiting you: {names}")
 
     async def shutdown(self) -> None:
         for session in list(self.sessions.values()):
