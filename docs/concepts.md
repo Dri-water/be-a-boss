@@ -26,13 +26,16 @@ is what makes delegation trustworthy: nothing happens in a black box.
 
 A **thread** is one conversation. There are three kinds:
 
-- the **main thread** — the orchestrator's office, where you and it talk;
+- an **office thread** — where you talk to the orchestrator. There can be more than
+  one: the shared group thread and each boss's private DM. Each keeps its own
+  conversation but shares one view of the fleet.
 - a **worker thread** — one worker being directed (the glass wall above);
 - a **direct thread** — you talking straight to a single agent, no orchestrator in
   the middle. For quick, hands-on work where a manager would just be overhead.
 
-How a thread shows up depends on the **surface**: on Telegram it's a forum topic.
-The core doesn't know or care.
+How a thread shows up depends on the **surface**: on Telegram a group thread is a
+forum topic, and a DM is the private chat itself. The core doesn't know or care. (On
+Telegram, the shared `#general` also carries a live, code-rendered status board.)
 
 ## Isolation
 
