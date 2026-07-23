@@ -183,16 +183,18 @@ cd be-a-boss && uv sync
 Start the server (binds to localhost only), then open a UI against it:
 
 ```bash
-uv run python -m beaboss.web        # serves ws://127.0.0.1:8765
+uv run python -m beaboss.web        # serves the UI + WebSocket on http://127.0.0.1:8765
 ```
 
-On start it prints a one-time **connect URL with a token** (`?token=…`) — that
-token is required to connect, and every connection is also checked for a same-origin
-`Origin`, so a random web page you visit can't reach your local server (CSWSH). Set
-`WEB_TOKEN` to pin a stable token instead of a fresh one each run.
+On start it prints a one-time **connect URL with a token** (`http://…/?token=…`) —
+the same port serves the app shell over HTTP and the WebSocket, so there's no
+`file://` juggling. That token is required to open the socket, and every connection
+is also checked for a same-origin `Origin`, so a random web page you visit can't
+reach your local server (CSWSH). Set `WEB_TOKEN` to pin a stable token instead of a
+fresh one each run.
 
-- **Browser** — open the printed connect URL (or open `web/index.html?token=…`); it
-  connects and drops you in the orchestrator's thread. Type a goal.
+- **Browser** — open the printed `http://…/?token=…` URL; it connects and drops you
+  in the orchestrator's thread. Type a goal.
 
 Two layers guard this surface: the **localhost bind** (a public bind is refused
 unless you set `WEB_ALLOW_INSECURE_BIND=1` and front it with your own auth) **and**
