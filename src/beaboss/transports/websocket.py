@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from websockets.asyncio.server import ServerConnection, serve
 
-from ..core.ports import InboundMessage, Outbound, Speaker
+from ..core.ports import SYSTEM, InboundMessage, Outbound, Speaker
 
 log = logging.getLogger("beaboss.transport.websocket")
 
@@ -42,11 +42,31 @@ def _speaker_json(s: Speaker) -> dict:
 class WebSocketTransport:
     """Implements core.ports.Transport, fanning core events out to browsers."""
 
-    def __init__(self) -> None:
+    def __init__(self, store=None) -> None:
         self.clients: set[ServerConnection] = set()
         self.threads: dict[str, dict] = {}  # id -> {"title", "open"}
         self._next = 0
         self._add_thread(OFFICE, "Orchestrator")
+        if store is not None:
+            self._rehydrate(store)
+
+    def _rehydrate(self, store) -> None:
+        """Restart-proof: re-seed the thread list from the store so a web restart
+        doesn't drop existing workers from the UI — and, critically, advance the id
+        counter past them so a fresh thread can't reuse and overwrite a live id."""
+        from pathlib import Path
+        highest = 0
+        for tid, rec in store.all().items():
+            if tid == OFFICE:
+                continue
+            title = rec.name
+            if rec.role == "worker" and rec.repo:
+                title = f"⚙️ {rec.name} · {Path(rec.repo).name}"
+            open_ = not (rec.role == "worker" and rec.worker_status == "dismissed")
+            self.threads[tid] = {"title": title, "open": open_}
+            if tid.isdigit():
+                highest = max(highest, int(tid))
+        self._next = highest
 
     # ---- thread bookkeeping ---------------------------------------------
 
@@ -133,16 +153,39 @@ def make_handler(engine, transport: WebSocketTransport):
                     msg = json.loads(raw)
                 except (ValueError, TypeError):
                     continue
-                if msg.get("type") != "message":
-                    continue
-                thread_id = str(msg.get("thread_id") or "").strip()
-                text = str(msg.get("text") or "")
-                if not thread_id or not text.strip():
-                    continue
-                await engine.on_inbound(InboundMessage(
-                    thread_id=thread_id, text=text,
-                    sender_name=str(msg.get("sender_name") or "the boss"),
-                ))
+                mtype = msg.get("type")
+                if mtype == "message":
+                    thread_id = str(msg.get("thread_id") or "").strip()
+                    text = str(msg.get("text") or "")
+                    if thread_id and text.strip():
+                        await engine.on_inbound(InboundMessage(
+                            thread_id=thread_id, text=text,
+                            sender_name=str(msg.get("sender_name") or "the boss")))
+                elif mtype == "interrupt":
+                    tid = str(msg.get("thread_id") or "").strip()
+                    if tid:
+                        await engine.interrupt(tid)
+                elif mtype == "kill":
+                    tid = str(msg.get("thread_id") or "").strip()
+                    if tid:
+                        await engine.kill(tid)
+                        await transport.post(Outbound(
+                            thread_id=tid, speaker=SYSTEM, text="🗑 Session ended."))
+                        await transport.close_thread(tid)
+                elif mtype == "new":
+                    result = await engine.new_direct(
+                        str(msg.get("path") or ""),
+                        str(msg.get("name") or "").strip() or None)
+                    if isinstance(result, str):  # an error message
+                        await transport.post(Outbound(
+                            thread_id=OFFICE, speaker=SYSTEM, text=result))
+                elif mtype in ("approve", "reject"):
+                    wid = str(msg.get("worker_id") or "").strip()
+                    if wid:
+                        fn = (engine.approve_delivery if mtype == "approve"
+                              else engine.reject_delivery)
+                        await transport.post(Outbound(
+                            thread_id=OFFICE, speaker=SYSTEM, text=await fn(wid)))
         finally:
             transport.unregister(ws)
 

@@ -28,7 +28,7 @@ def main() -> None:
     store = CoreStore(settings.state_dir)
 
     engine = Engine(settings, store)
-    transport = WebSocketTransport()
+    transport = WebSocketTransport(store)  # rehydrate threads from the store on restart
     engine.attach_transport(transport)
     engine.rehydrate()  # re-surface unfinished workers after a restart
 

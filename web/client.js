@@ -35,6 +35,13 @@
       }
     }
 
+    // Send a raw protocol message (commands: interrupt/kill/new/approve/reject).
+    sendRaw(obj) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(obj));
+      }
+    }
+
     // Append a message to a thread locally. Used for your own outgoing message,
     // which the server does not echo back — pure state, no socket involved.
     addLocalMessage(threadId, speaker, text) {
@@ -150,14 +157,33 @@
       e.preventDefault();
       const text = box.value.trim();
       if (!text || active === null) return;
-      client.send(active, text);
-      // The server doesn't echo your own message back — show it locally so your
-      // side of the conversation is visible, not just the agents' replies.
-      client.addLocalMessage(active, { role: "you", name: "You" }, text);
-      busyThreads.add(active);   // instant "working…" until the reply lands
+      if (text.startsWith("/")) {
+        runCommand(text);
+      } else {
+        client.send(active, text);
+        // The server doesn't echo your own message back — show it locally so your
+        // side of the conversation is visible, not just the agents' replies.
+        client.addLocalMessage(active, { role: "you", name: "You" }, text);
+        busyThreads.add(active);   // instant "working…" until the reply lands
+      }
       box.value = "";
       renderLog();
     });
+
+    // Slash-commands mirror Telegram — the web/VS Code kill switch + approvals:
+    // /stop /kill (this thread), /approve <id>, /reject <id>, /new <path> [name].
+    function runCommand(text) {
+      const parts = text.slice(1).split(/\s+/);
+      const cmd = (parts[0] || "").toLowerCase();
+      const rest = parts.slice(1);
+      if (cmd === "stop") client.sendRaw({ type: "interrupt", thread_id: active });
+      else if (cmd === "kill") client.sendRaw({ type: "kill", thread_id: active });
+      else if (cmd === "approve") client.sendRaw({ type: "approve", worker_id: rest[0] || "" });
+      else if (cmd === "reject") client.sendRaw({ type: "reject", worker_id: rest[0] || "" });
+      else if (cmd === "new") client.sendRaw({ type: "new", path: rest[0] || "", name: rest.slice(1).join(" ") });
+      else { client.addLocalMessage(active, { role: "system", name: "sys" }, "unknown command: /" + cmd); return; }
+      client.addLocalMessage(active, { role: "you", name: "You" }, text);
+    }
   }
 
   window.beaboss = { BeabossClient, connect };

@@ -23,9 +23,25 @@ def test_implements_transport_contract():
 class FakeEngine:
     def __init__(self):
         self.inbound = []
+        self.calls = []
 
     async def on_inbound(self, msg):
         self.inbound.append(msg)
+
+    async def interrupt(self, tid):
+        self.calls.append(("interrupt", tid)); return True
+
+    async def kill(self, tid):
+        self.calls.append(("kill", tid)); return True
+
+    async def new_direct(self, path, name):
+        self.calls.append(("new", path, name)); return ("99", "d")
+
+    async def approve_delivery(self, wid):
+        self.calls.append(("approve", wid)); return "approved"
+
+    async def reject_delivery(self, wid):
+        self.calls.append(("reject", wid)); return "rejected"
 
 
 async def _wait_for(predicate, timeout=2.0):
@@ -107,6 +123,40 @@ def test_gate_rejects_bad_origin_and_missing_token():
                         f"{base}?token=s3cret",
                         additional_headers={"Origin": "https://evil.example"}):
                     pass
+
+    asyncio.run(scenario())
+
+
+def test_rehydrate_seeds_threads_and_advances_id(tmp_path):
+    """A web restart re-seeds worker threads from the store and advances the id
+    counter past them, so a fresh thread can't reuse and overwrite a live id."""
+    from beaboss.core.store import CoreStore, ThreadRecord
+    store = CoreStore(tmp_path / "state")
+    store.put("3", ThreadRecord(role="worker", name="Nova", worker_id="nova",
+                                repo="/r/myapp", worker_status="working"))
+    transport = WebSocketTransport(store)
+    assert "3" in transport.threads and "Nova" in transport.threads["3"]["title"]
+    assert asyncio.run(transport.create_thread("new")) == "4"  # no reuse of "3"
+
+
+def test_ws_commands_route_to_engine():
+    """The web kill switch + approval: interrupt/kill/approve/reject/new reach the
+    engine (they were silently unsupported before)."""
+
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await ws.recv()  # snapshot
+                await ws.send(json.dumps({"type": "interrupt", "thread_id": "5"}))
+                await ws.send(json.dumps({"type": "approve", "worker_id": "nova"}))
+                await ws.send(json.dumps({"type": "kill", "thread_id": "5"}))
+                await _wait_for(lambda: len(engine.calls) == 3)
+        assert ("interrupt", "5") in engine.calls
+        assert ("approve", "nova") in engine.calls
+        assert ("kill", "5") in engine.calls
 
     asyncio.run(scenario())
 
