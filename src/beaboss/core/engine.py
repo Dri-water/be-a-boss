@@ -23,7 +23,7 @@ from claude_agent_sdk import ResultMessage, create_sdk_mcp_server, tool
 from .agent_backend import CodexBackend
 from .names import pick_name
 from .ports import InboundMessage, MediaIn, Outbound, Speaker, SYSTEM, Transport
-from .session import CoreSession
+from .session import CoreSession, DEFAULT_SESSION_APPEND
 from .store import CoreStore, ThreadRecord
 from . import worktrees
 
@@ -308,10 +308,16 @@ class Engine:
 
     def _make_worker_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
         cwd = Path(rec.cwd)
-        # A worker may run on the Codex CLI instead of Claude; the choice lives
-        # here (the single worker-construction point) and nowhere else.
+        # The worker's full system prompt = the base env note + the worker role note.
+        base = (self.settings.session_system_append
+                if self.settings.session_system_append is not None
+                else DEFAULT_SESSION_APPEND)
+        worker_append = base + WORKER_APPEND_EXTRA
+        # A worker may run on Codex instead of Claude; the choice lives here (the
+        # single worker-construction point). Codex needs the prompt handed in (it has
+        # no system-prompt channel) and the persisted id to resume across restarts.
         backend = (
-            CodexBackend(cwd)
+            CodexBackend(cwd, system_prompt=worker_append, resume_id=rec.session_id)
             if self.settings.agent_backend == "codex"
             else None  # None => CoreSession builds the default ClaudeAgentBackend
         )
@@ -320,11 +326,9 @@ class Engine:
             speaker=self.worker_speaker(rec.name),
             settings=self.settings, post=self._post, busy=self._busy,
             on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
-            system_append=None,  # default env note…
+            system_append=worker_append,
             backend=backend,
         )
-        # …plus the worker role note appended onto it
-        session._system_append = session._resolve_append() + WORKER_APPEND_EXTRA
         session.on_turn_done = self._on_worker_turn_done
         return session
 

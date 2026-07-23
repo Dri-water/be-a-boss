@@ -84,6 +84,32 @@ def test_thread_id_captured_for_resume():
     assert backend._thread_id == "019-abc"
 
 
+def test_receive_surfaces_a_silent_failure():
+    """If codex exits without turn.completed (crash / auth error), receive must
+    yield an error ResultMessage — not a silent empty stream that the orchestrator
+    never hears about."""
+
+    class _DyingProc:
+        def __init__(self):
+            self.stdout = _FakeStdout([
+                b'{"type":"thread.started","thread_id":"t"}\n',
+                # ...then the process dies with no turn.completed
+            ])
+            self.stderr = None
+            self.returncode = 1
+
+        async def wait(self):
+            return 1
+
+    backend = CodexBackend(cwd=None)
+    backend._proc = _DyingProc()
+    messages = _drain(backend)
+    assert isinstance(messages[0], SystemMessage)
+    assert isinstance(messages[-1], ResultMessage)
+    assert messages[-1].is_error is True
+    assert "without completing" in messages[-1].result
+
+
 def test_receive_stops_at_turn_completed():
     """Anything after turn.completed must not be yielded — the turn is over."""
     backend = CodexBackend(cwd=None)
