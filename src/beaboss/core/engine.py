@@ -152,6 +152,14 @@ class Engine:
         if self.transport is not None:
             await self.transport.indicate_busy(thread_id)
 
+    async def _idle(self, thread_id: str) -> None:
+        # The turn-end counterpart to _busy. Optional on the transport: Telegram's
+        # typing indicator self-expires, so it needs no idle; the web/CLI cockpits
+        # hold "working" until told otherwise, so they do.
+        indicate_idle = getattr(self.transport, "indicate_idle", None)
+        if indicate_idle is not None:
+            await indicate_idle(thread_id)
+
     # ---- speakers --------------------------------------------------------
 
     def orchestrator_speaker(self) -> Speaker:
@@ -313,7 +321,7 @@ class Engine:
         return CoreSession(
             thread_id=thread_id, cwd=Path(rec.cwd),
             speaker=Speaker(role="direct", name=self.settings.bot_name),
-            settings=self.settings, post=self._post, busy=self._busy,
+            settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
             on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
         )
 
@@ -328,7 +336,7 @@ class Engine:
         return CoreSession(
             thread_id=thread_id, cwd=home,
             speaker=self.orchestrator_speaker(),
-            settings=self.settings, post=self._post, busy=self._busy,
+            settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
             on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
             system_append=append,
             extra_mcp_servers={"fleet": self._build_fleet_server()},
@@ -362,7 +370,7 @@ class Engine:
         session = CoreSession(
             thread_id=thread_id, cwd=cwd,
             speaker=self.worker_speaker(rec.name),
-            settings=self.settings, post=self._post, busy=self._busy,
+            settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
             on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
             system_append=worker_append,
             backend=backend,

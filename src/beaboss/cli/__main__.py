@@ -201,9 +201,12 @@ def _pretty(event: dict) -> str | None:
 
 
 def _reader(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue) -> None:
-    for line in sys.stdin:          # blocking read on a daemon thread (cross-platform)
-        loop.call_soon_threadsafe(queue.put_nowait, line)
-    loop.call_soon_threadsafe(queue.put_nowait, None)  # EOF
+    try:
+        for line in sys.stdin:      # blocking read on a daemon thread (cross-platform)
+            loop.call_soon_threadsafe(queue.put_nowait, line)
+        loop.call_soon_threadsafe(queue.put_nowait, None)  # EOF
+    except RuntimeError:
+        pass  # the loop closed during shutdown (e.g. after /quit) — nothing to deliver
 
 
 async def run(json_mode: bool) -> None:

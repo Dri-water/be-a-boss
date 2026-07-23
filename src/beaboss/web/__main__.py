@@ -53,16 +53,22 @@ def main() -> None:
     # what actually makes the localhost bind a boundary (a malicious web page you
     # visit can otherwise open ws://127.0.0.1 and drive the orchestrator).
     token = os.getenv("WEB_TOKEN", "").strip() or secrets.token_urlsafe(16)
-    # The server serves this same directory over HTTP, so the operator opens a real
-    # http:// URL (set WEB_TOKEN to pin the token across restarts).
-    web_dir = Path(__file__).resolve().parents[3] / "web"
+    # The app shell ships inside the package (src/beaboss/web/static), so it resolves
+    # the same in a source checkout, a wheel, and the Docker image — and the server
+    # serves it over HTTP so the operator opens a real http:// URL (no file://).
+    web_dir = Path(__file__).resolve().parent / "static"
+    served = web_dir.is_dir()
     display_host = host if host not in {"", "0.0.0.0", "::"} else "127.0.0.1"
     log.info("web UI token: %s", token)
-    log.info("open the UI → http://%s:%s/?token=%s", display_host, port, token)
+    if served:
+        log.info("open the UI → http://%s:%s/?token=%s", display_host, port, token)
+    else:  # assets missing (broken build) — don't advertise a URL that will 404
+        log.warning("web assets not found at %s — the UI won't be served; "
+                    "check the package build", web_dir)
 
     try:
         asyncio.run(serve_forever(engine, transport, host, port, token,
-                                  web_dir if web_dir.is_dir() else None))
+                                  web_dir if served else None))
     except KeyboardInterrupt:
         pass
 

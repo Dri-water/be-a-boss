@@ -388,9 +388,10 @@ src/beaboss/
     telegram.py          topics ⇄ threads, header-card identities, commands
     websocket.py         browser surface (any UI can speak this protocol)
     cli.py               CLI transport — emits the shared JSON event protocol
-  web/__main__.py        `python -m beaboss.web` — serve the WebSocket surface
+  web/                   `python -m beaboss.web` — serves the UI + WebSocket
+    __main__.py          entrypoint; Origin + token gated
+    static/              the app shell (index.html + client.js), served over HTTP
   cli/                   terminal surface: __main__.py (json/plain) + tui.py (cockpit)
-web/                     static web app (index.html + client.js)
 ```
 
 Adding a transport = implement `core.ports.Transport` and feed the engine

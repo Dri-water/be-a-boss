@@ -104,6 +104,7 @@ class CoreSession:
         post: PostFn,
         busy: BusyFn,
         on_session_id: Callable[[str], None],
+        idle: BusyFn | None = None,
         session_id: str | None = None,
         system_append: str | None = None,
         extra_mcp_servers: dict[str, Any] | None = None,
@@ -117,6 +118,7 @@ class CoreSession:
         self.settings = settings
         self._post = post
         self._busy = busy
+        self._idle = idle
         self._on_session_id = on_session_id
         self.session_id = session_id
         self._system_append = system_append
@@ -388,6 +390,14 @@ class CoreSession:
             await self._do_turn_inner(turn)
         finally:
             keepalive.cancel()
+            # Clear the "working" indicator at true turn-end — even a quiet digest
+            # that posted nothing must not leave the cockpit showing motion forever.
+            # (Fires after any reply, so long worker turns still read as busy.)
+            if self._idle is not None:
+                try:
+                    await self._idle(self._reply_to)
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _do_turn_inner(self, turn: Turn) -> None:
         await self._backend.send(turn)

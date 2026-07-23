@@ -91,6 +91,8 @@
         this._emit("dashboard");
       } else if (msg.type === "busy") {
         this._emit("busy", msg.thread_id);
+      } else if (msg.type === "idle") {
+        this._emit("idle", msg.thread_id);
       }
     }
   }
@@ -100,7 +102,10 @@
   const SAFE_URL = /^(https?:|mailto:)/i;
 
   function inlineInto(text, parent) {
-    const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)]+\))/;
+    // the link URL allows one level of balanced parens so Wikipedia/MSDN-style
+    // "Foo_(bar)" links aren't truncated. The two branches are disjoint on the first
+    // char (paren vs not), so the outer * stays linear — no catastrophic backtracking.
+    const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\((?:[^()]|\([^()]*\))*\))/;
     let rest = String(text);
     while (rest) {
       const m = re.exec(rest);
@@ -119,16 +124,17 @@
         const em = document.createElement("em");
         inlineInto(tok.slice(1, -1), em);
         parent.appendChild(em);
-      } else {                                   // [label](url)
-        const lm = tok.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-        const url = lm[2].trim();
+      } else {                                   // [label](url) — url may contain ()
+        const mid = tok.indexOf("](");
+        const label = tok.slice(1, mid);
+        const url = tok.slice(mid + 2, tok.length - 1).trim();  // between ]( and final )
         if (SAFE_URL.test(url)) {                 // only safe schemes become links
           const a = document.createElement("a");
-          a.textContent = lm[1]; a.href = url;
+          a.textContent = label; a.href = url;
           a.target = "_blank"; a.rel = "noopener noreferrer";
           parent.appendChild(a);
         } else {                                  // unsafe scheme → inert text
-          parent.appendChild(document.createTextNode(lm[1]));
+          parent.appendChild(document.createTextNode(label));
         }
       }
       rest = rest.slice(m.index + tok.length);
@@ -265,6 +271,14 @@
       if (tid === active) { renderLog(); renderTopbar(); }
       else { unread.set(tid, (unread.get(tid) || 0) + 1); renderThreads(); }
     });
+    // turn-end: clear "working" even when the turn posted nothing (quiet digest),
+    // so the dot / typing bubble can't stick on an idle thread forever.
+    client.on("idle", (tid) => {
+      if (!busy.has(tid)) return;
+      busy.delete(tid);
+      renderThreads();
+      if (tid === active) { renderLog(); renderTopbar(); }
+    });
 
     function switchTo(tid) {
       active = tid; unread.delete(tid);
@@ -336,8 +350,13 @@
       }
 
       if (m.media) {
-        const url = "data:" + m.media.mime + ";base64," + m.media.data_b64;
-        if ((m.media.mime || "").startsWith("image/")) {
+        // The worker controls the MIME (filename-derived), so don't trust it: render
+        // only known-safe image types inline (SVG-as-<img> can't script), and force
+        // everything else to octet-stream + download so a text/html blob can't render.
+        const isImg = /^image\/(png|jpe?g|gif|webp|bmp|svg\+xml)$/i.test(m.media.mime || "");
+        const mime = isImg ? m.media.mime : "application/octet-stream";
+        const url = "data:" + mime + ";base64," + m.media.data_b64;
+        if (isImg) {
           const img = document.createElement("img");
           img.src = url; img.alt = m.media.filename; img.className = "media";
           wrap.appendChild(img);

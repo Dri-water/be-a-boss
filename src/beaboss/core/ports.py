@@ -77,6 +77,12 @@ class Transport(Protocol):
         """Best-effort 'typing…' hint; may be a no-op."""
         ...
 
+    # Optional (getattr-gated by the engine): the turn-end counterpart to
+    # indicate_busy. A surface that holds a persistent "working" indicator (the web
+    # and CLI cockpits) implements this to clear it even when the turn posted nothing;
+    # a surface whose typing hint self-expires (Telegram) can omit it entirely.
+    # async def indicate_idle(self, thread_id: str) -> None: ...
+
 
 class Engine(Protocol):
     """What a transport needs from the core."""

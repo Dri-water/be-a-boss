@@ -164,6 +164,11 @@ class WebSocketTransport:
     async def indicate_busy(self, thread_id: str) -> None:
         await self._broadcast({"type": "busy", "thread_id": thread_id})
 
+    async def indicate_idle(self, thread_id: str) -> None:
+        # Turn-end: clear the client's "working" indicator even if the turn was a
+        # quiet digest that posted nothing. Transient — not recorded in history.
+        await self._broadcast({"type": "idle", "thread_id": thread_id})
+
     async def update_dashboard(self, text: str) -> None:
         """The live status board, as a broadcast — web parity with the pinned
         Telegram message. New clients get it in their connect snapshot."""

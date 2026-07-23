@@ -114,6 +114,13 @@ class Cockpit(App):
             self.working.add(tid)
             self._refresh_sidebar()
             self._refresh_activity()
+        elif t == "idle":
+            # turn-end: clear "working" even if the turn posted nothing (quiet digest)
+            tid = event.get("thread_id", OFFICE)
+            if tid in self.working:
+                self.working.discard(tid)
+                self._refresh_sidebar()
+                self._refresh_activity()
 
     def _ingest_message(self, event: dict) -> None:
         tid = event.get("thread_id", OFFICE)

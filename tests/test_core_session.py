@@ -484,3 +484,38 @@ def test_interrupt_sets_flag_only_when_busy(tmp_path):
     sess._backend = FakeBackend([])        # interrupt() calls the backend
     asyncio.run(sess.interrupt())
     assert sess._interrupted is True
+
+
+def test_quiet_turn_still_signals_idle(tmp_path):
+    """Finding 2 regression: a final_only turn that posts NOTHING (a quiet
+    orchestrator digest) must still clear the cockpit's 'working' indicator — idle
+    fires at turn-end regardless of whether any text was posted."""
+    busy_calls: list[str] = []
+    idle_calls: list[str] = []
+
+    async def rec_busy(tid): busy_calls.append(tid)
+    async def rec_idle(tid): idle_calls.append(tid)
+
+    post = SinkPost()
+    backend = FakeBackend([
+        ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1,
+                      is_error=False, num_turns=1, session_id="s",
+                      total_cost_usd=0.0, result=None),   # nothing boss-facing
+    ])
+    sess = CoreSession(
+        thread_id="general", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=rec_busy, idle=rec_idle,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+
+    async def drive():
+        await sess.start()
+        await sess.submit("digest")     # reply_to unset + quiet → posts nothing
+        await sess._queue.join()
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert post.out == []               # confirmed: the quiet digest posted nothing
+    assert busy_calls == ["general"]    # working was shown…
+    assert idle_calls == ["general"]    # …and cleared at turn-end (no stuck indicator)

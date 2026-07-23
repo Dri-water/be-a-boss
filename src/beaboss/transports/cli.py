@@ -123,6 +123,11 @@ class CLITransport:
     async def indicate_busy(self, thread_id: str) -> None:
         await self._emit({"type": "busy", "thread_id": thread_id})
 
+    async def indicate_idle(self, thread_id: str) -> None:
+        # Turn-end: clears the cockpit's "working" indicator even when the turn
+        # posted nothing (a quiet orchestrator digest).
+        await self._emit({"type": "idle", "thread_id": thread_id})
+
     async def update_dashboard(self, text: str) -> None:
         self.dashboard = text
         await self._emit({"type": "dashboard", "text": text})

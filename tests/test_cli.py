@@ -232,3 +232,24 @@ def test_tui_busy_indicator_lifecycle():
             assert "working" not in app._activity_text
 
     asyncio.run(go())
+
+
+def test_tui_idle_clears_working_without_a_message():
+    """Finding 2 regression (TUI): an `idle` event clears the working dot + activity
+    bar even when no message followed the busy (a quiet digest)."""
+    import pytest
+    pytest.importorskip("textual")
+    from beaboss.cli.tui import Cockpit
+
+    async def go():
+        app = Cockpit(bot_name="X", demo_events=[
+            {"type": "thread", "id": "7", "title": "⚙️ Nova · app", "open": True}])
+        async with app.run_test():
+            app.active = "7"
+            await app.apply_event({"type": "busy", "thread_id": "7"})
+            assert "7" in app.working
+            await app.apply_event({"type": "idle", "thread_id": "7"})
+            assert "7" not in app.working                 # cleared with no message
+            assert "working" not in app._activity_text
+
+    asyncio.run(go())

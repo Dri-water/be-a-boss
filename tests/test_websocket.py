@@ -344,3 +344,16 @@ def test_web_new_empty_path_is_guarded(tmp_path):
         assert not any(c[0] == "new" for c in engine.calls)   # no session opened
 
     asyncio.run(scenario())
+
+
+def test_app_shell_ships_inside_the_package():
+    """Finding 1 regression: the web assets must live INSIDE the package so a wheel /
+    Docker image serves them — not only a source checkout. If they move back out,
+    `python -m beaboss.web` 404s in every non-source deploy."""
+    import pathlib
+    import beaboss.web
+    from beaboss.transports.websocket import _load_assets
+    static = pathlib.Path(beaboss.web.__file__).resolve().parent / "static"
+    assets = _load_assets(static)
+    assert "/index.html" in assets and "/client.js" in assets
+    assert assets["/index.html"][0].startswith("text/html")
