@@ -3,7 +3,13 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>be-a-boss — Claude Code, from Telegram</title>
+<title>be-a-boss — run your own agent org</title>
+<meta name="description" content="Run your own agent org: an orchestrator hires and supervises worker agents you watch and micromanage. Self-hosted; drive it from Telegram, the web, or VS Code; workers run on Claude Code or Codex." />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="be-a-boss — run your own agent org" />
+<meta property="og:description" content="You're the boss: an orchestrator hires & supervises worker agents you watch and step into. Self-hosted, with pluggable surfaces and backends." />
+<meta property="og:image" content="preview.png" />
+<meta name="twitter:card" content="summary_large_image" />
 <style>
   :root {
     --bg: #0a0c10;
@@ -240,6 +246,9 @@
     border-radius: 5px;
   }
   .msg.bot code { background: rgba(76,141,255,0.14); color: var(--accent-2); }
+  .msg.worker { align-self: flex-start; background: rgba(167,139,250,0.08); border: 1px solid rgba(167,139,250,0.28); border-bottom-left-radius: 5px; color: var(--text); }
+  .msg.worker .lbl { color: var(--violet); }
+  .msg.worker code { background: rgba(167,139,250,0.16); color: var(--violet); }
   .typing { display: inline-flex; gap: 4px; align-items: center; color: var(--faint); font-size: 12.5px; }
   .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--faint); display: inline-block; }
 
@@ -423,70 +432,73 @@
   <div class="wrap">
     <div class="brand">
       <span class="logo" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M21.5 4.3 2.9 11.4c-.9.35-.9 1.6.02 1.9l4.7 1.5 1.8 5.6c.24.72 1.15.9 1.65.33l2.6-2.9 4.7 3.45c.6.44 1.45.11 1.6-.62L23 5.5c.2-.9-.7-1.6-1.5-1.2Z" fill="#fff"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><circle cx="5.5" cy="19" r="2.4"/><circle cx="18.5" cy="19" r="2.4"/><path d="M12 7.4 6.9 16.6M12 7.4 17.1 16.6"/></svg>
       </span>
       <span class="brand-name">be-a<span class="thin">-boss</span></span>
     </div>
     <div class="nav-links">
       <a href="#how">How it works</a>
       <a href="#features">Features</a>
-      <a href="#commands">Commands</a>
+      <a href="#commands">Drive it</a>
     </div>
-    <a class="nav-cta" href="#start">Self-host it →</a>
+    <a class="nav-cta" href="https://github.com/Dri-water/be-a-boss">GitHub →</a>
   </div>
 </nav>
 
 <header class="hero">
   <div class="wrap">
-    <span class="eyebrow"><span class="dot"></span> Self-hosted · no orchestrator layer</span>
-    <h1>Drive parallel <span class="grad">Claude Code</span> sessions from Telegram.</h1>
+    <span class="eyebrow"><span class="dot"></span> Self-hosted · open source</span>
+    <h1>Run your own <span class="grad">agent org</span>.</h1>
     <p class="tagline">
-      One Telegram topic = <strong>one live Claude Code session</strong>, bound to a repo.
-      Kick off real coding sessions from your phone, run several at once across
-      different projects, and manage each independently.
+      You're the boss. Talk to an <strong>orchestrator</strong> and it hires
+      <strong>worker</strong> agents for your tasks, briefs them, and supervises —
+      while you watch every conversation and step into any of them. Each worker
+      runs in an isolated git worktree, so parallel work never collides.
     </p>
     <div class="hero-cta">
-      <a class="btn btn-primary" href="#start">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M21.5 4.3 2.9 11.4c-.9.35-.9 1.6.02 1.9l4.7 1.5 1.8 5.6c.24.72 1.15.9 1.65.33l2.6-2.9 4.7 3.45c.6.44 1.45.11 1.6-.62L23 5.5c.2-.9-.7-1.6-1.5-1.2Z" fill="#fff"/></svg>
+      <a class="btn btn-primary" href="https://github.com/Dri-water/be-a-boss">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M12 5l7 7-7 7"/></svg>
         Get started
       </a>
       <a class="btn btn-ghost" href="#how">See how it works</a>
     </div>
     <div class="hero-meta">
-      <span><span class="tick">✓</span> You own the bot, the box &amp; the data</span>
-      <span><span class="tick">✓</span> Runs anywhere Docker does</span>
+      <span><span class="tick">✓</span> Telegram · Web · VS Code</span>
+      <span><span class="tick">✓</span> Claude Code · Codex</span>
+      <span><span class="tick">✓</span> You own the box &amp; data</span>
       <span><span class="tick">✓</span> MIT licensed</span>
     </div>
 
     <div class="hero-visual">
       <div class="chat">
         <div class="chat-head">
-          <span class="chat-avatar" aria-hidden="true">🤖</span>
+          <span class="chat-avatar" aria-hidden="true">🧭</span>
           <div>
             <div class="chat-title">Orchestrator</div>
-            <div class="chat-sub">supergroup · Topics enabled</div>
+            <div class="chat-sub">you're the boss · they do the work</div>
           </div>
-          <span class="chat-topic"># myapp-hotfix</span>
+          <span class="chat-topic"># general</span>
         </div>
         <div class="chat-body">
           <div class="msg me">
             <div class="lbl">General</div>
-            <code>/new myapp-hotfix hotfix</code>
+            Fix the <code>/login</code> 500 in myapp, then audit the deps in docs-site.
           </div>
           <div class="msg bot">
-            <div class="lbl">Bot</div>
-            Spun up a live session in <code>/workspace/myapp-hotfix</code> — talk to it in the new topic.
+            <div class="lbl">🧭 Orchestrator</div>
+            On it. Hiring two workers — <b>Nova</b> on the login bug, <b>Kite</b> on the audit. Watch them in their own topics.
+          </div>
+          <div class="msg worker">
+            <div class="lbl">⚙️ Nova · myapp</div>
+            Reproduced it — the session cookie is <code>SameSite=Strict</code>, so the OAuth redirect drops it. Patched to Lax, added a test. Green.
           </div>
           <div class="msg me">
-            <div class="lbl"># hotfix</div>
-            find why the /login route 500s and patch it
+            <div class="lbl"># Nova · myapp</div>
+            check the refresh path too
           </div>
           <div class="msg bot">
-            <div class="lbl">Claude Code</div>
-            Reproduced it — null token on refresh. Fixed <code>auth.py</code>, tests green. Sending you the diff.
-          </div>
-          <div class="msg bot" style="padding:8px 14px;">
-            <span class="typing">edited 1 file · ran 12 tests <i></i><i></i><i></i></span>
+            <div class="lbl">🧭 Orchestrator</div>
+            ✅ Nova's done and the refresh path is covered. Kite flagged 3 unmaintained deps — want it to open PRs?
           </div>
         </div>
       </div>
@@ -500,35 +512,35 @@
 <section id="how">
   <div class="wrap">
     <div class="section-tag">How it works</div>
-    <h2>A message in a topic <em>is</em> that session's next turn.</h2>
+    <h2>Give one manager your goals. It runs the team.</h2>
     <p class="section-lead">
-      No orchestrator to manage. One supergroup with Topics enabled becomes your
-      control surface — the General topic is the control plane, and every other
-      topic is exactly one headless Claude Code session bound to a working directory.
+      The General topic is the orchestrator's office. Give it plain-language goals —
+      no commands — and it splits the work, hires a worker per task, opens a visible
+      thread for each, briefs them, supervises at checkpoints, and reports back.
     </p>
 
     <div class="flow">
       <div class="flow-step">
         <div class="num">1</div>
-        <h3>Spawn from General</h3>
-        <p>In the General topic, run <code>/new &lt;path&gt; [name]</code>. The bot creates a new topic and a live session with <code>cwd</code> set to that repo.</p>
+        <h3>Give a goal</h3>
+        <p>Tell the orchestrator what you want in plain language — <code>"fix the login 500, then audit deps"</code>. It plans the work and hires the workers.</p>
       </div>
       <div class="flow-step">
         <div class="num">2</div>
-        <h3>Talk in the topic</h3>
-        <p>Whatever you type in a session topic is sent verbatim as the next turn. Output — text, tool calls, media — streams straight back into the same topic.</p>
+        <h3>It hires workers</h3>
+        <p>One worker per task, each on its own branch in an isolated <code>git worktree</code> and its own visible thread. Same-repo parallel work never collides.</p>
       </div>
       <div class="flow-step">
         <div class="num">3</div>
-        <h3>Run many in parallel</h3>
-        <p>Each topic is independent and isolated. Two topics can even point at the <code>same</code> repo for parallel, separate lines of work.</p>
+        <h3>Watch &amp; micromanage</h3>
+        <p>Every worker thread streams live. Step into any of them — both the worker and the orchestrator hear you. Nothing happens behind your back.</p>
       </div>
     </div>
 
     <p class="flow-note">
-      Sessions run headless with <b>bypassPermissions</b> and are driven by the
-      official <b>claude-agent-sdk</b> running the standalone <b>claude</b> CLI —
-      one turn at a time, serialized per topic.
+      Workers run headless with <b>bypassPermissions</b> on your chosen backend —
+      <b>Claude Code</b> by default, or <b>Codex</b>. The orchestrator is woken only
+      at checkpoints (done, blocked, needs a decision, you interjected), never per token.
     </p>
   </div>
 </section>
@@ -539,7 +551,7 @@
 <section id="features">
   <div class="wrap">
     <div class="section-tag">Features</div>
-    <h2>Everything a phone-first coding cockpit needs.</h2>
+    <h2>An org you can actually see into.</h2>
     <p class="section-lead">Accurate to the box you run — nothing more, nothing hidden.</p>
 
     <div class="features">
@@ -547,48 +559,48 @@
         <div class="ic" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="#2aabee" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/></svg>
         </div>
-        <h3>Parallel sessions</h3>
-        <p>1 topic ⇄ 1 session, many at once, each isolated with its own working directory. One repo can back several topics.</p>
+        <h3>Any surface</h3>
+        <p>Drive the same org from Telegram, a browser, or a VS Code panel — one shared client. Slack is next; nothing in the core knows which.</p>
       </div>
 
       <div class="feat violet">
         <div class="ic" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m5 17 4.5-4.5 3 3L16 12l3 3"/></svg>
         </div>
-        <h3>Media, both directions</h3>
-        <p>Send photos, files &amp; video into a topic (images become vision input, everything lands in <code>.tg-inbox/</code>); the agent pushes media back via built-in tools.</p>
+        <h3>Glass-walled delegation</h3>
+        <p>Every worker conversation is a visible thread you can watch and interject into — both the worker and the orchestrator see your message.</p>
       </div>
 
       <div class="feat green">
         <div class="ic" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v4h4"/></svg>
         </div>
-        <h3>Resumable across restarts</h3>
-        <p>Every session's ID is persisted, so a bot restart lazily reconnects each session with full context — nothing is lost on reboot.</p>
+        <h3>Isolated git worktrees</h3>
+        <p>Each worker gets its own branch in its own worktree — same-repo parallel work is safe, and un-landed work is never deleted, only reported.</p>
       </div>
 
       <div class="feat amber">
         <div class="ic" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 6v6c0 5 3.4 8 8 10 4.6-2 8-5 8-10V6z"/><path d="m9 12 2 2 4-4"/></svg>
         </div>
-        <h3>Container-isolated</h3>
-        <p>The container boundary is what keeps <code>bypassPermissions</code> safe — sessions only reach the repos you mount at <code>/workspace</code>, never the rest of your host.</p>
+        <h3>Checkpoint supervision</h3>
+        <p>Workers run autonomously; the orchestrator is woken only at meaningful checkpoints — done, blocked, needs a decision — never per token. Wakes are coalesced.</p>
       </div>
 
       <div class="feat">
         <div class="ic" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="#4c8dff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/></svg>
         </div>
-        <h3>Batteries-included image</h3>
-        <p>Common stacks (node, python, git, ffmpeg, ripgrep…) ship in the image; sessions <code>apt</code>/<code>npm</code>/<code>pip</code> install anything exotic at runtime.</p>
+        <h3>Any backend</h3>
+        <p>Workers run on Claude Code by default, or Codex with one env var. The orchestrator, supervision, and isolation don't change — a worker is a worker.</p>
       </div>
 
       <div class="feat green">
         <div class="ic" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/><circle cx="12" cy="12" r="3.2"/></svg>
         </div>
-        <h3>Always-on &amp; self-hosted</h3>
-        <p>Runs anywhere Docker does with <code>restart: unless-stopped</code>. You own the bot, the box, and the data — no hosted lock-in.</p>
+        <h3>Self-hosted &amp; resumable</h3>
+        <p>Runs anywhere Docker does with <code>restart: unless-stopped</code>; sessions persist and reconnect across restarts. You own the box and the data — no lock-in.</p>
       </div>
     </div>
   </div>
@@ -599,25 +611,29 @@
 <!-- COMMANDS -->
 <section id="commands">
   <div class="wrap">
-    <div class="section-tag">Cheat sheet</div>
-    <h2>Two places, a handful of commands.</h2>
-    <p class="section-lead">Drive the whole thing from the General topic and from inside each session.</p>
+    <div class="section-tag">Drive it</div>
+    <h2>Plain language in General. A few commands when you want them.</h2>
+    <p class="section-lead">Just talk to the orchestrator — or reach for a command. (The web &amp; VS Code surfaces use a thread list and a message box instead of slash-commands.)</p>
 
     <div class="cheat-grid">
       <div class="cheat-card">
-        <div class="cheat-card-head"><span class="pill gen"># General</span> control plane</div>
-        <div class="cmd-row"><code>/new &lt;path&gt;</code><span>Create a topic + session in that repo (relative to <code style="font-size:12px">PROJECTS_ROOT</code> or absolute).</span></div>
-        <div class="cmd-row"><code>/list</code><span>List sessions and their status.</span></div>
+        <div class="cheat-card-head"><span class="pill gen"># General</span> the orchestrator's office</div>
+        <div class="cmd-row"><code>(plain message)</code><span>A goal for the orchestrator — it hires and briefs the workers.</span></div>
+        <div class="cmd-row"><code>/new &lt;path&gt;</code><span>A direct, orchestrator-less session in that repo.</span></div>
+        <div class="cmd-row"><code>/list</code><span>Every thread — orchestrator, workers, direct — and its status.</span></div>
+        <div class="cmd-row"><code>/setup</code><span>Check the group is configured right (admin, topics, allowlist).</span></div>
       </div>
 
       <div class="cheat-card">
-        <div class="cheat-card-head"><span class="pill"># session topic</span> per session</div>
+        <div class="cheat-card-head"><span class="pill"># worker thread</span> watch &amp; steer</div>
+        <div class="cmd-row"><code>(any message)</code><span>Steers that worker — and the orchestrator sees it too.</span></div>
+        <div class="cmd-row"><code>(photo / file)</code><span>Handed to the session; images ride as vision input.</span></div>
         <div class="cmd-row"><code>/stop</code><span>Interrupt the current turn.</span></div>
-        <div class="cmd-row"><code>/kill</code><span>End the session and close the topic.</span></div>
+        <div class="cmd-row"><code>/kill</code><span>End the session; a clean worktree is removed, a dirty one kept.</span></div>
       </div>
     </div>
     <p class="flow-note" style="margin-top:22px;">
-      Inside a topic, <b>any message</b> is the session's next turn — and a photo, file or video is downloaded to <code style="font-family:var(--mono);font-size:12.5px;color:var(--accent-2)">.tg-inbox/</code> and handed straight to the session.
+      First run? DM the bot <b>/whoami</b> to get your id — no third-party bot needed — add it to the allowlist, and you're the boss.
     </p>
   </div>
 </section>
@@ -626,14 +642,14 @@
 <section id="start">
   <div class="wrap">
     <div class="cta-band">
-      <h2>Own your agent cockpit.</h2>
-      <p>A self-hosted, no-lock-in alternative to hosted "control your agent from your phone" tools. Docker up, add your bot, start typing.</p>
+      <h2>Run your own agent org.</h2>
+      <p>Self-hosted, open source, no lock-in. Drive it from Telegram, the web, or VS Code; run your workers on Claude Code or Codex. Because someone has to take the credit.</p>
       <div class="hero-cta">
-        <a class="btn btn-primary" href="#">
+        <a class="btn btn-primary" href="https://github.com/Dri-water/be-a-boss">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17V9a2 2 0 0 1 1-1.7l7-4a2 2 0 0 1 2 0l7 4"/><path d="M8 21h8M12 12v9"/></svg>
           docker compose up -d
         </a>
-        <a class="btn btn-ghost" href="#how">Read the docs</a>
+        <a class="btn btn-ghost" href="https://github.com/Dri-water/be-a-boss#readme">Read the docs</a>
       </div>
     </div>
   </div>
@@ -643,7 +659,7 @@
   <div class="wrap">
     <div class="foot-brand">
       <span class="logo" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M21.5 4.3 2.9 11.4c-.9.35-.9 1.6.02 1.9l4.7 1.5 1.8 5.6c.24.72 1.15.9 1.65.33l2.6-2.9 4.7 3.45c.6.44 1.45.11 1.6-.62L23 5.5c.2-.9-.7-1.6-1.5-1.2Z" fill="#fff"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.4"/><circle cx="5.5" cy="19" r="2.4"/><circle cx="18.5" cy="19" r="2.4"/><path d="M12 7.4 6.9 16.6M12 7.4 17.1 16.6"/></svg>
       </span>
       be-a-boss
     </div>
@@ -653,7 +669,7 @@
       <span class="foot-badge"><span class="b-dot" style="background:var(--violet)"></span> Docker-native</span>
     </div>
     <div class="foot-note">
-      Built on the official claude-agent-sdk and the standalone claude CLI. You own the bot, the box, and the data — nothing leaves your host but your Telegram messages.
+      Self-hosted and open source. Workers run on Claude Code or Codex; drive it from Telegram, the web, or VS Code. You own the box and the data — nothing leaves your host unless you send it.
     </div>
   </div>
 </footer>
