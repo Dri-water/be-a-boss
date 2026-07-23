@@ -50,11 +50,16 @@ orchestrator should help; `needs-decision` is escalated to you with a recommenda
 
 Finished work lives on the worker's branch; it outlives the worker. But it doesn't
 dead-end there. When a task is done, the orchestrator shows you the actual **diff**
-and, **only after your explicit go-ahead**, lands it — either a **local merge** into
-your checkout (deterministic; refuses a dirty checkout; rolls back a conflict) or, if
-you've set up a GitHub remote + `gh`, a **pull request** you review and merge. You are
-always the merge gate; the orchestrator just picks the route from what your box can
-actually do (no `gh` → it uses a local merge). Nothing lands without your word.
+and the **real test result** (it runs your checks in the worker's copy — not "the
+worker says it passes"), then asks you to land it. Delivery is a **command you
+issue**: the orchestrator posts a `🚦` prompt and only your **`/approve <worker>`**
+actually merges or opens the PR — it can request, never authorize. Work whose checks
+failed can't be delivered at all until they're green. The route is either a **local
+merge** into the branch the worker forked from (deterministic; refuses a dirty or
+wrong-branch checkout; rolls back a conflict) or, if you've set up a GitHub remote +
+`gh`, a **pull request** you review and merge. You are always the gate; the
+orchestrator just picks the route from what your box can actually do (no `gh` → local
+merge). Nothing lands without your word.
 
 Dismissing a worker then cleans up its workspace **only if the work is committed**; a
 worker with un-committed changes is never quietly discarded — the tool refuses and

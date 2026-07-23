@@ -15,7 +15,8 @@ Read this before deploying.
    open-to-all — letting you learn your id (`/whoami`) and lock it down before
    granting access. This is the primary access control — keep it tight. Anyone can
    *find* a public bot, but only allowlisted user IDs can drive it. (The web/VS Code
-   surface has no allowlist; its boundary is a localhost-only bind — see README.)
+   surface has no allowlist; it is guarded by a localhost-only bind **plus** a
+   per-connection token + same-origin check — see below.)
 2. **The container boundary.** Running in Docker (see README) is what makes
    `bypassPermissions` reasonable. Sessions can only touch what you mount — your
    projects at `/workspace` — not the rest of the host (SSH keys, credential
@@ -24,6 +25,21 @@ Read this before deploying.
    accept that sessions can touch anything your user can.
 3. **Secrets stay out of the repo.** `.env` and `state/` are gitignored. The bot
    token, your user ID, and Claude credentials are never committed.
+4. **The web surface is token- and origin-gated.** The WebSocket server requires a
+   `?token=…` on every connection (printed at startup, or pin it with `WEB_TOKEN`)
+   and rejects any connection whose `Origin` isn't same-origin. That closes
+   Cross-Site WebSocket Hijacking — a random page you browse to can't silently open
+   a socket to your local server and start driving agents. A public bind is refused
+   unless you set `WEB_ALLOW_INSECURE_BIND=1`; if you do, front it with real auth.
+5. **Worker subprocesses don't inherit the bot's secrets.** The values that grant
+   control of the deployment — `TELEGRAM_BOT_TOKEN`, `GH_TOKEN`/`GITHUB_TOKEN`,
+   `WEB_TOKEN` — are stripped from every worker/agent process's environment, so a
+   prompt-injected session can't read them out of `os.environ` and exfiltrate them.
+6. **Landing a change takes a human.** Workers commit only to their own
+   `worker/<id>` branch in an isolated worktree; merging to your base branch or
+   opening a PR happens **only** on an allowlisted human's `/approve`. The
+   orchestrator can *request* delivery but cannot authorize it — so an injected
+   orchestrator or worker can't talk the system into pushing to your repo.
 
 **What you are still exposed to:**
 

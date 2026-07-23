@@ -179,16 +179,24 @@ Start the server (binds to localhost only), then open a UI against it:
 uv run python -m beaboss.web        # serves ws://127.0.0.1:8765
 ```
 
-- **Browser** — open `web/index.html`; it connects to the server and drops you in
-  the orchestrator's thread. Type a goal.
+On start it prints a one-time **connect URL with a token** (`?token=…`) — that
+token is required to connect, and every connection is also checked for a same-origin
+`Origin`, so a random web page you visit can't reach your local server (CSWSH). Set
+`WEB_TOKEN` to pin a stable token instead of a fresh one each run.
+
+- **Browser** — open the printed connect URL (or open `web/index.html?token=…`); it
+  connects and drops you in the orchestrator's thread. Type a goal.
 - **VS Code** — install the extension in `vscode/` (or the packaged `.vsix` from
   [Releases](https://github.com/Dri-water/be-a-boss/releases)) and run
-  **"be-a-boss: Open"**. Set `beaboss.wsUrl` if you changed the host/port.
+  **"be-a-boss: Open"**. Set `beaboss.wsUrl` (include `?token=…`) if you changed the
+  host/port.
 
-No token or allowlist here — the security boundary is the **localhost bind** (reach
-a remote box over an SSH tunnel). A public bind is refused unless you set
-`WEB_ALLOW_INSECURE_BIND=1` and front it with your own auth. Set `PROJECTS_ROOT` if
-you want bare project names to resolve somewhere other than your home dir.
+Two layers guard this surface: the **localhost bind** (a public bind is refused
+unless you set `WEB_ALLOW_INSECURE_BIND=1` and front it with your own auth) **and**
+the per-connection **token + Origin check** above — so even other processes/pages on
+your own machine can't drive it. Reach a remote box over an SSH tunnel. Set
+`PROJECTS_ROOT` if you want bare project names to resolve somewhere other than your
+home dir.
 
 ### Option B — Telegram (always-on bot)
 
@@ -296,9 +304,14 @@ Sessions authenticate as your Claude account. Two options:
 safe is the **boundary around each surface** plus the **container**. The Telegram bot
 ignores anyone not in `TELEGRAM_ALLOWED_USER_IDS`; with an empty allowlist it runs in
 **setup mode** — only `/whoami` works, everything else is refused — so it is never
-open-to-all. The web/VS Code surface binds to **localhost** and refuses a public bind
-unless you explicitly opt in (`WEB_ALLOW_INSECURE_BIND=1`). Either way, sessions can
-only touch what you mount (`/workspace`), not the rest of your host.
+open-to-all. The web/VS Code surface binds to **localhost**, refuses a public bind
+unless you explicitly opt in (`WEB_ALLOW_INSECURE_BIND=1`), and requires a
+per-connection **token + same-origin check** so nothing else on the machine can drive
+it. Worker subprocesses run with the bot's own secrets (`TELEGRAM_BOT_TOKEN`,
+`GH_TOKEN`, `WEB_TOKEN`) **scrubbed from their environment**, and landing a change
+takes an explicit human **`/approve`** — the orchestrator can request delivery but
+can't merge or open a PR by itself. Either way, sessions can only touch what you
+mount (`/workspace`), not the rest of your host.
 
 ## Caveats
 

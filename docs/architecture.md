@@ -129,18 +129,34 @@ Per-worker committed work always survives, on its branch.
 ## Delivery (landing a worker's branch)
 
 Work never dead-ends on a branch. `review_worker` returns a worker's committed diff
-plus which routes are available; the orchestrator surfaces the change to the boss and,
-**only on explicit approval**, calls `deliver_worker(method)`:
+plus which routes are available; `run_checks(worker_id, command)` actually runs the
+repo's tests/build in the worker's worktree and returns the **real** exit code —
+verification, not the worker's word. The orchestrator surfaces the diff *and* the
+check result to the boss.
 
-- **`merge`** — a deterministic local merge of `worker/<id>` into the primary
-  checkout's current branch. Requires the checkout clean, aborts + rolls back on
-  conflict, never force-anything. The one irreversible step is boring, gated code —
-  not the LLM freehanding git.
-- **`pr`** — pushes the branch and opens a GitHub PR (`gh pr create`). Non-destructive,
-  so it's fine for the agent path; available only when a remote **and** an authenticated
-  `gh` exist, else it degrades to a local merge.
+Landing is a two-step **hard gate**, not a prompt convention an injected agent could
+talk its way past:
+
+1. The orchestrator calls `deliver_worker(worker_id, method)`. This does **not**
+   land anything — it records a pending request and posts a `🚦` approval prompt to
+   the boss. A worker whose `run_checks` last **failed** is refused here outright.
+2. Only an allowlisted human's **`/approve <worker>`** executes the delivery. The
+   LLM has no path to authorize it (an injected orchestrator or worker can't forge a
+   human command), so it can't push to your repo on its own.
+
+The two routes:
+
+- **`merge`** — a deterministic local merge of `worker/<id>` into the **base branch
+  the worker forked from** (recorded at spawn), *not* whatever happens to be checked
+  out now. Refuses unless the primary checkout is on that base branch and clean,
+  aborts + rolls back on conflict, never force-anything. The one irreversible step is
+  boring, gated code — not the LLM freehanding git.
+- **`pr`** — pushes the branch and opens a GitHub PR against the base branch
+  (`gh pr create --base`). Non-destructive, so it's fine for the agent path;
+  available only when a remote **and** an authenticated `gh` exist, else it degrades
+  to a local merge.
 
 The split is deliberate: **capability is detected, policy is the orchestrator's, the
 boss is the gate.** `gh` auth presence *is* the config — no delivery-mode flag. Deeper
 policy (ship/scout task types, required reviewers) can layer on later; the core loop
-now lands work end to end.
+now verifies and lands work end to end.
