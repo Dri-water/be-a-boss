@@ -311,3 +311,63 @@ def test_approve_without_request_is_a_noop(tmp_path):
     engine, t = _engine(tmp_path)
     result = asyncio.run(engine.approve_delivery("ghost"))
     assert "No pending delivery" in result
+
+
+def _worker_with_commit(engine, tmp_path, repo_name, wid):
+    """A worker whose branch has one real commit — the common setup for the
+    verification tests below."""
+    repo = _repo(tmp_path, repo_name)
+    dest = asyncio.run(worktrees.create_worktree(
+        repo, tmp_path / "state" / "worktrees", wid))
+    (dest / "feature.py").write_text("x = 1\n")
+    _git(dest, "add", "-A")
+    _git(dest, "commit", "-m", "feat")
+    base = asyncio.run(worktrees.current_branch(repo))
+    engine.store.put("55", ThreadRecord(
+        role="worker", name=wid.title(), cwd=str(dest), worker_id=wid,
+        repo=str(repo), base_branch=base, task="x"))
+    return repo, dest
+
+
+def test_run_checks_records_real_pass_and_fail(tmp_path):
+    """run_checks runs the command for real and records the true verdict against the
+    branch tip — pass and fail both, not the worker's say-so."""
+    engine, t = _engine(tmp_path)
+    _worker_with_commit(engine, tmp_path, "checkrepo", "nova")
+
+    ok = asyncio.run(engine._run_checks("nova", "python -c \"exit(0)\""))
+    assert ok.get("is_error") is not True
+    assert "✅" in ok["content"][0]["text"]
+    assert engine.store.get("55").checks == "pass"
+    assert engine.store.get("55").checks_sha  # recorded the revision it ran against
+    assert any("🧪" in p.text and "✅" in p.text for p in t.posts)  # proof in-thread
+
+    bad = asyncio.run(engine._run_checks("nova", "python -c \"exit(1)\""))
+    assert "FAILED" in bad["content"][0]["text"]
+    assert engine.store.get("55").checks == "fail"
+
+
+def test_failed_checks_block_delivery(tmp_path):
+    """The teeth: a worker whose checks last failed cannot be delivered — the request
+    is refused and nothing is queued for approval."""
+    engine, t = _engine(tmp_path)
+    _worker_with_commit(engine, tmp_path, "gaterepo", "kite")
+
+    asyncio.run(engine._run_checks("kite", "python -c \"exit(1)\""))
+    res = asyncio.run(engine._deliver_worker("kite", "merge"))
+    assert res.get("is_error") is True
+    assert "FAILED" in res["content"][0]["text"]
+    assert "kite" not in engine._pending_delivery   # not queued for /approve
+
+
+def test_passing_checks_surface_in_approval_prompt(tmp_path):
+    """Green checks on the delivered revision are shown in the approval request so
+    the boss approves with the real result in hand."""
+    engine, t = _engine(tmp_path)
+    _worker_with_commit(engine, tmp_path, "greenrepo", "ada")
+
+    asyncio.run(engine._run_checks("ada", "python -c \"exit(0)\""))
+    req = asyncio.run(engine._deliver_worker("ada", "merge"))
+    assert req.get("is_error") is not True
+    assert engine._pending_delivery.get("ada") == "merge"
+    assert any("🚦" in p.text and "✅ checks passed" in p.text for p in t.posts)

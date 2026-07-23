@@ -232,3 +232,33 @@ async def open_pr(repo: Path, branch: str, base_branch: str) -> tuple[bool, str]
     if (proc.returncode or 0) != 0:
         return False, f"gh pr create failed: {_tidy(text)}"
     return True, (text.splitlines()[-1] if text else "pull request opened")
+
+
+CHECK_TIMEOUT = 600  # a verification command (tests/build) can be slow
+
+
+async def run_command(cwd: Path, command: str,
+                      timeout: int = CHECK_TIMEOUT) -> tuple[int, str]:
+    """Run a verification command (tests/build/lint) in `cwd` and return
+    (exit_code, combined output tail).
+
+    This is how work gets VERIFIED — a REAL exit code from actually running it, not
+    the worker's word for it. Timeout-bounded so a hang can't wedge the caller; the
+    bot's own secrets are scrubbed from its environment.
+    """
+    from .agent_backend import scrubbed_env
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command, cwd=str(cwd), env=scrubbed_env(),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    except OSError as e:
+        return 1, f"could not run '{command}': {e}"
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return 124, f"'{command}' timed out after {timeout}s"
+    text = out.decode(errors="replace").strip()
+    if len(text) > 3000:  # keep head + tail so the failure stays visible
+        text = text[:1500] + "\n…(output trimmed)…\n" + text[-1500:]
+    return proc.returncode or 0, text

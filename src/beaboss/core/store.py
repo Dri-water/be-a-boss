@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from pathlib import Path
 
 from .ports import Role
@@ -34,6 +34,8 @@ class ThreadRecord:
     repo: str = ""           # the primary checkout the worktree came from
     base_branch: str = ""    # the branch the worker forked from (merge/PR target)
     base_sha: str = ""       # HEAD at spawn (the fork point)
+    checks: str = ""         # last run_checks verdict: "" | pass | fail
+    checks_sha: str = ""     # branch tip when checks last ran (to detect staleness)
     task: str = ""           # the brief, verbatim
     worker_status: str = ""   # working | done | blocked | dismissed | delivered
 
@@ -66,18 +68,18 @@ class CoreStore:
                 f"refusing to load it with older code")
             return
         self.orchestrator_thread = raw.get("orchestrator_thread")
+        # Restore every field the current schema knows about (ignoring any it no
+        # longer has). Enumerating by hand here silently dropped base_branch/base_sha
+        # on restart once — deriving from the dataclass means new fields persist for
+        # free and delivery targeting survives a reboot.
+        known = {f.name for f in dataclass_fields(ThreadRecord)}
         for k, v in raw.get("threads", {}).items():
-            self._threads[k] = ThreadRecord(
-                role=v.get("role", "direct"),
-                name=v.get("name", ""),
-                cwd=v.get("cwd", ""),
-                session_id=v.get("session_id"),
-                created_at=v.get("created_at", 0.0),
-                worker_id=v.get("worker_id", ""),
-                repo=v.get("repo", ""),
-                task=v.get("task", ""),
-                worker_status=v.get("worker_status", ""),
-            )
+            if not isinstance(v, dict):
+                continue
+            filtered = {kk: vv for kk, vv in v.items() if kk in known}
+            filtered.setdefault("role", "direct")
+            filtered.setdefault("name", "")
+            self._threads[k] = ThreadRecord(**filtered)
 
     def _quarantine(self, why: str) -> None:
         log.error("core state %s — starting fresh: %s", self.path.name, why)

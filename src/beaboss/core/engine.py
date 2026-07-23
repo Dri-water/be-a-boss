@@ -54,6 +54,9 @@ ORCHESTRATOR_APPEND = (
     "- mcp__fleet__worker_status(worker_id?) — current fleet state\n"
     "- mcp__fleet__review_worker(worker_id) — inspect a worker's committed diff and "
     "which delivery routes are available; use it to show the boss the change\n"
+    "- mcp__fleet__run_checks(worker_id, command) — actually RUN the repo's tests/"
+    "build/lint in the worker's copy and get the real exit code + output. This is "
+    "how you VERIFY work passes — never take a worker's 'tests pass' on faith\n"
     "- mcp__fleet__deliver_worker(worker_id, method) — land the work: 'merge' (local "
     "merge into the checkout) or 'pr' (open a GitHub PR). Only after the boss approves\n"
     "- mcp__fleet__dismiss_worker(worker_id) — end a worker: clean worktrees are "
@@ -91,11 +94,19 @@ ORCHESTRATOR_APPEND = (
     "- A finished task must not dead-end on a branch. review_worker to see the diff, "
     "then show the boss the actual change (a short summary plus the key parts of the "
     "diff) with your recommendation.\n"
+    "- VERIFY before you deliver: run_checks with the repo's real test/build command "
+    "(e.g. 'uv run pytest', 'npm test') and read the actual result — don't trust a "
+    "worker's word that it passes. If checks fail, send the worker back to fix them; "
+    "you can't deliver failing work. Show the boss the real check result alongside "
+    "the diff.\n"
     "- Call deliver_worker to REQUEST landing it (method 'pr' when a remote + gh are "
     "available so it stays reviewable, else 'merge'). You do NOT land work yourself — "
     "deliver_worker asks the boss, and only their /approve command actually merges or "
     "opens the PR. Tell them they need to /approve <worker>; never claim it's landed "
     "until you see the delivery confirmation.\n"
+    "- Self-development: if the repo a worker is changing IS this very system, prefer "
+    "the 'pr' route so the change is reviewed before it can affect the running "
+    "instance, and never deliver a change to it without green run_checks.\n"
     "- After a confirmed delivery you may dismiss the worker.\n\n"
     "Talk in outcomes, not mechanics — and SHOW, don't tell. The boss cares about the "
     "project and the RESULT, not your internals: say 'isolated copy' not 'worktree', "
@@ -506,6 +517,24 @@ class Engine:
             return await engine._review_worker(str(args.get("worker_id", "")))
 
         @tool(
+            "run_checks",
+            "Run a check command (tests / build / lint) INSIDE a worker's worktree "
+            "and get back the REAL exit code + output — the way to VERIFY work "
+            "actually passes instead of trusting the worker's word. e.g. "
+            "command='uv run pytest' or 'npm test'. Do this before requesting delivery.",
+            {"type": "object",
+             "properties": {
+                 "worker_id": {"type": "string"},
+                 "command": {"type": "string",
+                             "description": "the check command, e.g. 'uv run pytest'"},
+             },
+             "required": ["worker_id", "command"]},
+        )
+        async def run_checks(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._run_checks(str(args.get("worker_id", "")),
+                                            str(args.get("command", "")))
+
+        @tool(
             "deliver_worker",
             "REQUEST that a worker's finished work be landed. This does NOT land it — "
             "it asks the boss to approve, and the merge/PR runs only when they issue "
@@ -527,7 +556,7 @@ class Engine:
         return create_sdk_mcp_server(
             "fleet",
             tools=[list_repos, spawn_worker, message_worker, worker_status,
-                   review_worker, deliver_worker, dismiss_worker],
+                   review_worker, run_checks, deliver_worker, dismiss_worker],
         )
 
     # ---- fleet operations ------------------------------------------------
@@ -684,10 +713,45 @@ class Engine:
         commit_note = ("all changes committed" if committed else
                        "⚠️ uncommitted changes remain — have the worker commit first")
         work_note = "" if has_work else "\n- ⚠️ nothing committed on the branch yet"
+        checks_line = {
+            "pass": "✅ passed" if rec.checks_sha and rec.checks_sha == await worktrees.head_sha(Path(rec.cwd))
+                    else "passed earlier, but the branch moved since (stale — re-run)",
+            "fail": "❌ FAILED — must be fixed before this can be delivered",
+        }.get(rec.checks, "not run yet — use run_checks to verify before delivering")
         return {"content": [{"type": "text", "text":
                 f"Review of {rec.name} — branch {branch} vs {base}:\n"
                 f"- {commit_note}\n"
+                f"- checks: {checks_line}\n"
                 f"- delivery routes available: {', '.join(routes)}{work_note}\n\n{diff}"}]}
+
+    async def _run_checks(self, worker_id: str, command: str) -> dict[str, Any]:
+        """Actually RUN a check command in the worker's worktree — real exit code,
+        not the worker's word. Records the verdict + the revision it ran against so
+        delivery can gate on it (and notice if the branch moved since)."""
+        def err(t: str) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": t}], "is_error": True}
+
+        found = self._find_worker(worker_id.strip())
+        if found is None:
+            return err(f"no such worker: {worker_id}")
+        thread_id, rec = found
+        command = command.strip()
+        if not command:
+            return err("a check command is required (e.g. 'uv run pytest' or 'npm test')")
+        cwd = Path(rec.cwd)
+        if not cwd.is_dir():
+            return err(f"{rec.name}'s workspace is gone — nothing to check")
+        code, output = await worktrees.run_command(cwd, command)
+        sha = await worktrees.head_sha(cwd)  # the branch tip these checks ran against
+        self.store.update(thread_id,
+                          checks=("pass" if code == 0 else "fail"), checks_sha=sha)
+        verdict = "✅ passed" if code == 0 else f"❌ FAILED (exit {code})"
+        # Surface the REAL result into the worker's own thread so the boss sees proof.
+        await self._post(Outbound(
+            thread_id=thread_id, speaker=SYSTEM,
+            text=f"🧪 checks — `{command}` — {verdict}"))
+        return {"content": [{"type": "text", "text":
+                f"checks for {rec.name} — `{command}` — {verdict}\n\n{output}"}]}
 
     async def _deliver_worker(self, worker_id: str, method: str) -> dict[str, Any]:
         """The orchestrator REQUESTS delivery; it never lands work itself. The actual
@@ -716,13 +780,27 @@ class Engine:
             return err(f"can't determine {rec.name}'s base branch — nothing to deliver into")
         if not await worktrees.branch_ahead(repo, base, f"worker/{rec.worker_id}"):
             return err(f"{rec.name} hasn't committed anything to deliver")
+        # Verification gate: work whose checks last FAILED can't be delivered until
+        # they're green again. (Not-yet-run is a soft warning, not a wall — the boss
+        # decides, informed.)
+        if rec.checks == "fail":
+            return err(f"{rec.name}'s checks last FAILED — have them fix it and re-run "
+                       f"run_checks until it's green before you can deliver.")
+        tip = await worktrees.head_sha(Path(rec.cwd))
+        if rec.checks == "pass" and rec.checks_sha == tip:
+            checks_note = "\n✅ checks passed on this exact revision"
+        elif rec.checks == "pass":
+            checks_note = ("\n⚠️ checks passed earlier, but there are new commits since — "
+                           "consider run_checks again before approving")
+        else:
+            checks_note = "\n⚠️ no checks recorded — consider run_checks first to verify"
         # Hard gate: record the request and ask the boss to confirm with a command.
         self._pending_delivery[rec.worker_id] = method
         verb = "open a pull request for" if method == "pr" else "locally merge"
         await self._post(Outbound(
             thread_id=self.main_thread, speaker=SYSTEM,
             text=(f"🚦 {rec.name} is ready to deliver. Approve to {verb} their work "
-                  f"into '{base}'?\n"
+                  f"into '{base}'?{checks_note}\n"
                   f"    /approve {rec.worker_id}    ·    /reject {rec.worker_id}")))
         return {"content": [{"type": "text", "text":
                 f"delivery of {rec.name} via {method} requested — the boss must "
