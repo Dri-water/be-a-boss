@@ -1,5 +1,11 @@
 # Always-on be-a-boss. `docker compose up -d --build` to start; it
 # auto-restarts on crash or host reboot (restart: unless-stopped).
+#
+# Project + volume names are PINNED below so they never depend on this folder's
+# name or location. Rename or move this directory freely — the container, image,
+# and (critically) the state volume are found by their fixed names, so the bot's
+# memory is never orphaned by a folder shuffle.
+name: be-a-boss
 services:
   be-a-boss:
     build: .
@@ -24,3 +30,6 @@ services:
 
 volumes:
   bot_state:
+    # Explicit name → decoupled from the project/folder. This is the line that makes
+    # a rename or move safe: the state always lives in `be-a-boss_bot_state`.
+    name: be-a-boss_bot_state
