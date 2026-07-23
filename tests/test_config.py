@@ -156,3 +156,16 @@ def test_neutral_max_turns_error_names_agent_var(clean_env, monkeypatch):
     with pytest.raises(SystemExit) as excinfo:
         Settings.from_env(clean_env)
     assert "AGENT_MAX_TURNS" in str(excinfo.value)
+
+
+def test_deploy_braveness_default_and_override(monkeypatch):
+    from beaboss.config import Settings
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "x")
+    monkeypatch.delenv("DEPLOY_BRAVENESS", raising=False)
+    assert Settings.from_env().deploy_braveness == "balanced"          # default
+    monkeypatch.setenv("DEPLOY_BRAVENESS", "conservative")
+    assert Settings.from_env().deploy_braveness == "conservative"
+    monkeypatch.setenv("DEPLOY_BRAVENESS", "CONSERVATIVE")             # case-insensitive
+    assert Settings.from_env().deploy_braveness == "conservative"
+    monkeypatch.setenv("DEPLOY_BRAVENESS", "wat")                      # unknown → default
+    assert Settings.from_env().deploy_braveness == "balanced"

@@ -67,6 +67,11 @@ class Settings:
     bot_name: str
     session_system_append: str | None
     agent_backend: str = "claude"  # "claude" (default) | "codex"
+    # How work lands. "balanced" (default): the orchestrator may merge/PR directly
+    # once the boss has clearly told it to ("merge it", "ship it") — a soft,
+    # conversational gate, right for greenfield/solo. "conservative": nothing lands
+    # without an explicit programmatic /approve the LLM can't forge.
+    deploy_braveness: str = "balanced"
 
     @classmethod
     def from_env(cls, env_path: str | os.PathLike[str] | None = None) -> "Settings":
@@ -114,4 +119,8 @@ class Settings:
                 else None
             ),
             agent_backend=backend,
+            deploy_braveness=(
+                "conservative"
+                if os.getenv("DEPLOY_BRAVENESS", "").strip().lower() == "conservative"
+                else "balanced"),
         )

@@ -23,7 +23,8 @@ from claude_agent_sdk import ResultMessage, create_sdk_mcp_server, tool
 
 from .agent_backend import CodexBackend
 from .names import pick_name
-from .prompts import ORCHESTRATOR_APPEND, WORKER_APPEND_EXTRA
+from .prompts import (DELIVERY_BALANCED, DELIVERY_CONSERVATIVE,
+                      ORCHESTRATOR_APPEND, WORKER_APPEND_EXTRA)
 from .ports import InboundMessage, Outbound, Speaker, SYSTEM, Transport
 from .session import CoreSession, DEFAULT_SESSION_APPEND
 from .store import CoreStore, ThreadRecord
@@ -321,7 +322,9 @@ class Engine:
         home.mkdir(parents=True, exist_ok=True)
         base = (self.settings.session_system_append
                 if self.settings.session_system_append is not None else "")
-        append = (base + "\n\n" if base else "") + ORCHESTRATOR_APPEND
+        mode = (DELIVERY_CONSERVATIVE
+                if self.settings.deploy_braveness == "conservative" else DELIVERY_BALANCED)
+        append = (base + "\n\n" if base else "") + ORCHESTRATOR_APPEND + mode
         return CoreSession(
             thread_id=thread_id, cwd=home,
             speaker=self.orchestrator_speaker(),
@@ -907,9 +910,11 @@ class Engine:
                 f"checks for {rec.name} — `{command}` — {verdict}\n\n{output}"}]}
 
     async def _deliver_worker(self, worker_id: str, method: str) -> dict[str, Any]:
-        """The orchestrator REQUESTS delivery; it never lands work itself. The actual
-        merge/PR runs only when a human issues /approve — a gate the LLM can't forge
-        (an injected worker could otherwise talk the orchestrator into pushing)."""
+        """Land a worker's branch. In 'conservative' braveness the orchestrator only
+        REQUESTS — the merge/PR runs solely on a human /approve the LLM can't forge.
+        In 'balanced' (default) the orchestrator may land it directly, trusted to
+        call this only once the boss has clearly said so; the checks gate and every
+        safety guard below apply in BOTH modes."""
         def err(t: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": t}], "is_error": True}
 
@@ -947,7 +952,16 @@ class Engine:
                            "consider run_checks again before approving")
         else:
             checks_note = "\n⚠️ no checks recorded — consider run_checks first to verify"
-        # Hard gate: record the request and ask the boss to confirm with a command.
+
+        if self.settings.deploy_braveness == "balanced":
+            # Soft gate: the boss has told the orchestrator to land it — do it now.
+            # (An injected orchestrator could abuse this; that's the trade the boss
+            # opted into by choosing balanced. checks-fail above still blocks it.)
+            result = await self._execute_delivery(rec.worker_id, method)
+            self._action(f"deliver_worker({rec.worker_id}, {method})")
+            return {"content": [{"type": "text", "text": result}]}
+
+        # Conservative: record the request and require an explicit human /approve.
         self._pending_delivery[rec.worker_id] = method
         self.store.set_pending_delivery(self._pending_delivery)
         verb = "open a pull request for" if method == "pr" else "locally merge"

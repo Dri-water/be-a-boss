@@ -395,9 +395,10 @@ def test_listing_and_kill_direct(tmp_path):
 
 
 def test_deliver_requests_approval_then_human_lands_it(tmp_path):
-    """The hard gate: deliver_worker only REQUESTS; nothing lands until a human
+    """CONSERVATIVE mode: deliver_worker only REQUESTS; nothing lands until a human
     /approve. review surfaces the diff; approve does the merge."""
     engine, t = _engine(tmp_path)
+    engine.settings.deploy_braveness = "conservative"
     repo = _repo(tmp_path, "myrepo")
     dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "state" / "worktrees", "nova"))
     (dest / "feature.py").write_text("x = 1\n")
@@ -497,9 +498,10 @@ def test_failed_checks_block_delivery(tmp_path):
 
 
 def test_passing_checks_surface_in_approval_prompt(tmp_path):
-    """Green checks on the delivered revision are shown in the approval request so
-    the boss approves with the real result in hand."""
+    """CONSERVATIVE: green checks on the delivered revision are shown in the approval
+    request so the boss approves with the real result in hand."""
     engine, t = _engine(tmp_path)
+    engine.settings.deploy_braveness = "conservative"
     _worker_with_commit(engine, tmp_path, "greenrepo", "ada")
 
     asyncio.run(engine._run_checks("ada", "python -c \"exit(0)\""))
@@ -507,6 +509,41 @@ def test_passing_checks_surface_in_approval_prompt(tmp_path):
     assert req.get("is_error") is not True
     assert engine._pending_delivery.get("ada") == "merge"
     assert any("🚦" in p.text and "✅ checks passed" in p.text for p in t.posts)
+
+
+def test_balanced_mode_lands_directly(tmp_path):
+    """BALANCED (default): the orchestrator lands work directly — no 🚦, no pending —
+    on the boss's word. The checks gate and safety guards still apply."""
+    engine, t = _engine(tmp_path)
+    assert engine.settings.deploy_braveness == "balanced"   # the default
+    repo = _repo(tmp_path, "gf")
+    dest = asyncio.run(worktrees.create_worktree(
+        repo, tmp_path / "state" / "worktrees", "nova"))
+    (dest / "feature.py").write_text("x = 1\n")
+    _git(dest, "add", "-A"); _git(dest, "commit", "-m", "feat")
+    base = asyncio.run(worktrees.current_branch(repo))
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(dest), worker_id="nova",
+        repo=str(repo), base_branch=base, task="x"))
+
+    res = asyncio.run(engine._deliver_worker("nova", "merge"))
+    assert res.get("is_error") is not True
+    assert "delivered" in res["content"][0]["text"]          # landed, not "requested"
+    assert (repo / "feature.py").exists()                    # actually merged
+    assert engine.store.get("55").worker_status == "delivered"
+    assert engine._pending_delivery == {}                    # no approval needed
+    assert not any("🚦" in p.text for p in t.posts)
+
+
+def test_balanced_mode_still_blocks_failed_checks(tmp_path):
+    """Balanced is a soft AUTHORIZATION gate, not a correctness one — failed checks
+    still block delivery."""
+    engine, t = _engine(tmp_path)
+    _worker_with_commit(engine, tmp_path, "gf2", "kite")
+    asyncio.run(engine._run_checks("kite", "python -c \"exit(1)\""))   # red
+    res = asyncio.run(engine._deliver_worker("kite", "merge"))
+    assert res.get("is_error") is True and "FAILED" in res["content"][0]["text"]
+    assert engine.store.get(engine._find_worker("kite")[0]).worker_status != "delivered"
 
 
 def test_turn_actions_drain_into_footer_once(tmp_path):
