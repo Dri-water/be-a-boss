@@ -191,6 +191,16 @@ class WebSocketTransport:
         for c, r in zip(clients, results):
             if isinstance(r, Exception):
                 self.clients.discard(c)
+                # Close the socket so the peer LEARNS it was dropped and can
+                # reconnect — a silently-evicted client reads as "the bot died".
+                asyncio.get_running_loop().create_task(self._safe_close(c))
+
+    @staticmethod
+    async def _safe_close(ws: ServerConnection) -> None:
+        try:
+            await ws.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def make_handler(engine, transport: WebSocketTransport):
@@ -215,7 +225,10 @@ def make_handler(engine, transport: WebSocketTransport):
                 elif mtype == "interrupt":
                     tid = str(msg.get("thread_id") or "").strip()
                     if tid:
-                        await engine.interrupt(tid)
+                        ok = await engine.interrupt(tid)
+                        await transport.post(Outbound(
+                            thread_id=tid, speaker=SYSTEM,
+                            text="⏹ interrupting…" if ok else "Nothing running here."))
                 elif mtype == "kill":
                     tid = str(msg.get("thread_id") or "").strip()
                     if tid == OFFICE or tid.startswith("dm:"):

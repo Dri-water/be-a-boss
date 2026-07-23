@@ -83,8 +83,13 @@ async def create_worktree(repo: Path, worktrees_dir: Path, worker_id: str) -> Pa
     return dest
 
 
-async def is_clean(worktree: Path) -> bool:
-    code, out = await _git(worktree, "status", "--porcelain")
+async def is_clean(worktree: Path, untracked: bool = True) -> bool:
+    """No pending changes. untracked=True counts untracked files too (right for
+    worker teardown — a new file may be forgotten work); untracked=False checks
+    only tracked modifications (right for the merge target: a merge is untouched
+    by stray build caches like __pycache__)."""
+    args = ["status", "--porcelain"] + ([] if untracked else ["--untracked-files=no"])
+    code, out = await _git(worktree, *args)
     return code == 0 and not out
 
 
@@ -191,7 +196,7 @@ async def merge_into_base(repo: Path, branch: str, base_branch: str) -> tuple[bo
         return False, (f"{repo.name}'s checkout is on '{current}', but this work forked "
                        f"from '{base_branch}'. Switch to {base_branch} to merge it, or "
                        f"deliver via a PR — I won't merge into the wrong branch.")
-    if not await is_clean(repo):
+    if not await is_clean(repo, untracked=False):
         return False, (f"{repo.name}'s working copy has uncommitted changes on "
                        f"{base_branch} — commit or stash them first, then deliver again")
     code, out = await _git(

@@ -350,3 +350,69 @@ def test_streaming_session_batches_tool_lines(tmp_path):
     assert len(texts) == 3                          # tools batch + reply + footer
     assert texts[0].count("🔧") == 3                # one message, three tool lines
     assert texts[1] == "all tests pass"
+
+
+def test_interrupted_turn_says_stopped_not_diagnostics(tmp_path):
+    """A human /stop must render as '⏹ stopped.' — not leak the backend's internal
+    diagnostic result (observed: '⚠️ [ede_diagnostic] result_type=user …')."""
+    post = SinkPost()
+    backend = FakeBackend([
+        ResultMessage(
+            subtype="error_during_execution", duration_ms=1, duration_api_ms=1,
+            is_error=True, num_turns=1, session_id="s1",
+            result="[ede_diagnostic] result_type=user last_content_type=n/a",
+        ),
+    ])
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+    sess._interrupted = True   # what interrupt() sets while the turn is busy
+
+    async def drive():
+        await sess.start()
+        await sess.submit("do something", reply_to="dm:1")
+        await sess._queue.join()
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert [o.text for o in post.out] == ["⏹ stopped."]
+
+
+def test_literal_nothing_reply_is_suppressed(tmp_path):
+    """The digest-guidance sentinel must never leak: a reply of literally 'NOTHING'
+    posts no message (digest turn) — observed leak in live testing."""
+    post = SinkPost()
+    backend = FakeBackend([
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s1", result="NOTHING",
+        ),
+    ])
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+
+    async def drive():
+        await sess.start()
+        await sess.submit("[fleet inbox]\n- worker nova finished")  # digest: no reply_to
+        await sess._queue.join()
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert post.out == []          # nothing posted — the sentinel is not a message
+
+
+def test_interrupt_sets_flag_only_when_busy(tmp_path):
+    sess = _session(tmp_path)
+    asyncio.run(sess.interrupt())          # idle: no-op
+    assert sess._interrupted is False
+    sess.status = "busy"
+    sess._backend = FakeBackend([])        # interrupt() calls the backend
+    asyncio.run(sess.interrupt())
+    assert sess._interrupted is True

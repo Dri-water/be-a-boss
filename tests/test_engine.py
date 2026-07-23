@@ -527,3 +527,13 @@ def test_pending_approval_survives_restart(tmp_path):
     # simulate restart: fresh engine over the same store
     engine2 = Engine(_settings(tmp_path), CoreStore(tmp_path / "state"))
     assert engine2._pending_delivery == {"nova": "merge"}
+
+
+def test_interrupt_is_honest_about_idle_sessions(tmp_path):
+    """'⏹ interrupting…' must only be claimed when something was actually running."""
+    engine, _ = _engine(tmp_path)
+    fake = FakeSession()                       # status: idle
+    engine.sessions["general"] = fake
+    assert asyncio.run(engine.interrupt("dm:42")) is False   # idle → nothing to stop
+    fake.status = "busy"
+    assert asyncio.run(engine.interrupt("dm:42")) is True    # busy → interrupted

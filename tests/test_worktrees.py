@@ -125,7 +125,8 @@ def test_merge_refuses_dirty_checkout(tmp_path):
     repo = _init_repo(tmp_path / "repo")
     dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
     _commit_in_worktree(dest, "feature.py")
-    (repo / "dirty.txt").write_text("uncommitted\n")  # primary checkout not clean
+    # a modified TRACKED file — untracked junk (e.g. __pycache__) no longer blocks
+    (repo / "README.md").write_text("locally edited, uncommitted\n")
     base = asyncio.run(worktrees.current_branch(repo))
     landed, detail = asyncio.run(worktrees.merge_into_base(repo, "worker/nova", base))
     assert landed is False
@@ -169,3 +170,19 @@ def test_branch_diff_degrades_gracefully_on_huge_change(tmp_path):
     assert "big.py" in diff                              # the file summary survives
     assert "truncated" in diff or "omitted" in diff      # patch degraded, not dumped
     assert len(diff) < 4096                              # bounded under the hard limit
+
+
+def test_merge_ignores_untracked_files_in_target(tmp_path):
+    """Regression from live E2E: untracked build caches (__pycache__) in the boss's
+    checkout must NOT block delivery — a merge doesn't touch untracked files."""
+    repo = _init_repo(tmp_path / "r")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
+    (dest / "f.py").write_text("x = 1\n")
+    _git(dest, "add", "-A")
+    _git(dest, "commit", "-m", "feat")
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "junk.pyc").write_bytes(b"\x00")   # untracked cache
+    base = asyncio.run(worktrees.current_branch(repo))
+    ok, detail = asyncio.run(worktrees.merge_into_base(repo, "worker/nova", base))
+    assert ok, detail                                          # merged despite cache
+    assert (repo / "f.py").exists()

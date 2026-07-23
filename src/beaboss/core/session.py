@@ -125,6 +125,7 @@ class CoreSession:
         self._queue: asyncio.Queue[Turn] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self._reply_to = thread_id   # current turn's reply target (see _do_turn)
+        self._interrupted = False    # a human /stop is in flight for this turn
         self.status = "new"  # new | idle | busy | error | stopped
         self.turns = 0
         self.on_turn_done: Callable[["CoreSession", ResultMessage], Awaitable[None]] | None = None
@@ -268,6 +269,7 @@ class CoreSession:
 
     async def interrupt(self) -> None:
         if self.status == "busy":
+            self._interrupted = True
             try:
                 await self._backend.interrupt()
             except Exception as e:  # noqa: BLE001
@@ -410,19 +412,26 @@ class CoreSession:
                 self.turns += 1
                 result = message
                 await self._flush_tools()
-                if self._final_only:
+                if self._interrupted:
+                    # A human /stop ended this turn: say so plainly instead of
+                    # surfacing the backend's internal diagnostics.
+                    self._interrupted = False
+                    if self._footer_fn:
+                        self._footer_fn()  # drain — a stopped turn's actions are moot
+                    await self._emit_text("⏹ stopped.")
+                elif self._final_only:
                     # One clean message: the final reply (+ the code-generated
                     # action footer, if any). Errors still surface; the success
                     # footer (turn count / cost) is noise here.
                     footer = self._footer_fn() if self._footer_fn else None
+                    reply = (message.result or "").strip()
+                    if reply.strip("()*_ ").upper() == "NOTHING":
+                        reply = ""  # a literal sentinel is a leak, not a reply
                     if message.is_error or (message.subtype and message.subtype != "success"):
                         for piece in rendering.render_result(message):
                             await self._emit_text(piece)
-                    elif (message.result or "").strip():
-                        text = message.result.strip()
-                        if footer:
-                            text = f"{text}\n\n{footer}"
-                        await self._emit_text(text)
+                    elif reply:
+                        await self._emit_text(f"{reply}\n\n{footer}" if footer else reply)
                     elif turn.reply_to:
                         # A boss-initiated turn must never end in total silence.
                         # (Digest turns may stay quiet on purpose.)
