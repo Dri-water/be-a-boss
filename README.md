@@ -40,7 +40,7 @@ agent-drivable `--json` mode (drive the whole org from a pipe) and a self-assemb
 terminal cockpit (`pip install be-a-boss[tui]`).
 
 <p align="center">
-  <img src="assets/screenshot-web.png" width="90%" alt="be-a-boss web app: the orchestrator delegates the login-500 fix to worker Nova and a dep audit to worker Kite; you watch and steer">
+  <img src="assets/screenshot-web.png" width="90%" alt="the be-a-boss web cockpit: the orchestrator briefs worker Nova on the landing page and Kite on the API, the FLEET board shows both, and Nova's finished work waits behind a one-click Approve">
 </p>
 </p>
 
@@ -211,7 +211,13 @@ uv run python -m beaboss.cli          # or:  boss-cli
 
 By default (a real terminal) it opens the **cockpit** — a TUI that assembles itself
 as work happens (`pip install "be-a-boss[tui]"` for it; falls back to a plain
-coloured stream otherwise). Two more modes:
+coloured stream otherwise).
+
+<p align="center">
+  <img src="assets/screenshot-cli.png" width="90%" alt="the be-a-boss terminal cockpit: a thread sidebar with a live working-dot on Nova, the conversation with the orchestrator's brief, an amber activity bar reading 'Nova is working…', and the FLEET board below">
+</p>
+
+Two more modes:
 
 - `--json` — newline-delimited JSON events on stdout, commands on stdin. This is how
   **an agent or script drives the whole org** — the same event shapes the web surface
