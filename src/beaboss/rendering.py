@@ -132,24 +132,53 @@ def chunk(text: str, size: int = _CHUNK) -> list[str]:
 
 
 def _md_inline(text: str) -> str:
-    """Convert bold/headers/links in already-HTML-escaped text."""
+    """Convert links/bold/headers in already-escaped text (code spans stashed)."""
     text = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', text)
-    text = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*\*([^*\n]+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", text)
     return text
 
 
+def _inline_line(line: str) -> str:
+    """One prose line → HTML. Code spans are stashed as placeholders first, so
+    markdown AROUND them still converts (**bold with `code` inside** works) and
+    markdown INSIDE them never does."""
+    line = _html.escape(line)
+    codes: list[str] = []
+
+    def stash(m: re.Match) -> str:
+        codes.append(m.group(1))
+        return f"\x00{len(codes) - 1}\x00"
+
+    line = re.sub(r"`([^`\n]+)`", stash, line)
+    line = _md_inline(line)
+    return re.sub(r"\x00(\d+)\x00",
+                  lambda m: f"<code>{codes[int(m.group(1))]}</code>", line)
+
+
+def _is_table_line(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") and s.endswith("|") and s.count("|") >= 2
+
+
 def _inline_html(text: str) -> str:
-    """Escape a non-code segment, then convert inline code + simple markdown."""
-    text = _html.escape(text)
+    """Escape a non-code segment and convert what we can match with certainty.
+    Consecutive markdown-table lines render as <pre> — aligned columns instead of
+    proportional-font pipe soup."""
     out: list[str] = []
-    last = 0
-    for m in re.finditer(r"`([^`\n]+)`", text):
-        out.append(_md_inline(text[last:m.start()]))
-        out.append(f"<code>{m.group(1)}</code>")
-        last = m.end()
-    out.append(_md_inline(text[last:]))
-    return "".join(out)
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        if _is_table_line(lines[i]) and i + 1 < len(lines) and _is_table_line(lines[i + 1]):
+            j = i
+            while j < len(lines) and _is_table_line(lines[j]):
+                j += 1
+            out.append("<pre>" + _html.escape("\n".join(lines[i:j])) + "</pre>")
+            i = j
+            continue
+        out.append(_inline_line(lines[i]))
+        i += 1
+    return "\n".join(out)
 
 
 _FENCE = re.compile(r"```([^\n`]*)\n(.*?)(?:```|\Z)", re.DOTALL)

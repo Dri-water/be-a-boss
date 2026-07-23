@@ -87,13 +87,6 @@ class WebSocketTransport:
         await self._broadcast(self._thread_event(thread_id))
         return thread_id
 
-    async def rename_thread(self, thread_id: str, title: str) -> None:
-        t = self.threads.get(thread_id)
-        if t is None:
-            return
-        t["title"] = title
-        await self._broadcast(self._thread_event(thread_id))
-
     async def close_thread(self, thread_id: str) -> None:
         t = self.threads.get(thread_id)
         if t is None:

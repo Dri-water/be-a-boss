@@ -33,7 +33,6 @@ class ThreadRecord:
     worker_id: str = ""       # short id, e.g. "nova"
     repo: str = ""           # the primary checkout the worktree came from
     base_branch: str = ""    # the branch the worker forked from (merge/PR target)
-    base_sha: str = ""       # HEAD at spawn (the fork point)
     checks: str = ""         # last run_checks verdict: "" | pass | fail
     checks_sha: str = ""     # branch tip when checks last ran (to detect staleness)
     task: str = ""           # the brief, verbatim
@@ -48,6 +47,7 @@ class CoreStore:
         self._threads: dict[str, ThreadRecord] = {}
         self.orchestrator_thread: str | None = None
         self.dashboard_msg_id: int | None = None   # the pinned #general status board
+        self.pending_delivery: dict[str, str] = {}  # worker_id -> method, awaiting /approve
         self._load()
 
     # ---- persistence -----------------------------------------------------
@@ -70,6 +70,7 @@ class CoreStore:
             return
         self.orchestrator_thread = raw.get("orchestrator_thread")
         self.dashboard_msg_id = raw.get("dashboard_msg_id")
+        self.pending_delivery = dict(raw.get("pending_delivery") or {})
         # Restore every field the current schema knows about (ignoring any it no
         # longer has). Enumerating by hand here silently dropped base_branch/base_sha
         # on restart once — deriving from the dataclass means new fields persist for
@@ -98,6 +99,7 @@ class CoreStore:
             "version": SCHEMA_VERSION,
             "orchestrator_thread": self.orchestrator_thread,
             "dashboard_msg_id": self.dashboard_msg_id,
+            "pending_delivery": self.pending_delivery,
             "threads": {k: asdict(v) for k, v in self._threads.items()},
         }
         try:
@@ -148,11 +150,18 @@ class CoreStore:
             self.dashboard_msg_id = mid
             self._flush()
 
+    def set_pending_delivery(self, pending: dict[str, str]) -> None:
+        """Persist the awaiting-/approve set — an approval must survive a restart."""
+        if self.pending_delivery != pending:
+            self.pending_delivery = dict(pending)
+            self._flush()
+
     def wipe(self) -> None:
         """Factory reset: forget every thread, the office, and the dashboard."""
         self._threads.clear()
         self.orchestrator_thread = None
         self.dashboard_msg_id = None
+        self.pending_delivery = {}
         self._flush()
 
     def workers(self) -> dict[str, ThreadRecord]:

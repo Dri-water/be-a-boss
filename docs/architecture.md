@@ -7,7 +7,7 @@
 
 1. **Transport-agnostic core.** Everything that matters — sessions, the
    orchestrator, the fleet, supervision — lives in `core/` and speaks in its own
-   vocabulary (`Thread`, `Speaker`, `OutboundEvent`). It never imports a chat
+   vocabulary (`Thread`, `Speaker`, `Outbound`). It never imports a chat
    platform. Telegram and a WebSocket surface (web app + VS Code) are adapters in
    `transports/`; Slack would be another, with zero core changes.
 2. **Glass-walled delegation.** The orchestrator drives worker sessions, and every
@@ -40,7 +40,7 @@ flowchart TB
         ST[store<br/>restart-proof state]
     end
     TG -- InboundMessage --> ENG
-    ENG -- OutboundEvent --> TG
+    ENG -- Outbound --> TG
     ENG --> ORC & FLEET & SUP
     FLEET --> CS
     SUP -- wake --> ORC
@@ -94,19 +94,18 @@ flowchart LR
 | Supervised by | human | orchestrator (checkpoints) | human |
 
 The orchestrator is itself a coding-agent session — its "powers" are MCP tools exposed
-by the engine: `spawn_worker(repo, task, name?)`, `message_worker(id, text)`,
-`worker_status(id?)`, `dismiss_worker(id)`, `report(text)`. Its system prompt
+by the engine: `spawn_worker(repo, task)`, `message_worker(id, text)`,
+`worker_status(id?)`, `dismiss_worker(id)` — plus `inspect_repo`, `review_worker`, `run_checks`, `deliver_worker`. Its system prompt
 teaches briefing etiquette: self-contained briefs, explicit report-back markers,
 escalate-don't-guess, and the code-quality bar it holds workers to.
 
 ## Supervision (checkpoint inbox)
 
-The supervisor keeps an inbox per orchestrator. Producers:
+The engine keeps a supervision inbox. Producers (exactly two):
 
-- SDK events from worker sessions: turn ended (with result), error, question
-  detected, budget/turn ceiling hit
-- transport events: human interjection in a worker thread
-- timers: a worker silent past its soft deadline
+- worker turn ends (the result text, including the worker's STATUS line, and
+  errors)
+- a human interjection in a worker thread
 
 Benign events (tool chatter, streaming) are absorbed. Actionable events wake the
 orchestrator with a digest turn: `[inbox] Nova: tests green, task complete` — the

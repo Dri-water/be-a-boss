@@ -116,3 +116,15 @@ def test_chunk_reopens_code_fences_across_pieces():
     assert len(pieces) > 1
     for p in pieces:
         assert p.count("```") % 2 == 0      # every piece renders valid on its own
+
+
+def test_to_telegram_html_bold_containing_code():
+    out = rendering.to_telegram_html("**run `npm test` first**")
+    assert out == "<b>run <code>npm test</code> first</b>"
+
+
+def test_to_telegram_html_tables_render_as_pre():
+    md = "| name | val |\n|---|---|\n| a | 1 |\nafter"
+    out = rendering.to_telegram_html(md)
+    assert out.startswith("<pre>| name | val |")
+    assert out.endswith("</pre>\nafter")

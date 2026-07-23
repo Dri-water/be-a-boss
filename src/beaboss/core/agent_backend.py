@@ -127,10 +127,13 @@ class CodexBackend:
     translates Codex's event lines into the SDK message objects the session speaks.
     """
 
-    def __init__(self, cwd: Path, system_prompt: str = "", resume_id: str | None = None):
+    def __init__(self, cwd: Path, system_prompt: str = "", resume_id: str | None = None,
+                 model: str | None = None, cli_path: str | None = None):
         self._cwd = cwd
         self._system_prompt = system_prompt
         self._thread_id = resume_id  # resume the same Codex thread across restarts
+        self._model = model          # honors AGENT_MODEL / CODEX_MODEL
+        self._cli_path = cli_path    # honors AGENT_CLI_PATH / CODEX_CLI_PATH
         self._proc: asyncio.subprocess.Process | None = None
         self._final_text = ""  # last agent_message of the in-flight turn
         self._stderr: list[str] = []
@@ -151,13 +154,15 @@ class CodexBackend:
         if self._thread_id is None and self._system_prompt:
             prompt = f"{self._system_prompt}\n\n---\n\n{prompt}"
 
-        codex = shutil.which("codex") or "codex"
+        codex = self._cli_path or shutil.which("codex") or "codex"
         flags = [
             "--json",
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "-C", str(self._cwd),
         ]
+        if self._model:
+            flags += ["-m", self._model]
         if self._thread_id is None:
             argv = [codex, "exec", *flags, prompt]
         else:

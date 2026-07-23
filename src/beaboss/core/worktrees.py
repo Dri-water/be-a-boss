@@ -127,8 +127,8 @@ async def has_remote(repo: Path) -> bool:
 
 
 async def head_sha(repo: Path) -> str:
-    """The primary checkout's current commit — recorded at spawn as the worker's
-    fork point so delivery can notice the base moving out from under an approval."""
+    """HEAD of the given checkout/worktree — used to record which revision a
+    run_checks verdict applied to (so delivery can flag stale checks)."""
     code, out = await _git(repo, "rev-parse", "HEAD")
     return out if code == 0 else ""
 

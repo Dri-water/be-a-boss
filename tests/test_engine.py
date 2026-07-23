@@ -48,9 +48,6 @@ class FakeTransport:
         self.threads.append(title)
         return tid
 
-    async def rename_thread(self, thread_id, title):
-        pass
-
     async def close_thread(self, thread_id):
         self.closed.append(thread_id)
 
@@ -520,3 +517,13 @@ def test_turn_actions_drain_into_footer_once(tmp_path):
     footer = engine._drain_turn_actions()
     assert footer == "⚙ spawn_worker → Nova · myapp · message_worker(nova)"
     assert engine._drain_turn_actions() is None            # drained — no stale leak
+
+
+def test_pending_approval_survives_restart(tmp_path):
+    """A 🚦 prompt issued before a restart must still be approvable after it."""
+    engine, t = _engine(tmp_path)
+    engine._pending_delivery["nova"] = "merge"
+    engine.store.set_pending_delivery(engine._pending_delivery)
+    # simulate restart: fresh engine over the same store
+    engine2 = Engine(_settings(tmp_path), CoreStore(tmp_path / "state"))
+    assert engine2._pending_delivery == {"nova": "merge"}

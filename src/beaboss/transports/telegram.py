@@ -96,16 +96,6 @@ class TelegramTransport:
             chat_id=self.group_chat_id, name=title[:128])
         return str(topic.message_thread_id)
 
-    async def rename_thread(self, thread_id: str, title: str) -> None:
-        chat_id, topic_id = self._route(thread_id)
-        if chat_id is None or topic_id is None:  # only group topics have titles
-            return
-        try:
-            await self.bot.edit_forum_topic(
-                chat_id=chat_id, message_thread_id=topic_id, name=title[:128])
-        except Exception:  # noqa: BLE001
-            pass
-
     async def close_thread(self, thread_id: str) -> None:
         chat_id, topic_id = self._route(thread_id)
         if chat_id is None or topic_id is None:
@@ -122,18 +112,30 @@ class TelegramTransport:
             return
         header = self._header(out)
         if out.media_path is not None:
-            cap = (out.caption or "")
-            if header:
-                cap = f"{header}\n{cap}".strip()
-            cap = cap[:1024] or None
-            common = dict(chat_id=chat_id, message_thread_id=topic_id, caption=cap)
+            cap_text = (out.caption or "").strip()
+            combined = f"{header}\n{cap_text}".strip() if header else cap_text
+            overflow = None
+            if len(combined) > 1024:
+                # Telegram hard-caps captions; never silently truncate — send a
+                # stub caption and the full text as a follow-up message.
+                overflow = cap_text
+                combined = f"{header}\n…caption follows ⬇".strip() if header else "…caption follows ⬇"
             p = Path(out.media_path)
-            if out.media_kind == "photo":
-                await self.bot.send_photo(photo=p, **common)
-            elif out.media_kind == "video":
-                await self.bot.send_video(video=p, supports_streaming=True, **common)
-            else:
-                await self.bot.send_document(document=p, **common)
+            common = dict(chat_id=chat_id, message_thread_id=topic_id)
+            kw = dict(common)
+            if combined:
+                kw["caption"] = to_telegram_html(combined)
+                kw["parse_mode"] = "HTML"
+            try:
+                await self._send_media(p, out.media_kind, kw)
+            except BadRequest:
+                kw = dict(common)
+                if combined:
+                    kw["caption"] = combined
+                await self._send_media(p, out.media_kind, kw)
+            if overflow:
+                await self.post(Outbound(
+                    thread_id=out.thread_id, speaker=out.speaker, text=overflow))
             return
         text = out.text
         if not text.strip():
@@ -156,6 +158,14 @@ class TelegramTransport:
             except BadRequest:
                 await self.bot.send_message(
                     chat_id=chat_id, message_thread_id=topic_id, text=part)
+
+    async def _send_media(self, p: Path, kind: str | None, kw: dict) -> None:
+        if kind == "photo":
+            await self.bot.send_photo(photo=p, **kw)
+        elif kind == "video":
+            await self.bot.send_video(video=p, supports_streaming=True, **kw)
+        else:
+            await self.bot.send_document(document=p, **kw)
 
     async def indicate_busy(self, thread_id: str) -> None:
         chat_id, topic_id = self._route(thread_id)

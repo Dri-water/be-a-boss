@@ -86,3 +86,11 @@ def test_wipe_clears_everything_and_persists(tmp_path):
     assert reloaded.all() == {}
     assert reloaded.orchestrator_thread is None
     assert reloaded.dashboard_msg_id is None
+
+
+def test_pending_delivery_persists(tmp_path):
+    from beaboss.core.store import CoreStore
+    s = CoreStore(tmp_path / "state")
+    s.set_pending_delivery({"nova": "merge"})
+    reloaded = CoreStore(tmp_path / "state")
+    assert reloaded.pending_delivery == {"nova": "merge"}   # /approve survives restart

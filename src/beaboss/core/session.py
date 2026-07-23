@@ -1,10 +1,8 @@
 """One live coding-agent session bound to a thread — transport- and backend-agnostic.
 
-Ported from the original claude_session.py: same queue/worker/turn logic, but all
-output flows through a single `post(Outbound)` callback with a Speaker identity,
-and media tools are generic. A tap can observe everything the session says
-(used by the orchestrator to 'see' worker threads) and inbound turns can carry an
-extra observer note (used for human interjections).
+All output flows through a single `post(Outbound)` callback with a Speaker
+identity; media tools are generic. The engine observes workers via the
+`on_turn_done` hook, not by watching the stream.
 """
 
 from __future__ import annotations
@@ -76,7 +74,6 @@ def _safe_name(name: str) -> str:
 
 PostFn = Callable[[Outbound], Awaitable[None]]
 BusyFn = Callable[[str], Awaitable[None]]
-TapFn = Callable[[str, str, str], Awaitable[None]]  # (thread_id, kind, text)
 
 
 class CoreSession:
@@ -99,9 +96,7 @@ class CoreSession:
         on_session_id: Callable[[str], None],
         session_id: str | None = None,
         system_append: str | None = None,
-        tap: TapFn | None = None,
         extra_mcp_servers: dict[str, Any] | None = None,
-        max_turns: int | None = None,
         backend: AgentBackend | None = None,
         final_only: bool = False,
         footer_fn: Callable[[], str | None] | None = None,
@@ -115,9 +110,7 @@ class CoreSession:
         self._on_session_id = on_session_id
         self.session_id = session_id
         self._system_append = system_append
-        self._tap = tap
         self._extra_mcp = extra_mcp_servers or {}
-        self._max_turns = max_turns
         # final_only: post ONE message per turn — the final reply — instead of
         # streaming every text block, tool line, and cost footer. Used for the
         # orchestrator, who should text the boss like a person, not narrate.
@@ -161,7 +154,7 @@ class CoreSession:
             include_partial_messages=False,
             resume=self.session_id,
             model=self.settings.model or None,
-            max_turns=self._max_turns if self._max_turns is not None else self.settings.max_turns,
+            max_turns=self.settings.max_turns,
             cli_path=self.settings.cli_path or None,
             setting_sources=SETTING_SOURCES,
             system_prompt=system_prompt,
@@ -456,11 +449,6 @@ class CoreSession:
             await self._post(Outbound(
                 thread_id=self._reply_to, speaker=self.speaker, text=part
             ))
-        if self._tap is not None:
-            try:
-                await self._tap(self.thread_id, "said", text)
-            except Exception:  # noqa: BLE001
-                log.exception("tap failed thread=%s", self.thread_id)
 
     async def _safe_emit(self, text: str) -> None:
         """Emit that can never raise — used on error paths so a failing post (e.g. a

@@ -31,7 +31,6 @@ core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrat
   transport-decoupled (runs on `ClaudeAgentBackend` or `CodexBackend`): all output
   goes through `post(Outbound(speaker=…))`; media tools are the `chat` MCP
   server (`mcp__chat__send_*`); `on_turn_done` hook fires the supervision wake; a
-  `tap` lets the engine observe a worker thread.
 - **`Engine`** (`core/engine.py`) — three session roles: `orchestrator` (fleet
   MCP tools: spawn/message/status/review/deliver/dismiss), `worker` (worktree cwd + STATUS
   protocol prompt), `direct` (the classic `/new`). The orchestrator lives in the
@@ -55,7 +54,7 @@ core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrat
 - **Running as root needs `IS_SANDBOX=1`** (set in the Dockerfile). Claude Code
   refuses `--dangerously-skip-permissions` under root without it — sessions won't
   even start. The boot check won't catch this (sessions only spawn on `/new`);
-  the in-container end-to-end test does.
+  running the real thing does.
 - The SDK drives the **standalone** `claude` CLI (`npm i -g @anthropic-ai/claude-code`),
   not the VS Code extension. Auth is shared via `~/.claude/.credentials.json`.
 - `bypassPermissions` is required: headless sessions have no TTY to answer prompts.
