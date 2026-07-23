@@ -60,6 +60,13 @@
       this.messages.set(threadId, list);
     }
 
+    // Echo a file the boss just sent — the server doesn't send it back to us.
+    addLocalMedia(threadId, speaker, media) {
+      const list = this.messages.get(threadId) || [];
+      list.push({ speaker, text: "", ts: Date.now(), media });
+      this.messages.set(threadId, list);
+    }
+
     _upsertThread(t) { this.threads.set(t.id, t); }
 
     _recv(msg) {
@@ -229,13 +236,16 @@
 
     const conn = $("conn"), status = $("status");
     const input = $("box"), submit = $("submit");
+    const attach = $("attach"), fileInput = $("file"), tray = $("tray");
+    let staged = [];                    // {filename, mime, kind, data_b64, size}
+    const MAX_FILE = 8 * 1024 * 1024, MAX_TOTAL = 10 * 1024 * 1024;
 
     let everOpened = false;
     client.on("open", () => {
       everOpened = true;
       conn.className = "on"; conn.title = "connected";
       status.textContent = "connected";
-      input.disabled = submit.disabled = false;
+      input.disabled = submit.disabled = attach.disabled = false;
     });
     client.on("close", () => {
       // Distinguish "dropped, retrying" from "never connected" (usually a wrong or
@@ -245,7 +255,7 @@
         ? "disconnected — reconnecting…"
         : "can't connect — is the server running, and is your ?token=… correct?";
       conn.title = status.textContent = msg;
-      input.disabled = submit.disabled = true;
+      input.disabled = submit.disabled = attach.disabled = true;
     });
 
     client.on("threads", () => {
@@ -405,11 +415,86 @@
       log.scrollTop = log.scrollHeight;
     }
 
+    // ---- attachments (files/images a human sends INTO a session) -----------
+
+    function sysNote(text) {
+      client.addLocalMessage(active, { role: "system", name: "sys" }, text);
+      renderLog();
+    }
+
+    function renderTray() {
+      tray.textContent = "";
+      tray.classList.toggle("show", staged.length > 0);
+      staged.forEach((s, i) => {
+        const chip = document.createElement("div"); chip.className = "chip";
+        if (s.kind === "image") {
+          const img = document.createElement("img");
+          img.src = "data:" + s.mime + ";base64," + s.data_b64; chip.appendChild(img);
+        }
+        const name = document.createElement("span");
+        name.className = "name"; name.textContent = s.filename;
+        const x = document.createElement("span");
+        x.className = "x"; x.textContent = "✕";
+        x.title = "remove";
+        x.onclick = () => { staged.splice(i, 1); renderTray(); };
+        chip.append(name, x); tray.appendChild(chip);
+      });
+    }
+
+    function stageFile(file) {
+      if (file.size > MAX_FILE) { sysNote(`"${file.name}" is too large (max 8 MB).`); return; }
+      if (staged.reduce((n, s) => n + s.size, 0) + file.size > MAX_TOTAL) {
+        sysNote("That would exceed the 10 MB attachment limit for one message."); return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        staged.push({
+          filename: file.name || "upload",
+          mime: file.type || "application/octet-stream",
+          kind: (file.type || "").startsWith("image/") ? "image" : "file",
+          data_b64: String(reader.result).split(",")[1] || "", size: file.size,
+        });
+        renderTray();
+      };
+      reader.readAsDataURL(file);
+    }
+
+    attach.onclick = () => fileInput.click();
+    fileInput.onchange = (e) => {
+      for (const f of e.target.files) stageFile(f);
+      fileInput.value = "";                 // let the same file be re-picked later
+    };
+    // paste an image straight from the clipboard — great for screenshots
+    input.addEventListener("paste", (e) => {
+      const files = [...((e.clipboardData && e.clipboardData.items) || [])]
+        .filter((it) => it.kind === "file").map((it) => it.getAsFile()).filter(Boolean);
+      if (files.length) { e.preventDefault(); files.forEach(stageFile); }
+    });
+    // drag-and-drop files onto the conversation
+    const dropZone = $("log");
+    dropZone.addEventListener("dragover", (e) => e.preventDefault());
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const files = [...((e.dataTransfer && e.dataTransfer.files) || [])];
+      if (files.length) files.forEach(stageFile);
+    });
+
     $("send").addEventListener("submit", (e) => {
       e.preventDefault();
+      if (active === null) return;
       const text = input.value.trim();
-      if (!text || active === null) return;
-      if (text.startsWith("/")) {
+      if (staged.length) {
+        // a media message — the text (if any) rides along as the caption
+        const media = staged.map((s) => ({
+          kind: s.kind, filename: s.filename, mime: s.mime, data_b64: s.data_b64 }));
+        client.sendRaw({ type: "message", thread_id: active, text, media });
+        if (text) client.addLocalMessage(active, { role: "you", name: "You" }, text);
+        for (const m of media) client.addLocalMedia(active, { role: "you", name: "You" }, m);
+        busy.add(active);
+        staged = []; renderTray();
+      } else if (!text) {
+        return;
+      } else if (text.startsWith("/")) {
         runCommand(text);
       } else {
         client.send(active, text);

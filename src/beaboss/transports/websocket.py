@@ -36,13 +36,43 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 
-from ..core.ports import SYSTEM, InboundMessage, Outbound, Speaker
+from ..core.ports import SYSTEM, InboundMessage, MediaIn, Outbound, Speaker
 
 log = logging.getLogger("beaboss.transport.websocket")
 
 # The orchestrator's office (engine.main_thread). Seeded so a fresh client can
 # talk to the orchestrator before any worker threads exist.
 OFFICE = "general"
+
+# Inbound media (browser → a session). Bounded so a client can't exhaust memory;
+# the WS max_size (set on serve) must exceed a full message's base64 payload.
+_INBOUND_MEDIA_CAP = 8 * 1024 * 1024   # per file, after base64-decode
+_INBOUND_MEDIA_MAX = 8                  # files per message
+_WS_MAX_SIZE = 16 * 1024 * 1024         # per WS frame — base64 inflates ~33%
+
+
+def _decode_inbound_media(raw) -> list[MediaIn]:
+    """Turn the client's [{filename, mime, data_b64}] into MediaIn, defensively:
+    skip anything malformed/oversized, cap the count, and derive kind from the mime
+    server-side rather than trusting the client. Filenames are made path-safe later
+    by CoreSession.submit_media."""
+    if not isinstance(raw, list):
+        return []
+    items: list[MediaIn] = []
+    for entry in raw[:_INBOUND_MEDIA_MAX]:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            data = base64.b64decode(entry.get("data_b64") or "", validate=True)
+        except (ValueError, TypeError):
+            continue
+        if not data or len(data) > _INBOUND_MEDIA_CAP:
+            continue
+        mime = str(entry.get("mime") or "application/octet-stream")
+        kind = "image" if mime.startswith("image/") else "file"
+        filename = str(entry.get("filename") or "upload")[:200]
+        items.append(MediaIn(kind=kind, filename=filename, mime=mime, data=data))
+    return items
 
 
 def _speaker_json(s: Speaker) -> dict:
@@ -247,13 +277,19 @@ def make_handler(engine, transport: WebSocketTransport):
                 if mtype == "message":
                     thread_id = str(msg.get("thread_id") or "").strip()
                     text = str(msg.get("text") or "")
-                    if thread_id and text.strip():
-                        # record the boss's own line so a reload shows both sides
+                    media = _decode_inbound_media(msg.get("media"))
+                    if thread_id and (text.strip() or media):
+                        # record the boss's own line (+ a media note) so a reload
+                        # shows both sides of the conversation
+                        note = text
+                        if media:
+                            names = ", ".join(m.filename for m in media)
+                            note = (f"{text}\n[sent: {names}]").strip()
                         transport.record({"type": "message", "thread_id": thread_id,
                                           "speaker": {"role": "you", "name": "You",
-                                                      "emoji": ""}, "text": text})
+                                                      "emoji": ""}, "text": note})
                         await engine.on_inbound(InboundMessage(
-                            thread_id=thread_id, text=text,
+                            thread_id=thread_id, text=text, media=media,
                             sender_name=str(msg.get("sender_name") or "the boss")))
                 elif mtype == "interrupt":
                     tid = str(msg.get("thread_id") or "").strip()
@@ -390,6 +426,7 @@ async def serve_forever(engine, transport: WebSocketTransport,
     except Exception:  # noqa: BLE001
         pass
     async with serve(make_handler(engine, transport), host, port,
-                     process_request=_gatekeeper(token, allowed, assets)):
+                     process_request=_gatekeeper(token, allowed, assets),
+                     max_size=_WS_MAX_SIZE):  # base64 media exceeds the 1 MB default
         log.info("websocket transport listening on ws://%s:%s", host, port)
         await asyncio.Future()  # run forever

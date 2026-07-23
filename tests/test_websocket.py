@@ -357,3 +357,67 @@ def test_app_shell_ships_inside_the_package():
     assets = _load_assets(static)
     assert "/index.html" in assets and "/client.js" in assets
     assert assets["/index.html"][0].startswith("text/html")
+
+
+def test_decode_inbound_media_validates_caps_and_kind(monkeypatch):
+    """Inbound media is decoded defensively: bad base64 / non-dicts skipped, kind
+    derived server-side from the mime, count and per-file size capped."""
+    import base64
+    from beaboss.transports import websocket as ws
+    good = base64.b64encode(b"\x89PNGDATA").decode()
+    items = ws._decode_inbound_media([
+        {"filename": "a.png", "mime": "image/png", "data_b64": good},
+        {"filename": "b.txt", "mime": "text/plain",
+         "data_b64": base64.b64encode(b"hi").decode()},
+        {"filename": "bad", "mime": "image/png", "data_b64": "!!! not base64"},
+        "not-a-dict",
+    ])
+    assert [i.filename for i in items] == ["a.png", "b.txt"]     # junk dropped
+    assert items[0].kind == "image" and items[1].kind == "file"  # kind from mime
+    assert items[0].data == b"\x89PNGDATA"
+    assert ws._decode_inbound_media(None) == [] and ws._decode_inbound_media("x") == []
+
+    # count cap
+    many = [{"filename": f"{i}", "mime": "image/png",
+             "data_b64": base64.b64encode(b"x").decode()}
+            for i in range(ws._INBOUND_MEDIA_MAX + 5)]
+    assert len(ws._decode_inbound_media(many)) == ws._INBOUND_MEDIA_MAX
+
+    # per-file size cap (patched small so the test stays cheap)
+    monkeypatch.setattr(ws, "_INBOUND_MEDIA_CAP", 4)
+    over = [{"filename": "big", "mime": "image/png",
+             "data_b64": base64.b64encode(b"12345").decode()}]  # 5 bytes > 4
+    assert ws._decode_inbound_media(over) == []
+
+
+def test_ws_media_message_routes_with_decoded_media():
+    """A browser message carrying base64 media reaches engine.on_inbound with real
+    MediaIn — and a media-only message (empty caption) is delivered too."""
+    import base64
+
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws_:
+                await ws_.recv()  # snapshot
+                await ws_.send(json.dumps({
+                    "type": "message", "thread_id": "general", "text": "look at this",
+                    "media": [{"filename": "shot.png", "mime": "image/png",
+                               "data_b64": base64.b64encode(b"PNGDATA").decode()}]}))
+                await _wait_for(lambda: len(engine.inbound) == 1)
+                m = engine.inbound[0]
+                assert m.text == "look at this" and len(m.media) == 1
+                assert m.media[0].filename == "shot.png"
+                assert m.media[0].data == b"PNGDATA" and m.media[0].kind == "image"
+
+                # media-only (empty caption) still routes
+                await ws_.send(json.dumps({
+                    "type": "message", "thread_id": "general", "text": "",
+                    "media": [{"filename": "f.bin", "mime": "application/octet-stream",
+                               "data_b64": base64.b64encode(b"x").decode()}]}))
+                await _wait_for(lambda: len(engine.inbound) == 2)
+                assert engine.inbound[1].text == "" and engine.inbound[1].media[0].kind == "file"
+
+    asyncio.run(scenario())

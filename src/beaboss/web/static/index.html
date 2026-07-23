@@ -215,11 +215,28 @@
     }
     #box:focus { border-color: var(--accent); }
     #box::placeholder { color: var(--faint); }
+    #attach {
+      flex: none; width: 44px; border: 1px solid var(--border); border-radius: var(--radius);
+      background: var(--raised); color: var(--dim); font-size: 17px; cursor: pointer;
+    }
+    #attach:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
     button#submit {
       padding: 11px 20px; border: 0; border-radius: var(--radius); cursor: pointer;
       background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 650;
     }
     button:disabled { opacity: .45; cursor: default; }
+
+    #tray { display: none; flex-wrap: wrap; gap: 8px; padding: 12px 20px 0; }
+    #tray.show { display: flex; }
+    .chip {
+      display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px;
+      background: var(--raised); border: 1px solid var(--border); border-radius: 9px;
+      font-size: 12.5px; max-width: 240px;
+    }
+    .chip img { width: 26px; height: 26px; object-fit: cover; border-radius: 5px; flex: none; }
+    .chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chip .x { cursor: pointer; color: var(--faint); font-weight: 700; padding: 0 2px; }
+    .chip .x:hover { color: var(--reject); }
     #hint {
       padding: 6px 20px 14px; font-size: 11.5px; color: var(--faint);
     }
@@ -255,10 +272,13 @@
       <pre id="dash"></pre>
     </section>
     <div id="log"></div>
+    <div id="tray"></div>
     <form id="send">
+      <button type="button" id="attach" title="Attach files" disabled>📎</button>
       <input id="box" placeholder="Message the orchestrator…" autocomplete="off" disabled>
       <button id="submit" disabled>Send</button>
     </form>
+    <input type="file" id="file" multiple hidden>
     <div id="hint">Enter to send &nbsp;·&nbsp; <code>/new &lt;path&gt;</code> &nbsp;·&nbsp;
       <code>/approve &lt;id&gt;</code> &nbsp;·&nbsp; <code>/stop</code> &nbsp;·&nbsp;
       <code>/kill</code> &nbsp;·&nbsp; <code>/help</code></div>

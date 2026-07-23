@@ -302,10 +302,12 @@ In any **session/worker topic**:
 ## Media & agent tools
 
 **You → session.** Send a photo, document, video, animation, audio, or voice note
-into a topic (optionally with a caption). The bot downloads it, saves it under
-`<repo>/.beaboss-inbox/`, and hands it to the session. Images are additionally attached
-as **vision input** so the agent can see them. (Telegram bots can fetch files up to
-20 MB.)
+into a thread (optionally with a caption) — on Telegram as an attachment, or in the
+**web cockpit** via the 📎 button, drag-and-drop, or pasting an image straight from
+the clipboard. It's saved under `<repo>/.beaboss-inbox/` and handed to the session;
+images are additionally attached as **vision input** so the agent can see them.
+(Telegram fetches files up to 20 MB; the web accepts up to 8 MB per file, 10 MB per
+message.)
 
 **Session → you.** Each session gets in-process tools it can call to push content
 back into its own topic:
