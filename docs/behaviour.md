@@ -12,8 +12,9 @@ you can rely on; the code is where the mechanics live.
 - **In a direct thread** → it goes straight to that agent.
 - **In an unknown thread** → you get a short note telling you where to talk.
 
-Text, photos, and files are all accepted. Images are given to the agent as vision;
-other files are saved into the workspace and referenced.
+Text, photos, and files are all accepted. Images the model can read (PNG/JPEG/GIF/WebP)
+are given to the agent as vision; other images and files are saved into the workspace
+and referenced.
 
 ## The orchestrator hires a worker
 

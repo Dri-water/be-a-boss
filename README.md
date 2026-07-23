@@ -98,7 +98,8 @@ sender per message.
   only at meaningful checkpoints (done / blocked / needs-decision / interjection),
   never per token. Wakes are coalesced to save tokens.
 - **Full media, both directions** — send photos/files/video *to* a session (images
-  become vision input; everything lands in `./.beaboss-inbox/`), and any session can
+  the model reads — PNG/JPEG/GIF/WebP — become vision input; everything lands in
+  `./.beaboss-inbox/`), and any session can
   send photos/video/documents/messages *back* (see [Media & agent tools](#media--agent-tools)).
 - **Resumable** across restarts, **always-on** in Docker, **container-isolated**,
   **batteries-included image** (node/python/git/ffmpeg/chromium; agents can
@@ -274,8 +275,10 @@ of the web UI — plain language, no command:
 It hires workers (one per task), opens a thread for each, briefs them, and reports
 back. Open a worker's thread to watch the work; type there to steer.
 
-Slash-commands below are the **Telegram** surface's; the web UI drives the
-same core with just the thread list + message box.
+Don't read the web surface as a lesser view: the web cockpit speaks the same
+slash-commands (below), renders markdown, turns the 🚦 delivery prompt into one-click
+**Approve / Reject** buttons, and takes attachments by 📎, drag-and-drop, or clipboard
+paste. The commands below work on Telegram, the web cockpit, and the CLI.
 
 Commands in **General**:
 
@@ -305,9 +308,10 @@ In any **session/worker topic**:
 into a thread (optionally with a caption) — on Telegram as an attachment, or in the
 **web cockpit** via the 📎 button, drag-and-drop, or pasting an image straight from
 the clipboard. It's saved under `<repo>/.beaboss-inbox/` and handed to the session;
-images are additionally attached as **vision input** so the agent can see them.
-(Telegram fetches files up to 20 MB; the web accepts up to 8 MB per file, 10 MB per
-message.)
+images in a model-supported format (PNG/JPEG/GIF/WebP) are additionally attached as
+**vision input** so the agent can see them — other images are still saved as files it
+can open by path. (Telegram fetches files up to 20 MB; the web accepts up to 8 MB per
+file, 10 MB per message.)
 
 **Session → you.** Each session gets in-process tools it can call to push content
 back into its own topic:

@@ -28,7 +28,9 @@ Read this before deploying.
    token, your user ID, and Claude credentials are never committed.
 4. **The web surface is token- and origin-gated.** The WebSocket server requires a
    `?token=…` on every connection (printed at startup, or pin it with `WEB_TOKEN`)
-   and rejects any connection whose `Origin` isn't same-origin. That closes
+   and rejects any browser connection whose `Origin` isn't same-origin — a real
+   cross-origin page always sends its `Origin`, and the required token is the backstop
+   for the no-Origin (non-browser) case. That closes
    Cross-Site WebSocket Hijacking — a random page you browse to can't silently open
    a socket to your local server and start driving agents. A public bind is refused
    unless you set `WEB_ALLOW_INSECURE_BIND=1`; if you do, front it with real auth.
