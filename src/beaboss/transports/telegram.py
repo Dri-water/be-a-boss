@@ -16,6 +16,7 @@ from pathlib import Path
 from telegram import BotCommand, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
+    AIORateLimiter,
     Application,
     ApplicationBuilder,
     CommandHandler,
@@ -33,6 +34,11 @@ from ..rendering import chunk
 log = logging.getLogger("beaboss.transport.telegram")
 
 GENERAL = "general"
+
+# Cap a single logical message: a runaway dump (a huge diff, a giant log) is
+# truncated with a pointer rather than spammed across dozens of messages. The rate
+# limiter paces whatever does go out so Telegram never 429-drops it.
+MAX_MSG_CHUNKS = 5
 
 
 def _to_thread_id(message_thread_id: int | None) -> str:
@@ -111,7 +117,13 @@ class TelegramTransport:
         if not text.strip():
             return
         body = f"{header}\n{text}" if header else text
-        for part in chunk(body):
+        parts = chunk(body)
+        if len(parts) > MAX_MSG_CHUNKS:
+            omitted = len(parts) - (MAX_MSG_CHUNKS - 1)
+            parts = parts[:MAX_MSG_CHUNKS - 1] + [
+                f"… ✂️ truncated — {omitted} more part(s) omitted (too long for chat). "
+                f"If you need the whole thing, ask for it as a file."]
+        for part in parts:
             await self.bot.send_message(
                 chat_id=self.chat_id,
                 message_thread_id=_to_topic_id(out.thread_id),
@@ -459,6 +471,9 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
     app = (
         ApplicationBuilder()
         .token(settings.bot_token)
+        # Throttle + auto-retry on Telegram's 429 flood control, so a burst of
+        # messages (a chunked diff, a chatty worker) is paced, never dropped.
+        .rate_limiter(AIORateLimiter())
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()

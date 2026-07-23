@@ -129,3 +129,18 @@ def test_merge_refuses_dirty_checkout(tmp_path):
     assert landed is False
     assert "uncommitted" in detail
     assert not (repo / "feature.py").exists()  # nothing landed
+
+
+def test_branch_diff_degrades_gracefully_on_huge_change(tmp_path):
+    """A massive diff keeps the file-level stat and truncates only the patch, so it
+    stays well under Telegram's message limit instead of being an unbounded dump."""
+    repo = _init_repo(tmp_path / "repo")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "big"))
+    (dest / "big.py").write_text("\n".join(f"line_{i} = {i}" for i in range(5000)) + "\n")
+    _git(dest, "add", "-A")
+    _git(dest, "commit", "-m", "a huge change")
+    base = asyncio.run(worktrees.current_branch(repo))
+    diff = asyncio.run(worktrees.branch_diff(repo, base, "worker/big"))
+    assert "big.py" in diff                              # the file summary survives
+    assert "truncated" in diff or "omitted" in diff      # patch degraded, not dumped
+    assert len(diff) < 4096                              # bounded under the hard limit

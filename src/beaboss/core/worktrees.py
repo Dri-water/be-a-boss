@@ -138,13 +138,25 @@ async def gh_available() -> bool:
 
 
 async def branch_diff(repo: Path, base: str, branch: str, max_chars: int = 3500) -> str:
-    """A readable summary of what `branch` changed relative to `base` (stat + patch)."""
+    """A readable summary of what `branch` changed vs `base`.
+
+    The file-level --stat is always kept (compact, and the most useful view of a
+    large change); only the patch body is truncated. So a massive diff degrades to
+    "here's every file that changed, plus a preview" rather than an unbounded dump
+    that would blow past Telegram's message limit or flood the orchestrator.
+    """
     _, stat = await _git(repo, "diff", "--stat", f"{base}...{branch}")
     _, patch = await _git(repo, "diff", f"{base}...{branch}")
-    body = ((stat + "\n\n" + patch).strip()) if stat or patch else ""
-    if len(body) > max_chars:
-        body = body[:max_chars] + f"\n… (diff truncated at {max_chars} chars)"
-    return body or "(no changes on the branch yet)"
+    stat, patch = stat.strip(), patch.strip()
+    if not stat and not patch:
+        return "(no changes on the branch yet)"
+    budget = max_chars - len(stat) - 4
+    if budget < 200:  # the stat alone is already large — a very broad change
+        return stat + "\n\n(patch omitted — many files changed; review via the PR or branch)"
+    if len(patch) > budget:
+        return (stat + "\n\n" + patch[:budget].rstrip()
+                + "\n… (patch truncated — full diff on the branch/PR)")
+    return stat + "\n\n" + patch
 
 
 async def merge_into_current(repo: Path, branch: str) -> tuple[bool, str]:
