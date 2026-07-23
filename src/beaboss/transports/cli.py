@@ -40,7 +40,6 @@ class CLITransport:
         self._emit = emit
         self.threads: dict[str, dict] = {}   # id -> {"title", "open"}
         self.dashboard = ""
-        self.history: list[dict] = []        # for a driver that wants a replay
         self._next = 0
         self._add_thread(OFFICE, "Orchestrator")
         if store is not None:
@@ -64,12 +63,6 @@ class CLITransport:
             if tid.isdigit():
                 highest = max(highest, int(tid))
         self._next = highest
-
-    async def _send(self, event: dict) -> None:
-        self.history.append(event)
-        if len(self.history) > 300:
-            del self.history[:-300]
-        await self._emit(event)
 
     # ---- Transport interface --------------------------------------------
 
@@ -102,11 +95,11 @@ class CLITransport:
                         f"{out.media_path.name} — unreadable/too large]").strip()
                 event = {"type": "message", "thread_id": out.thread_id,
                          "speaker": _speaker_json(out.speaker), "text": note}
-            await self._send(event)
+            await self._emit(event)
             return
         if not out.text.strip():
             return
-        await self._send({"type": "message", "thread_id": out.thread_id,
+        await self._emit({"type": "message", "thread_id": out.thread_id,
                           "speaker": _speaker_json(out.speaker), "text": out.text})
 
     def _media_event(self, out: Outbound) -> dict | None:

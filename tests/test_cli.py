@@ -164,3 +164,47 @@ def test_tui_reveals_frames_as_work_appears():
             assert app.query_one("#dash").has_class("show")
 
     asyncio.run(go())
+
+
+def test_tui_active_follows_dispatch_thread_switch():
+    """Finding 1 regression: after a typed /new (or /kill/reset), the on-screen thread
+    and the input-routing thread must stay in sync — self.active follows state.active."""
+    import pytest
+    pytest.importorskip("textual")
+    from beaboss.cli.tui import Cockpit
+
+    class FE:
+        async def new_direct(self, path, name):
+            return ("99", "proj")
+
+    async def builder(emit):
+        return FE(), CLITransport(emit), State()
+
+    async def go():
+        app = Cockpit(bot_name="X", engine_builder=builder)
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "/new /x proj"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.active == "99"          # view followed the new session
+            assert app.state.active == "99"
+
+    asyncio.run(go())
+
+
+def test_tui_snapshot_seeds_sidebar_on_restart():
+    """Finding 2 regression: the connect/rehydrate threads snapshot must seed the
+    sidebar so restarted workers are reachable (not silently dropped)."""
+    import pytest
+    pytest.importorskip("textual")
+    from beaboss.cli.tui import Cockpit
+
+    async def go():
+        app = Cockpit(bot_name="X", demo_events=[{"type": "threads", "threads": [
+            {"id": "general", "title": "🧭 Orchestrator", "open": True},
+            {"id": "7", "title": "⚙️ Nova · app", "open": True}]}])
+        async with app.run_test():
+            assert "7" in app.titles                                # rehydrated worker seeded
+            assert app.query_one("#sidebar").has_class("show")
+
+    asyncio.run(go())

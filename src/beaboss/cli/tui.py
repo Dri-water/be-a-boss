@@ -60,6 +60,7 @@ class Cockpit(App):
         self.msgs: dict[str, list[tuple[dict, str]]] = {OFFICE: []}
         self.titles: dict[str, str] = {OFFICE: "🧭 Orchestrator"}
         self.unread: dict[str, int] = {}
+        self._dash_text = ""
         self.active = OFFICE
         self.engine = self.transport = self.state = None
 
@@ -92,7 +93,15 @@ class Cockpit(App):
             self._ingest_thread(event)
         elif t == "dashboard":
             self._ingest_dashboard(event.get("text", ""))
-        # "busy"/"threads" snapshot: nothing to paint in this view
+        elif t == "threads":
+            # connect/rehydrate snapshot: seed the sidebar so restarted workers show
+            for th in event.get("threads", []):
+                if th["id"] != OFFICE:
+                    self.titles[th["id"]] = th["title"]
+                    self.msgs.setdefault(th["id"], [])
+            self._reveal_frames()
+            self._refresh_sidebar()
+        # "busy": nothing to paint in this view
 
     def _ingest_message(self, event: dict) -> None:
         tid = event.get("thread_id", OFFICE)
@@ -100,6 +109,11 @@ class Cockpit(App):
         if event.get("type") == "media":
             cap = f" — {event['caption']}" if event.get("caption") else ""
             text = f"🖼  [{event.get('kind')}: {event.get('filename')}]{cap}"
+        if tid != OFFICE and tid not in self.titles:
+            # a message for a thread we never got a `thread` event for → still list it
+            self.titles[tid] = tid
+            self._reveal_frames()
+            self._refresh_sidebar()
         self.msgs.setdefault(tid, []).append((event.get("speaker", {}), text))
         if tid == self.active:
             self._write(event.get("speaker", {}), text)
@@ -127,14 +141,20 @@ class Cockpit(App):
         else:
             self.titles[tid] = event["title"]
             self.msgs.setdefault(tid, [])
-        # the cockpit reveals its frames once there's more than the orchestrator
-        self.query_one("#sidebar").set_class(len(self.titles) > 1, "show")
+        self._reveal_frames()
         self._refresh_sidebar()
 
+    def _reveal_frames(self) -> None:
+        # the cockpit reveals its frames once there's more than the orchestrator —
+        # keyed on real state, not by parsing the dashboard text.
+        show = len(self.titles) > 1
+        self.query_one("#sidebar").set_class(show, "show")
+        self.query_one("#dash").set_class(show and bool(self._dash_text), "show")
+
     def _ingest_dashboard(self, text: str) -> None:
-        dash = self.query_one("#dash", Static)
-        dash.update(text)
-        dash.set_class(bool(text) and "idle —" not in text, "show")
+        self._dash_text = text
+        self.query_one("#dash", Static).update(text)
+        self._reveal_frames()
 
     def _refresh_sidebar(self) -> None:
         lv = self.query_one("#threads", ListView)
@@ -178,4 +198,13 @@ class Cockpit(App):
             self._write(you, line)
         if self.engine is not None:
             from .__main__ import handle_line
+            # self.active is the source of truth: route by what's on screen, then
+            # follow any thread switch the dispatch made (/new, /kill, /reset) so the
+            # view and the input target never drift apart.
+            self.state.active = self.active
             await handle_line(self.engine, self.transport, self.state, line)
+            if self.state.active != self.active:
+                self.active = self.state.active
+                self.unread.pop(self.active, None)
+                self._render_active()
+                self._refresh_sidebar()
