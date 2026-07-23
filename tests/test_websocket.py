@@ -97,7 +97,7 @@ def test_gate_rejects_bad_origin_and_missing_token():
     async def scenario():
         engine = FakeEngine()
         transport = WebSocketTransport()
-        gate = _gatekeeper("s3cret", {"null"})
+        gate = _gatekeeper("s3cret", {"null"}, {})
         async with serve(make_handler(engine, transport), "127.0.0.1", 0,
                          process_request=gate) as server:
             port = server.sockets[0].getsockname()[1]
@@ -122,6 +122,57 @@ def test_gate_rejects_bad_origin_and_missing_token():
                 async with websockets.connect(
                         f"{base}?token=s3cret",
                         additional_headers={"Origin": "https://evil.example"}):
+                    pass
+
+    asyncio.run(scenario())
+
+
+def _http_probe(base: str) -> dict:
+    """Blocking HTTP checks — run in an executor so they don't stall the loop the
+    server itself is running on."""
+    import urllib.error
+    import urllib.request
+    out: dict = {}
+    with urllib.request.urlopen(base + "/") as r:                 # "/" → index.html
+        out["index"] = (r.status, r.headers["Content-Type"], r.read())
+    with urllib.request.urlopen(base + "/client.js") as r:
+        out["js"] = (r.status, r.headers["Content-Type"])
+    try:
+        urllib.request.urlopen(base + "/nope")
+        out["missing"] = None
+    except urllib.error.HTTPError as e:
+        out["missing"] = e.code
+    return out
+
+
+def test_http_serves_app_shell_and_still_gates_ws():
+    """One port, two jobs: a plain browser GET is served the static shell; the
+    WebSocket upgrade is still refused without the token."""
+
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        assets = {
+            "/index.html": ("text/html; charset=utf-8",
+                            b"<!doctype html><title>be-a-boss</title>"),
+            "/client.js": ("text/javascript; charset=utf-8", b"window.beaboss={};"),
+        }
+        gate = _gatekeeper("s3cret", {"null"}, assets)
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0,
+                         process_request=gate) as server:
+            port = server.sockets[0].getsockname()[1]
+            probe = await asyncio.get_running_loop().run_in_executor(
+                None, _http_probe, f"http://127.0.0.1:{port}")
+
+            status, ctype, body = probe["index"]
+            assert status == 200 and ctype.startswith("text/html")
+            assert b"be-a-boss" in body                            # served the shell
+            assert probe["js"][1].startswith("text/javascript")    # right content-type
+            assert probe["missing"] == 404                         # unknown path → 404
+
+            # the capability is still gated: a wrong-token WS upgrade is refused
+            with pytest.raises(websockets.exceptions.InvalidStatus):
+                async with websockets.connect(f"ws://127.0.0.1:{port}?token=nope"):
                     pass
 
     asyncio.run(scenario())

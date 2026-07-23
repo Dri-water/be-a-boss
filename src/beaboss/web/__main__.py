@@ -53,19 +53,16 @@ def main() -> None:
     # what actually makes the localhost bind a boundary (a malicious web page you
     # visit can otherwise open ws://127.0.0.1 and drive the orchestrator).
     token = os.getenv("WEB_TOKEN", "").strip() or secrets.token_urlsafe(16)
-    # Print something the operator can actually open: an absolute file:// URL with
-    # the token already in it (set WEB_TOKEN to pin the token across restarts).
-    index = Path(__file__).resolve().parents[2] / "web" / "index.html"
-    suffix = "" if (host in {"127.0.0.1", "localhost", ""} and port == 8765) \
-        else f"&host={host}&port={port}"
+    # The server serves this same directory over HTTP, so the operator opens a real
+    # http:// URL (set WEB_TOKEN to pin the token across restarts).
+    web_dir = Path(__file__).resolve().parents[3] / "web"
+    display_host = host if host not in {"", "0.0.0.0", "::"} else "127.0.0.1"
     log.info("web UI token: %s", token)
-    if index.is_file():
-        log.info("open the UI → %s?token=%s%s", index.as_uri(), token, suffix)
-    else:
-        log.info("open web/index.html?token=%s%s in your browser", token, suffix)
+    log.info("open the UI → http://%s:%s/?token=%s", display_host, port, token)
 
     try:
-        asyncio.run(serve_forever(engine, transport, host, port, token))
+        asyncio.run(serve_forever(engine, transport, host, port, token,
+                                  web_dir if web_dir.is_dir() else None))
     except KeyboardInterrupt:
         pass
 

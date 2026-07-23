@@ -29,9 +29,12 @@ import base64
 import json
 import logging
 import mimetypes
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 
 from ..core.ports import SYSTEM, InboundMessage, Outbound, Speaker
 
@@ -306,8 +309,33 @@ def make_handler(engine, transport: WebSocketTransport):
     return handler
 
 
-def _gatekeeper(token: str, allowed_origins: set[str]):
-    """Reject the two ways a hostile client reaches a localhost WebSocket:
+_ASSET_TYPES = {".html": "text/html; charset=utf-8",
+                ".js": "text/javascript; charset=utf-8",
+                ".css": "text/css; charset=utf-8"}
+
+
+def _load_assets(web_dir: Path | None) -> dict[str, tuple[str, bytes]]:
+    """Read the app shell (index.html, client.js) into memory once, keyed by URL
+    path. Empty if no dir — then the port speaks WebSocket only, as before."""
+    assets: dict[str, tuple[str, bytes]] = {}
+    if web_dir is None:
+        return assets
+    for f in web_dir.glob("*"):
+        if f.is_file() and f.suffix in _ASSET_TYPES:
+            assets["/" + f.name] = (_ASSET_TYPES[f.suffix], f.read_bytes())
+    return assets
+
+
+def _gatekeeper(token: str, allowed_origins: set[str],
+                assets: dict[str, tuple[str, bytes]]):
+    """One port, two jobs.
+
+    A plain browser GET (no `Upgrade: websocket`) is served the app shell —
+    index.html / client.js — so the operator opens a real `http://…/?token=…` URL
+    instead of juggling a `file://` path. The shell is inert without a valid socket,
+    so it needs no auth of its own.
+
+    A WebSocket upgrade is the capability, and is gated on both:
 
     - a cross-origin BROWSER page (the CSWSH → drive-by-RCE vector): browsers send
       an honest Origin header, so anything not in our allowlist is refused;
@@ -317,6 +345,20 @@ def _gatekeeper(token: str, allowed_origins: set[str]):
     A localhost bind alone is NOT a boundary against either — this is.
     """
     def process_request(connection: ServerConnection, request):
+        is_ws = "websocket" in request.headers.get("Upgrade", "").lower()
+        if not is_ws:                       # ordinary HTTP → serve the static shell
+            path = urlsplit(request.path).path
+            if path == "/":
+                path = "/index.html"
+            asset = assets.get(path)
+            if asset is None:
+                return connection.respond(404, "not found\n")
+            ctype, body = asset
+            headers = Headers()
+            headers["Content-Type"] = ctype
+            headers["Content-Length"] = str(len(body))
+            return Response(200, "OK", headers, body)
+
         origin = request.headers.get("Origin")
         if origin is not None and origin not in allowed_origins:
             log.warning("web: refused connection from origin %r", origin)
@@ -330,15 +372,18 @@ def _gatekeeper(token: str, allowed_origins: set[str]):
 
 
 async def serve_forever(engine, transport: WebSocketTransport,
-                        host: str, port: int, token: str) -> None:
-    """Run the WebSocket server until cancelled, gated by Origin + handshake token."""
+                        host: str, port: int, token: str,
+                        web_dir: Path | None = None) -> None:
+    """Run the server until cancelled: WebSocket (Origin + token gated) plus the
+    static app shell over HTTP on the same port."""
     allowed = {"null", f"http://{host}:{port}",
                f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
+    assets = _load_assets(web_dir)
     try:  # show the idle status board from the moment we're up (parity with Telegram)
         await engine._refresh_dashboard()
     except Exception:  # noqa: BLE001
         pass
     async with serve(make_handler(engine, transport), host, port,
-                     process_request=_gatekeeper(token, allowed)):
+                     process_request=_gatekeeper(token, allowed, assets)):
         log.info("websocket transport listening on ws://%s:%s", host, port)
         await asyncio.Future()  # run forever
