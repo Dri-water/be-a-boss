@@ -2,7 +2,7 @@
 
 be-a-boss runs **coding-agent sessions (Claude Code or Codex) with
 `bypassPermissions`** — i.e. it executes code and shell commands on the host that
-runs it — driven from whichever surface you choose (Telegram, web, or VS Code).
+runs it — driven from whichever surface you choose (Telegram, web, or the CLI).
 Read this before deploying.
 
 ## Threat model
@@ -14,9 +14,10 @@ Read this before deploying.
    **setup mode** — every command except `/whoami` is refused, so it is never
    open-to-all — letting you learn your id (`/whoami`) and lock it down before
    granting access. This is the primary access control — keep it tight. Anyone can
-   *find* a public bot, but only allowlisted user IDs can drive it. (The web/VS Code
-   surface has no allowlist; it is guarded by a localhost-only bind **plus** a
-   per-connection token + same-origin check — see below.)
+   *find* a public bot, but only allowlisted user IDs can drive it. (The web surface
+   has no allowlist; it is guarded by a localhost-only bind **plus** a per-connection
+   token + same-origin check — see below. The CLI runs locally on the host, so it's
+   gated by whoever can run a process there.)
 2. **The container boundary.** Running in Docker (see README) is what makes
    `bypassPermissions` reasonable. Sessions can only touch what you mount — your
    projects at `/workspace` — not the rest of the host (SSH keys, credential
@@ -35,11 +36,22 @@ Read this before deploying.
    control of the deployment — `TELEGRAM_BOT_TOKEN`, `GH_TOKEN`/`GITHUB_TOKEN`,
    `WEB_TOKEN` — are stripped from every worker/agent process's environment, so a
    prompt-injected session can't read them out of `os.environ` and exfiltrate them.
-6. **Landing a change takes a human.** Workers commit only to their own
-   `worker/<id>` branch in an isolated worktree; merging to your base branch or
-   opening a PR happens **only** on an allowlisted human's `/approve`. The
-   orchestrator can *request* delivery but cannot authorize it — so an injected
-   orchestrator or worker can't talk the system into pushing to your repo.
+6. **Deploy braveness gates how work lands** (`DEPLOY_BRAVENESS`). Workers commit
+   only to their own `worker/<id>` branch in an isolated worktree; how that lands on
+   your base branch (merge / PR) depends on the mode:
+   - **`conservative`** — the hard gate: merging or opening a PR happens **only** on
+     an allowlisted human's `/approve`. The orchestrator can *request* delivery but
+     cannot authorize it, so an injected orchestrator or worker can't talk the system
+     into pushing to your repo. Choose this if you don't fully trust the inputs.
+   - **`balanced`** (the DEFAULT) — a *soft* gate: the orchestrator may land work
+     directly once it judges the boss told it to ("merge it", "ship it"). This is
+     convenient for solo/greenfield use, but it means a prompt-injected or confused
+     orchestrator that *believes* it was told to ship **can** land a change. Set
+     `DEPLOY_BRAVENESS=conservative` for the hard human gate.
+
+   In **both** modes a failed `run_checks` blocks delivery, and every safety guard
+   (clean checkout, right base branch, conflict-abort, never force-push) still
+   applies — braveness only softens the *authorization* step, never correctness.
 
 **What you are still exposed to:**
 

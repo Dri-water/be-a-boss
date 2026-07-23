@@ -51,15 +51,21 @@ orchestrator should help; `needs-decision` is escalated to you with a recommenda
 Finished work lives on the worker's branch; it outlives the worker. But it doesn't
 dead-end there. When a task is done, the orchestrator shows you the actual **diff**
 and the **real test result** (it runs your checks in the worker's copy — not "the
-worker says it passes"), then asks you to land it. Delivery is a **command you
-issue**: the orchestrator posts a `🚦` prompt and only your **`/approve <worker>`**
-actually merges or opens the PR — it can request, never authorize. Work whose checks
-failed can't be delivered at all until they're green. The route is either a **local
-merge** into the branch the worker forked from (deterministic; refuses a dirty or
-wrong-branch checkout; rolls back a conflict) or, if you've set up a GitHub remote +
-`gh`, a **pull request** you review and merge. You are always the gate; the
-orchestrator just picks the route from what your box can actually do (no `gh` → local
-merge). Nothing lands without your word.
+worker says it passes"), then lands it. How landing is *authorized* is set by
+`DEPLOY_BRAVENESS`:
+
+- **balanced** (the default) — the orchestrator merges/opens the PR directly once
+  you've clearly told it to ("merge it", "ship it", "just merge for now"). A natural,
+  conversational gate, right for solo/greenfield work.
+- **conservative** — delivery is a **command you issue**: the orchestrator posts a
+  `🚦` prompt and only your **`/approve <worker>`** actually merges or opens the PR —
+  it can request, never authorize. Choose this when you want the hard gate.
+
+Work whose checks failed can't be delivered at all until they're green, in **either**
+mode. The route is either a **local merge** into the branch the worker forked from
+(deterministic; refuses a dirty or wrong-branch checkout; rolls back a conflict) or,
+if you've set up a GitHub remote + `gh`, a **pull request** — the orchestrator picks
+the route from what your box can actually do (no `gh` → local merge).
 
 Dismissing a worker then cleans up its workspace **only if the work is committed**; a
 worker with un-committed changes is never quietly discarded — the tool refuses and

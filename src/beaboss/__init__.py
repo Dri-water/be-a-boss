@@ -2,7 +2,7 @@
 
 An orchestrator session hires and supervises worker sessions; each conversation is
 a visible, joinable thread. The core is transport-agnostic AND backend-agnostic:
-surfaces (Telegram, web, VS Code) and agent backends (Claude Code, Codex) are both
+surfaces (Telegram, web, CLI) and agent backends (Claude Code, Codex) are both
 pluggable adapters. The display persona is configurable via the BOT_NAME env var.
 """
 

@@ -626,8 +626,8 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
         raise SystemExit(
             "TELEGRAM_BOT_TOKEN is required to run the Telegram surface. Copy "
             ".env.example to .env and set it (get a token from @BotFather). "
-            "To drive be-a-boss from the browser or VS Code instead — no Telegram "
-            "token needed — run `python -m beaboss.web`."
+            "To drive be-a-boss from the browser or terminal instead — no Telegram "
+            "token needed — run `python -m beaboss.web` or `python -m beaboss.cli`."
         )
     if not settings.allowed_user_ids:
         # Empty allowlist is not fatal: _ok() already refuses everyone, so the bot

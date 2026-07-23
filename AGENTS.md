@@ -6,7 +6,7 @@ Guidance for AI agents working on this repo.
 
 A self-hosted **agent org** (persona via `BOT_NAME`): an orchestrator session
 hires/briefs/supervises worker sessions, each visible in its own thread. The core
-is **transport-agnostic AND backend-agnostic** — surfaces (Telegram, web, VS Code)
+is **transport-agnostic AND backend-agnostic** — surfaces (Telegram, web, CLI/TUI)
 and agent backends (Claude Code, Codex) are pluggable adapters. See
 [docs/architecture.md](docs/architecture.md) for the full picture.
 
@@ -14,7 +14,8 @@ and agent backends (Claude Code, Codex) are pluggable adapters. See
 
 ```
 transports/telegram.py    (adapter: topics ⇄ threads, header cards, commands)
-transports/websocket.py   (adapter: web app + VS Code, one shared client)
+transports/websocket.py   (adapter: the web app)
+transports/cli.py         (adapter: CLI --json + Textual cockpit; shared event protocol)
         │  InboundMessage ▲ Outbound (via core.ports.Transport)
         ▼                 │
 core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrator
@@ -67,7 +68,8 @@ core/engine.py  Engine ── routes inbound, owns the fleet, exposes orchestrat
 
 ```
 uv sync
-uv run python -m beaboss.web            # web / VS Code surface — no Telegram needed
+uv run python -m beaboss.web            # web surface — no Telegram needed
+uv run python -m beaboss.cli            # terminal cockpit (or `boss-cli`; --json for agents)
 # ...or the Telegram bot:
 cp .env.example .env                    # set TELEGRAM_BOT_TOKEN (allowlist via /whoami)
 uv run boss

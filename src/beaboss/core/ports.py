@@ -1,6 +1,6 @@
 """Contracts between the core engine and any chat transport.
 
-A transport (Telegram, Slack, VSCode…) implements Transport and forwards every
+A transport (Telegram, web, CLI, …) implements Transport and forwards every
 human message to the engine's `on_inbound`. The core never formats
 platform-specific text; the transport never holds session state.
 """

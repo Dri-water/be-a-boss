@@ -79,7 +79,7 @@ class Settings:
 
         # Telegram-specific fields are optional at the config layer: the web surface
         # needs neither, so requiring them here would force a Telegram token on a
-        # user who only wants the browser/VS Code surface. Each surface validates its
+        # user who only wants the browser/CLI surface. Each surface validates its
         # own needs instead — the Telegram surface requires a token and treats an
         # empty allowlist as setup mode (see transports/telegram.build_application).
         token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip() or None

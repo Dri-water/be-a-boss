@@ -48,7 +48,7 @@ thrown away.
 
 Only two things are pluggable, on purpose:
 
-- the **surface** — how you drive it (Telegram and web today; the protocol is UI-agnostic
+- the **surface** — how you drive it (Telegram, web, and CLI/TUI today; the protocol is UI-agnostic
 - the **agent backend** — what a worker actually runs (Claude Code and Codex today).
 
 Everything in between — the org logic, supervision, isolation — is one small core

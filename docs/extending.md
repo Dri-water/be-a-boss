@@ -22,8 +22,9 @@ A surface adapter does three things:
 That's the whole contract. The core never formats platform text; the adapter never
 holds session state. A new surface is a new adapter and **zero core changes**.
 
-- **Supported:** Telegram; a **WebSocket** surface driven by the bundled web app
-  (`python -m beaboss.web`) — or any UI you write against its tiny JSON protocol.
+- **Supported:** Telegram; a **WebSocket** surface (the bundled web app,
+  `python -m beaboss.web`); and a **CLI** (`boss-cli`) with an agent-drivable
+  `--json` mode and a Textual cockpit — all speaking the same tiny event protocol.
 - **Next:** Slack.
 
 ## Seam 2 — the agent backend

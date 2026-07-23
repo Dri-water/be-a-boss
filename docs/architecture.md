@@ -29,6 +29,7 @@ flowchart TB
     subgraph transports/
         TG[telegram adapter<br/>topics ⇄ threads, header cards]
         WS[websocket adapter<br/>web app / any UI]
+        CLI[cli adapter<br/>--json + cockpit TUI]
         SLACK[slack adapter<br/>next]
     end
     subgraph core/
@@ -138,15 +139,19 @@ repo's tests/build in the worker's worktree and returns the **real** exit code �
 verification, not the worker's word. The orchestrator surfaces the diff *and* the
 check result to the boss.
 
-Landing is a two-step **hard gate**, not a prompt convention an injected agent could
-talk its way past:
+How landing is **authorized** is set by `DEPLOY_BRAVENESS`:
 
-1. The orchestrator calls `deliver_worker(worker_id, method)`. This does **not**
-   land anything — it records a pending request and posts a `🚦` approval prompt to
-   the boss. A worker whose `run_checks` last **failed** is refused here outright.
-2. Only an allowlisted human's **`/approve <worker>`** executes the delivery. The
-   LLM has no path to authorize it (an injected orchestrator or worker can't forge a
-   human command), so it can't push to your repo on its own.
+- **`conservative`** — a two-step hard gate no injected agent can talk its way past:
+  `deliver_worker(worker_id, method)` does **not** land anything; it records a pending
+  request and posts a `🚦` prompt, and only an allowlisted human's **`/approve
+  <worker>`** executes the delivery. The LLM has no path to authorize it.
+- **`balanced`** (the default) — a soft gate: `deliver_worker` lands immediately,
+  trusting the orchestrator to call it only once the boss clearly said so. Convenient
+  for solo/greenfield; an injected orchestrator that *believes* it was told to ship
+  can land, which is the trade you opt into.
+
+A worker whose `run_checks` last **failed** is refused in **both** modes — braveness
+softens the *authorization* step, never correctness.
 
 The two routes:
 
@@ -160,7 +165,7 @@ The two routes:
   available only when a remote **and** an authenticated `gh` exist, else it degrades
   to a local merge.
 
-The split is deliberate: **capability is detected, policy is the orchestrator's, the
-boss is the gate.** `gh` auth presence *is* the config — no delivery-mode flag. Deeper
+The split is deliberate: **capability is detected** (`gh` auth presence decides
+whether `pr` is available), **authorization policy is `DEPLOY_BRAVENESS`**. Deeper
 policy (ship/scout task types, required reviewers) can layer on later; the core loop
-now verifies and lands work end to end.
+verifies and lands work end to end.

@@ -30,12 +30,14 @@ the core knows which one it's talking to.
 
 | | Supported now | Next |
 |---|---|---|
-| **Surface** — how you drive it | Telegram · **Web** (`python -m beaboss.web`) | Slack · your own UI over the WebSocket |
+| **Surface** — how you drive it | Telegram · **Web** (`python -m beaboss.web`) · **CLI / TUI** (`boss-cli`) | Slack · your own UI over the shared protocol |
 | **Agent backend** — what workers run | Claude Code · **Codex** (`BEABOSS_BACKEND=codex`) | — |
 
-The quickstart below covers **both** surfaces; the orchestrator + workers
+The quickstart below covers **all three** surfaces; the orchestrator + workers
 underneath are identical either way — swapping a surface or backend is an adapter,
-not a rewrite. That's the whole point of the core.
+not a rewrite. That's the whole point of the core. The CLI even ships an
+agent-drivable `--json` mode (drive the whole org from a pipe) and a self-assembling
+terminal cockpit (`pip install be-a-boss[tui]`).
 
 <p align="center">
   <img src="assets/screenshot-web.png" width="90%" alt="be-a-boss web app: the orchestrator delegates the login-500 fix to worker Nova and a dep audit to worker Kite; you watch and steer">
@@ -87,9 +89,11 @@ sender per message.
 - **Isolated git worktrees** — each worker on its own `worker/<name>` branch;
   parallel same-repo work never collides, and un-landed work is never deleted.
 - **Delivery, not dead-ends** — a finished worker's branch doesn't just sit there:
-  the orchestrator shows you the diff and, on your explicit OK, lands it — a
-  deterministic local **merge**, or a **PR** (`gh pr create`) when you've set up a
-  remote + `GH_TOKEN`. Capability is detected, you stay the merge gate.
+  the orchestrator shows you the diff and lands it — a deterministic local **merge**,
+  or a **PR** (`gh pr create`) when you've set up a remote + `GH_TOKEN`. How landing
+  is authorized is your call (`DEPLOY_BRAVENESS`): **balanced** (default) lets the
+  orchestrator land on your clear say-so ("merge it"); **conservative** requires an
+  explicit `/approve`. A failed `run_checks` blocks delivery in both.
 - **Checkpoint supervision** — workers run autonomously; the orchestrator is woken
   only at meaningful checkpoints (done / blocked / needs-decision / interjection),
   never per token. Wakes are coalesced to save tokens.
@@ -157,10 +161,12 @@ the standalone `claude` CLI, or the Codex CLI with `BEABOSS_BACKEND=codex`. See
 
 - **Web** — fastest to try: no accounts, nothing to register, runs on
   your box. **Start here** if you just want to see it work.
+- **CLI / TUI** — a terminal cockpit (`boss-cli`), and an agent-drivable `--json`
+  mode so a script or another agent can run the whole org from a pipe.
 - **Telegram** — an always-on bot you reach from your phone; its group topics
   become your agent threads. A few minutes of one-time setup.
 
-### Prerequisites (both surfaces)
+### Prerequisites (all surfaces)
 
 - **A [Claude Code](https://code.claude.com/docs/en/agent-sdk/overview) login** —
   workers run real agent sessions as you. (Prefer Codex? Set `BEABOSS_BACKEND=codex`.)
@@ -193,9 +199,29 @@ unless you set `WEB_ALLOW_INSECURE_BIND=1` and front it with your own auth) **an
 the per-connection **token + Origin check** above — so even other processes/pages on
 your own machine can't drive it. Reach a remote box over an SSH tunnel. Set
 `PROJECTS_ROOT` if you want bare project names to resolve somewhere other than your
-home dir.
+home dir. (Change the bind with `WEB_HOST` / `WEB_PORT`; default `127.0.0.1:8765`.)
 
-### Option B — Telegram (always-on bot)
+### Option B — CLI / TUI (no Telegram, no browser)
+
+Drive the org straight from a terminal:
+
+```bash
+uv run python -m beaboss.cli          # or:  boss-cli
+```
+
+By default (a real terminal) it opens the **cockpit** — a TUI that assembles itself
+as work happens (`pip install "be-a-boss[tui]"` for it; falls back to a plain
+coloured stream otherwise). Two more modes:
+
+- `--json` — newline-delimited JSON events on stdout, commands on stdin. This is how
+  **an agent or script drives the whole org** — the same event shapes the web surface
+  speaks. `echo '{"type":"message","thread_id":"general","text":"..."}' | boss-cli --json`
+- `--plain` — a simple coloured line stream (good for logs / dumb terminals).
+
+Set `PROJECTS_ROOT` / `STATE_DIR` as for the web surface. No token needed — the CLI
+runs locally, gated by who can run a process on the host.
+
+### Option C — Telegram (always-on bot)
 
 1. **Create the bot:** [@BotFather](https://t.me/BotFather) → `/newbot` → copy the
    token. **Add it as an Admin** (with **Manage Topics**) of a **supergroup that has
@@ -222,6 +248,7 @@ home dir.
 | `HOST_CLAUDE_DIR` | ✅ (Docker) | Host path to your `~/.claude`, mounted for auth |
 | `BOT_NAME` | – | Display persona (default `Orchestrator`) |
 | `TELEGRAM_CHAT_ID` | – | Pin the bot to one group (logged on first run) |
+| `DEPLOY_BRAVENESS` | – | How work lands: `balanced` (default; orchestrator merges on your say-so) or `conservative` (explicit `/approve` only) |
 | `AGENT_MODEL`, `AGENT_MAX_TURNS` | – | Backend-neutral session tuning (override per backend with `CLAUDE_*` / `CODEX_*`) |
 
 Docker mounts `HOST_DOCUMENTS` → `/workspace` and sets `PROJECTS_ROOT=/workspace`,
@@ -247,9 +274,12 @@ Commands in **General**:
 | Command | Effect |
 |---|---|
 | *(plain message)* | A goal for the orchestrator |
+| `/approve <id>` · `/reject <id>` | Land or decline a worker's delivery (needed in `conservative` mode) |
 | `/new <path> [name]` | A **direct** session (no orchestrator) in `<path>` |
 | `/list` | All threads (orchestrator, workers, direct) + status |
 | `/status` | Bot health |
+| `/setup` | Check the group is configured right |
+| `/reset` | Factory reset — wipe all memory + state (asks to confirm) |
 | `/whoami` | Your Telegram id + the chat id (handy for the allowlist) |
 
 In any **session/worker topic**:
@@ -305,9 +335,12 @@ open-to-all. The web surface binds to **localhost**, refuses a public bind
 unless you explicitly opt in (`WEB_ALLOW_INSECURE_BIND=1`), and requires a
 per-connection **token + same-origin check** so nothing else on the machine can drive
 it. Worker subprocesses run with the bot's own secrets (`TELEGRAM_BOT_TOKEN`,
-`GH_TOKEN`, `WEB_TOKEN`) **scrubbed from their environment**, and landing a change
-takes an explicit human **`/approve`** — the orchestrator can request delivery but
-can't merge or open a PR by itself. Either way, sessions can only touch what you
+`GH_TOKEN`, `WEB_TOKEN`) **scrubbed from their environment**. How a change *lands* is
+governed by `DEPLOY_BRAVENESS`: **conservative** requires an explicit human
+**`/approve`** (the orchestrator can request but can't merge by itself), while
+**balanced** (the default) lets it land on your clear say-so — convenient, but a soft
+gate; set `conservative` when you don't fully trust the inputs. A failed `run_checks`
+blocks delivery either way. And whatever the mode, sessions can only touch what you
 mount (`/workspace`), not the rest of your host.
 
 ## Caveats
@@ -339,13 +372,16 @@ src/beaboss/
     session.py           CoreSession — one agent session, posts via a callback
     agent_backend.py     backend seam: Claude Code (default) | Codex
     engine.py            Engine — orchestrator, fleet tools, checkpoint inbox
+    prompts.py           the org's system prompts (incl. the deploy-mode rules)
     worktrees.py         isolated git worktrees (fail-closed teardown)
     store.py             restart-proof thread/fleet state
     names.py             worker name pool
   transports/
     telegram.py          topics ⇄ threads, header-card identities, commands
     websocket.py         browser surface (any UI can speak this protocol)
+    cli.py               CLI transport — emits the shared JSON event protocol
   web/__main__.py        `python -m beaboss.web` — serve the WebSocket surface
+  cli/                   terminal surface: __main__.py (json/plain) + tui.py (cockpit)
 web/                     static web app (index.html + client.js)
 ```
 
