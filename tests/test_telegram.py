@@ -63,11 +63,35 @@ def test_post_normal_message_not_truncated():
 
 
 class RecordingBot:
-    def __init__(self):
+    def __init__(self, reject_html: bool = False):
         self.calls: list[dict] = []
+        self.reject_html = reject_html
 
     async def send_message(self, **kwargs):
+        if kwargs.get("parse_mode") == "HTML" and self.reject_html:
+            from telegram.error import BadRequest
+            raise BadRequest("can't parse entities")
         self.calls.append(kwargs)
+
+
+def test_post_renders_html_with_plain_fallback():
+    """Messages go out as Telegram HTML (real code formatting); if Telegram rejects
+    the entities, the exact same text is re-sent plain — never dropped."""
+    bot = RecordingBot()
+    t = TelegramTransport(bot, _settings())
+    asyncio.run(t.post(Outbound(
+        thread_id="general", speaker=Speaker(role="direct", name="d"),
+        text="see `x<y` here")))
+    assert bot.calls[0]["parse_mode"] == "HTML"
+    assert "<code>x&lt;y</code>" in bot.calls[0]["text"]
+
+    picky = RecordingBot(reject_html=True)
+    t2 = TelegramTransport(picky, _settings())
+    asyncio.run(t2.post(Outbound(
+        thread_id="general", speaker=Speaker(role="direct", name="d"),
+        text="plain please")))
+    assert picky.calls[0].get("parse_mode") is None   # fell back
+    assert picky.calls[0]["text"] == "plain please"
 
 
 def test_route_maps_dm_general_and_topic():

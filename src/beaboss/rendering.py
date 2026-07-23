@@ -1,12 +1,20 @@
 """Turn Claude Agent SDK messages into Telegram-ready text.
 
 Kept as pure functions (SDK message -> list[str]) so they're trivially testable
-and decoupled from the transport. We send plain text (no parse_mode) on purpose:
-Claude's output is full of backticks/underscores/asterisks that routinely break
-Telegram's Markdown/HTML entity parser and cause 400s. Robustness > prettiness.
+and decoupled from the transport.
+
+Formatting: Claude's output is markdown-ish. Telegram's MarkdownV2 is a minefield
+(unescaped `_`/`*` anywhere → 400), but its HTML mode is forgiving: only <, > and &
+need escaping, and stray markdown characters are harmless literals. So the
+transport renders with `to_telegram_html` (code fences → <pre>, inline code →
+<code>, **bold** → <b>, headers → bold, links → <a>) and falls back to plain text
+if Telegram still rejects a message — pretty by default, robust always.
 """
 
 from __future__ import annotations
+
+import html as _html
+import re
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -94,7 +102,12 @@ def render_result(msg: ResultMessage) -> list[str]:
 
 
 def chunk(text: str, size: int = _CHUNK) -> list[str]:
-    """Split a long string into Telegram-sized pieces, preferring newline breaks."""
+    """Split a long string into Telegram-sized pieces, preferring newline breaks.
+
+    Fence-aware: a chunk that would end inside an open ``` block gets the fence
+    closed, and the next chunk reopens it — so every piece renders as valid
+    formatting on its own.
+    """
     if len(text) <= size:
         return [text]
     pieces: list[str] = []
@@ -103,8 +116,60 @@ def chunk(text: str, size: int = _CHUNK) -> list[str]:
         cut = remaining.rfind("\n", 0, size)
         if cut <= 0:
             cut = size
-        pieces.append(remaining[:cut])
-        remaining = remaining[cut:].lstrip("\n")
+        piece, remaining = remaining[:cut], remaining[cut:].lstrip("\n")
+        if piece.count("```") % 2 == 1:  # split fell inside a code block
+            piece += "\n```"
+            remaining = "```\n" + remaining
+        pieces.append(piece)
     if remaining:
         pieces.append(remaining)
     return pieces
+
+
+# --- Telegram HTML rendering ---------------------------------------------------
+
+
+def _md_inline(text: str) -> str:
+    """Convert bold/headers/links in already-HTML-escaped text."""
+    text = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)", r'<a href="\2">\1</a>', text)
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", text)
+    return text
+
+
+def _inline_html(text: str) -> str:
+    """Escape a non-code segment, then convert inline code + simple markdown."""
+    text = _html.escape(text)
+    out: list[str] = []
+    last = 0
+    for m in re.finditer(r"`([^`\n]+)`", text):
+        out.append(_md_inline(text[last:m.start()]))
+        out.append(f"<code>{m.group(1)}</code>")
+        last = m.end()
+    out.append(_md_inline(text[last:]))
+    return "".join(out)
+
+
+_FENCE = re.compile(r"```([^\n`]*)\n(.*?)(?:```|\Z)", re.DOTALL)
+
+
+def to_telegram_html(text: str) -> str:
+    """Render markdown-ish agent output as Telegram HTML.
+
+    Only constructs we can match with certainty are converted; everything else is
+    escaped literal text, so a stray `_` or `*` can never break the message. The
+    transport still falls back to plain text if Telegram rejects the result.
+    """
+    parts: list[str] = []
+    pos = 0
+    for m in _FENCE.finditer(text):
+        parts.append(_inline_html(text[pos:m.start()]))
+        code = _html.escape(m.group(2).rstrip("\n"))
+        lang = m.group(1).strip()
+        if lang:
+            parts.append(f'<pre><code class="language-{_html.escape(lang)}">{code}</code></pre>')
+        else:
+            parts.append(f"<pre>{code}</pre>")
+        pos = m.end()
+    parts.append(_inline_html(text[pos:]))
+    return "".join(parts)

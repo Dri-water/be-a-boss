@@ -103,6 +103,7 @@ class CoreSession:
         extra_mcp_servers: dict[str, Any] | None = None,
         max_turns: int | None = None,
         backend: AgentBackend | None = None,
+        final_only: bool = False,
     ):
         self.thread_id = thread_id
         self.cwd = cwd
@@ -116,6 +117,11 @@ class CoreSession:
         self._tap = tap
         self._extra_mcp = extra_mcp_servers or {}
         self._max_turns = max_turns
+        # final_only: post ONE message per turn — the final reply — instead of
+        # streaming every text block, tool line, and cost footer. Used for the
+        # orchestrator, who should text the boss like a person, not narrate.
+        # (Workers keep streaming into their topics: that's the glass wall.)
+        self._final_only = final_only
         # The agent runtime is a swappable seam; default to the Claude Code SDK.
         self._backend = backend or ClaudeAgentBackend(self._build_options)
         self._queue: asyncio.Queue[Turn] = asyncio.Queue()
@@ -368,15 +374,25 @@ class CoreSession:
                 if sid:
                     self._capture_session_id(sid)
             elif isinstance(message, AssistantMessage):
-                for piece in rendering.render_assistant(message):
-                    await self._emit_text(piece)
+                if not self._final_only:
+                    for piece in rendering.render_assistant(message):
+                        await self._emit_text(piece)
             elif isinstance(message, ResultMessage):
                 if message.session_id:
                     self._capture_session_id(message.session_id)
                 self.turns += 1
                 result = message
-                for piece in rendering.render_result(message):
-                    await self._emit_text(piece)
+                if self._final_only:
+                    # One clean message: the final reply. Errors still surface;
+                    # the success footer (turn count / cost) is noise here.
+                    if message.is_error or (message.subtype and message.subtype != "success"):
+                        for piece in rendering.render_result(message):
+                            await self._emit_text(piece)
+                    elif (message.result or "").strip():
+                        await self._emit_text(message.result.strip())
+                else:
+                    for piece in rendering.render_result(message):
+                        await self._emit_text(piece)
 
         if result is not None and self.on_turn_done is not None:
             try:

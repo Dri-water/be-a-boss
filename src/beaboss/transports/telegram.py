@@ -25,11 +25,13 @@ from telegram.ext import (
     filters,
 )
 
+from telegram.error import BadRequest
+
 from ..config import Settings
 from ..core.engine import Engine
 from ..core.ports import InboundMessage, MediaIn, Outbound, SYSTEM
 from ..core.store import CoreStore
-from ..rendering import chunk
+from ..rendering import chunk, to_telegram_html
 
 log = logging.getLogger("beaboss.transport.telegram")
 
@@ -144,8 +146,16 @@ class TelegramTransport:
                 f"… ✂️ truncated — {omitted} more part(s) omitted (too long for chat). "
                 f"If you need the whole thing, ask for it as a file."]
         for part in parts:
-            await self.bot.send_message(
-                chat_id=chat_id, message_thread_id=topic_id, text=part)
+            # Pretty by default (Telegram HTML: real code blocks, bold, links),
+            # plain-text fallback if Telegram rejects the entities — never drop
+            # a message over formatting.
+            try:
+                await self.bot.send_message(
+                    chat_id=chat_id, message_thread_id=topic_id,
+                    text=to_telegram_html(part), parse_mode="HTML")
+            except BadRequest:
+                await self.bot.send_message(
+                    chat_id=chat_id, message_thread_id=topic_id, text=part)
 
     async def indicate_busy(self, thread_id: str) -> None:
         chat_id, topic_id = self._route(thread_id)

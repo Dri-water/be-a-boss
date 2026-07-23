@@ -188,7 +188,10 @@ def test_orchestrator_message_routes_plain(tmp_path):
     fake = FakeSession()
     engine.sessions["general"] = fake
     asyncio.run(engine.on_inbound(InboundMessage(thread_id="general", text="status?")))
-    assert fake.submitted == ["status?"]
+    assert len(fake.submitted) == 1
+    # every boss turn is grounded in code-generated fleet truth
+    assert fake.submitted[0].startswith("[fleet right now: no workers exist]")
+    assert fake.submitted[0].endswith("status?")
 
 
 def test_spawn_worker_worktree_failure_is_clean(tmp_path, monkeypatch):
@@ -243,8 +246,11 @@ def test_dm_message_routes_to_one_orchestrator_replying_in_the_dm(tmp_path):
 
     asyncio.run(engine.on_inbound(InboundMessage(thread_id="dm:42", text="change the button")))
 
-    # went to the ONE orchestrator session, carrying the DM as its reply target
-    assert fake.submitted == ["change the button"]
+    # went to the ONE orchestrator session, carrying the DM as its reply target,
+    # grounded with the live fleet snapshot
+    assert len(fake.submitted) == 1
+    assert "[fleet right now:" in fake.submitted[0]
+    assert fake.submitted[0].endswith("change the button")
     assert fake.reply_tos == ["dm:42"]
 
 

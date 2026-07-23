@@ -73,7 +73,14 @@ ORCHESTRATOR_APPEND = (
     "3. Never dismiss a worker whose work isn't committed/landed — a refused "
     "teardown is a stop-and-investigate, not an obstacle.\n"
     "4. Report outcomes faithfully. If work failed, say so plainly with the "
-    "evidence.\n\n"
+    "evidence.\n"
+    "5. NEVER claim an action you have not taken. 'Nova is on it' is only true if "
+    "spawn_worker/message_worker actually returned success — in this turn, or "
+    "visible in the [fleet right now: …] line that accompanies each message from "
+    "the boss (that line is code-generated ground truth; trust it over your "
+    "memory). When the boss asks for something, CALL THE TOOL in the same turn, "
+    "then report what actually happened — or say plainly that you haven't started. "
+    "A claimed action that didn't happen is the worst possible failure.\n\n"
     "Where you work:\n"
     "- The boss talks to you in the group's #general or by DM — same you either way; "
     "just reply wherever they spoke (a DM keeps small talk out of #general).\n"
@@ -277,6 +284,18 @@ class Engine:
         you used, so a DM keeps chatter out of #general — no separate 'office'."""
         return thread_id == self.main_thread or thread_id.startswith("dm:")
 
+    def _fleet_snapshot(self) -> str:
+        """One compact line of ground truth, injected into every boss turn."""
+        rows = []
+        for tid, rec in self.store.workers().items():
+            if rec.worker_status == "dismissed":
+                continue
+            live = self.sessions.get(tid)
+            run = live.status if live else "dormant"
+            state = rec.worker_status or "working"
+            rows.append(f"{rec.worker_id}={state}/{run} on {Path(rec.repo).name}")
+        return "; ".join(rows) if rows else "no workers exist"
+
     # ---- inbound routing -------------------------------------------------
 
     async def on_inbound(self, msg: InboundMessage) -> None:
@@ -288,10 +307,14 @@ class Engine:
                 self.main_thread, self.store.get(self.main_thread))
             if session is None:
                 return
+            # Ground every boss turn in reality: a code-generated snapshot of the
+            # actual fleet rides along with the message, so the orchestrator can't
+            # honestly claim "Nova is on it" when no one is.
+            text = f"[fleet right now: {self._fleet_snapshot()}]\n{msg.text}"
             if msg.media:
-                await session.submit_media(msg.text, msg.media, reply_to=msg.thread_id)
+                await session.submit_media(text, msg.media, reply_to=msg.thread_id)
             else:
-                await session.submit(msg.text, reply_to=msg.thread_id)
+                await session.submit(text, reply_to=msg.thread_id)
             return
 
         rec = self.store.get(msg.thread_id)
@@ -406,6 +429,7 @@ class Engine:
             on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
             system_append=append,
             extra_mcp_servers={"fleet": self._build_fleet_server()},
+            final_only=True,  # text the boss one clean reply, don't narrate
         )
 
     def _make_worker_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:

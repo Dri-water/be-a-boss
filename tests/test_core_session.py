@@ -185,6 +185,36 @@ def test_fake_backend_drives_a_turn(tmp_path):
     assert done and done[0].session_id == "sess-xyz"
 
 
+def test_final_only_session_posts_one_clean_reply(tmp_path):
+    """The orchestrator texts like a person: ONE message per turn — the final
+    reply — no streamed narration, no tool lines, no cost footer."""
+    post = SinkPost()
+    backend = FakeBackend([
+        AssistantMessage(content=[TextBlock(text="let me check the fleet…")], model="fake"),
+        AssistantMessage(content=[TextBlock(text="spawning now")], model="fake"),
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=3, session_id="s1", total_cost_usd=0.02,
+            result="Nova is hired and working on it.",
+        ),
+    ])
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+
+    async def drive():
+        await sess.start()
+        await sess.submit("hire someone")
+        await sess._queue.join()
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert [o.text for o in post.out] == ["Nova is hired and working on it."]
+
+
 class HangingBackend(FakeBackend):
     """receive() blocks forever without ending the turn — a wedged agent."""
 

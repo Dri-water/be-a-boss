@@ -88,3 +88,31 @@ def test_chunk_hard_split_without_newline():
     assert len(parts) == 3
     assert all(len(p) <= 3900 for p in parts)
     assert "".join(parts) == "x" * 9000
+
+
+def test_to_telegram_html_code_bold_and_escaping():
+    out = rendering.to_telegram_html(
+        "Run `npm test` now:\n```py\nif a < b & c:\n    pass\n```\ndone **ok** _plain_")
+    assert "<code>npm test</code>" in out
+    assert '<pre><code class="language-py">' in out
+    assert "a &lt; b &amp; c" in out       # escaped inside the fence
+    assert "<b>ok</b>" in out
+    assert "_plain_" in out                 # stray underscores stay harmless literals
+    assert "```" not in out
+
+
+def test_to_telegram_html_plain_text_unchanged():
+    assert rendering.to_telegram_html("just words") == "just words"
+
+
+def test_to_telegram_html_unclosed_fence_still_valid():
+    out = rendering.to_telegram_html("look:\n```\ncode without closing")
+    assert out.count("<pre>") == 1 and out.count("</pre>") == 1
+
+
+def test_chunk_reopens_code_fences_across_pieces():
+    text = "intro\n```\n" + ("x" * 120 + "\n") * 4 + "```\nafter"
+    pieces = rendering.chunk(text, size=200)
+    assert len(pieces) > 1
+    for p in pieces:
+        assert p.count("```") % 2 == 0      # every piece renders valid on its own
