@@ -213,7 +213,7 @@ you want bare project names to resolve somewhere other than your home dir.
 | `HOST_CLAUDE_DIR` | ✅ (Docker) | Host path to your `~/.claude`, mounted for auth |
 | `BOT_NAME` | – | Display persona (default `Orchestrator`) |
 | `TELEGRAM_CHAT_ID` | – | Pin the bot to one group (logged on first run) |
-| `CLAUDE_MODEL`, `CLAUDE_MAX_TURNS` | – | Session tuning |
+| `AGENT_MODEL`, `AGENT_MAX_TURNS` | – | Backend-neutral session tuning (override per backend with `CLAUDE_*` / `CODEX_*`) |
 
 Docker mounts `HOST_DOCUMENTS` → `/workspace` and sets `PROJECTS_ROOT=/workspace`,
 so `/new myapp` targets `/workspace/myapp`. Use forward slashes on all platforms

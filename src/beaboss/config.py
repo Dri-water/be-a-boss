@@ -38,6 +38,21 @@ def _parse_int_env(name: str, raw: str, example: str) -> int:
         ) from None
 
 
+def _agent_setting(knob: str, backend: str) -> tuple[str, str]:
+    """Resolve a backend-neutral agent tuning knob.
+
+    The canonical name is ``AGENT_<KNOB>`` (e.g. AGENT_MODEL) — the backend
+    distinction is never first-class. A harness-specific ``<BACKEND>_<KNOB>``
+    (e.g. CLAUDE_MODEL, CODEX_MODEL) overrides it, but only when that backend is
+    active. Returns (value, source_var) so errors can name the var actually used.
+    """
+    specific_name = f"{backend.upper()}_{knob}"
+    specific = os.getenv(specific_name, "").strip()
+    if specific:
+        return specific, specific_name
+    return os.getenv(f"AGENT_{knob}", "").strip(), f"AGENT_{knob}"
+
+
 @dataclass
 class Settings:
     bot_token: str | None
@@ -66,7 +81,14 @@ class Settings:
         allowed = _parse_ids(os.getenv("TELEGRAM_ALLOWED_USER_IDS", ""))
 
         chat_raw = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-        max_turns_raw = os.getenv("CLAUDE_MAX_TURNS", "").strip()
+
+        # Agent tuning is backend-neutral (AGENT_*), with optional per-backend
+        # overrides (CLAUDE_*/CODEX_*) that win only when that backend is active.
+        backend = os.getenv("BEABOSS_BACKEND", "").strip().lower() or "claude"
+        model, _ = _agent_setting("MODEL", backend)
+        cli_path, _ = _agent_setting("CLI_PATH", backend)
+        perm, _ = _agent_setting("PERMISSION_MODE", backend)
+        max_turns_raw, max_turns_var = _agent_setting("MAX_TURNS", backend)
 
         return cls(
             bot_token=token,
@@ -74,14 +96,13 @@ class Settings:
             chat_id=_parse_int_env("TELEGRAM_CHAT_ID", chat_raw, "-100123456789")
             if chat_raw
             else None,
-            permission_mode=os.getenv("CLAUDE_PERMISSION_MODE", "bypassPermissions").strip()
-            or "bypassPermissions",
+            permission_mode=perm or "bypassPermissions",
             projects_root=Path(
                 os.getenv("PROJECTS_ROOT", str(Path.home()))
             ).expanduser(),
-            cli_path=(os.getenv("CLAUDE_CLI_PATH", "").strip() or None),
-            model=(os.getenv("CLAUDE_MODEL", "").strip() or None),
-            max_turns=_parse_int_env("CLAUDE_MAX_TURNS", max_turns_raw, "12")
+            cli_path=(cli_path or None),
+            model=(model or None),
+            max_turns=_parse_int_env(max_turns_var, max_turns_raw, "12")
             if max_turns_raw
             else None,
             state_dir=Path(os.getenv("STATE_DIR", "state")).expanduser(),
@@ -92,5 +113,5 @@ class Settings:
                 if "SESSION_SYSTEM_APPEND" in os.environ
                 else None
             ),
-            agent_backend=(os.getenv("BEABOSS_BACKEND", "").strip().lower() or "claude"),
+            agent_backend=backend,
         )

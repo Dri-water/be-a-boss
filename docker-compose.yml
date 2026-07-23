@@ -11,7 +11,7 @@ services:
       # Container-side overrides (these win over .env). Paths are INSIDE the container.
       PROJECTS_ROOT: /workspace
       STATE_DIR: /data
-      CLAUDE_PERMISSION_MODE: bypassPermissions
+      AGENT_PERMISSION_MODE: bypassPermissions
     volumes:
       # Your repos, shared with the host. On Windows this is a bind mount over the
       # WSL2 boundary — fine for edit/commit/run; hot-reload file-watching can lag.

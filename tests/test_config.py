@@ -6,8 +6,10 @@ from beaboss.transports.telegram import build_application
 
 _KEYS = [
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_IDS", "TELEGRAM_CHAT_ID", "BOT_NAME",
-    "CLAUDE_PERMISSION_MODE", "PROJECTS_ROOT", "CLAUDE_CLI_PATH", "CLAUDE_MODEL",
-    "CLAUDE_MAX_TURNS", "STATE_DIR", "SESSION_SYSTEM_APPEND",
+    "PROJECTS_ROOT", "STATE_DIR", "SESSION_SYSTEM_APPEND", "BEABOSS_BACKEND",
+    "AGENT_PERMISSION_MODE", "AGENT_MODEL", "AGENT_MAX_TURNS", "AGENT_CLI_PATH",
+    "CLAUDE_PERMISSION_MODE", "CLAUDE_MODEL", "CLAUDE_MAX_TURNS", "CLAUDE_CLI_PATH",
+    "CODEX_PERMISSION_MODE", "CODEX_MODEL", "CODEX_MAX_TURNS", "CODEX_CLI_PATH",
 ]
 
 
@@ -116,3 +118,41 @@ def test_overrides(clean_env, monkeypatch):
     assert s.chat_id == -100123
     assert s.max_turns == 12
     assert s.session_system_append == ""
+
+
+def test_agent_neutral_tuning(clean_env, monkeypatch):
+    # Backend-neutral names are first-class — no CLAUDE_*/CODEX_* needed.
+    monkeypatch.setenv("AGENT_MODEL", "some-model")
+    monkeypatch.setenv("AGENT_MAX_TURNS", "9")
+    monkeypatch.setenv("AGENT_PERMISSION_MODE", "acceptEdits")
+    s = Settings.from_env(clean_env)
+    assert s.model == "some-model"
+    assert s.max_turns == 9
+    assert s.permission_mode == "acceptEdits"
+
+
+def test_backend_override_beats_neutral(clean_env, monkeypatch):
+    # A harness-specific override wins over the neutral name for the active backend.
+    monkeypatch.setenv("AGENT_MODEL", "neutral-model")
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-model")  # backend defaults to claude
+    s = Settings.from_env(clean_env)
+    assert s.model == "claude-model"
+
+
+def test_override_is_scoped_to_active_backend(clean_env, monkeypatch):
+    # Under Codex, CODEX_* wins and CLAUDE_* is ignored — neither backend is first-class.
+    monkeypatch.setenv("BEABOSS_BACKEND", "codex")
+    monkeypatch.setenv("AGENT_MODEL", "neutral-model")
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-model")
+    monkeypatch.setenv("CODEX_MODEL", "codex-model")
+    s = Settings.from_env(clean_env)
+    assert s.agent_backend == "codex"
+    assert s.model == "codex-model"
+
+
+def test_neutral_max_turns_error_names_agent_var(clean_env, monkeypatch):
+    # A bad neutral value is reported against the neutral var name.
+    monkeypatch.setenv("AGENT_MAX_TURNS", "lots")
+    with pytest.raises(SystemExit) as excinfo:
+        Settings.from_env(clean_env)
+    assert "AGENT_MAX_TURNS" in str(excinfo.value)
