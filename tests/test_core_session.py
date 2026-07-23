@@ -169,6 +169,64 @@ def test_fake_backend_drives_a_turn(tmp_path):
     assert done and done[0].session_id == "sess-xyz"
 
 
+class HangingBackend(FakeBackend):
+    """receive() blocks forever without ending the turn — a wedged agent."""
+
+    def receive(self):
+        async def gen():
+            await asyncio.Event().wait()  # never fires
+            yield  # unreachable
+        return gen()
+
+
+def test_turn_idle_timeout_recovers_a_wedged_backend(tmp_path):
+    """A backend that hangs mid-turn must not pin the session in 'busy' forever:
+    the idle timeout interrupts, reports it, and reconnects."""
+    post = SinkPost()
+    backend = HangingBackend([])
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend,
+    )
+    sess.TURN_IDLE_TIMEOUT = 0.05  # trip fast
+
+    async def drive():
+        await sess.start()
+        await sess.submit("do something")
+        await sess._queue.join()  # resolves via timeout, does NOT hang
+        await sess.stop()
+
+    asyncio.run(asyncio.wait_for(drive(), timeout=5))
+    assert backend.interrupted >= 1                   # the wedged turn was interrupted
+    assert any("wedged" in o.text for o in post.out)  # legible
+    assert backend.started >= 2                        # reconnected after the timeout
+    assert sess.status != "busy"                        # not stuck busy
+
+
+def test_alive_reflects_worker_and_status(tmp_path):
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
+        settings=_settings(tmp_path), post=SinkPost(), busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=FakeBackend([]),
+    )
+    assert sess.alive is False  # not started → no run task
+
+    async def drive():
+        await sess.start()
+        assert sess.alive is True          # run task consuming
+        sess.status = "error"              # a failed reconnect
+        assert sess.alive is False         # terminal error → unhealthy
+        sess.status = "idle"
+        await sess.stop()
+        await asyncio.sleep(0.05)          # let the cancellation settle
+        assert sess.alive is False         # run task gone → unhealthy
+
+    asyncio.run(drive())
+
+
 def test_tool_send_posts_outbound_with_speaker(tmp_path):
     post = SinkPost()
     sess = _session(tmp_path, post=post)

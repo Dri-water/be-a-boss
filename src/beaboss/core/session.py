@@ -81,6 +81,12 @@ TapFn = Callable[[str, str, str], Awaitable[None]]  # (thread_id, kind, text)
 class CoreSession:
     """A live coding-agent session that posts as `speaker` into `thread_id`."""
 
+    # A wedged backend (no events, never ends the turn) must not pin a session in
+    # "busy" forever. If nothing arrives for this long, the turn is treated as hung
+    # and the session interrupts + reconnects. Generous, so a long-but-active tool
+    # call (a slow build/test that streams no events) isn't killed.
+    TURN_IDLE_TIMEOUT = 900
+
     def __init__(
         self,
         thread_id: str,
@@ -257,6 +263,14 @@ class CoreSession:
             except Exception as e:  # noqa: BLE001
                 log.warning("interrupt failed thread=%s: %s", self.thread_id, e)
 
+    @property
+    def alive(self) -> bool:
+        """Healthy = the run loop is still consuming turns and the session isn't in a
+        terminal error state. The engine uses this to avoid handing back a zombie (a
+        run task that died, or a session that couldn't reconnect)."""
+        return (self.status != "error"
+                and self._worker is not None and not self._worker.done())
+
     # ---- messaging -------------------------------------------------------
 
     async def submit(self, text: str) -> None:
@@ -308,10 +322,14 @@ class CoreSession:
                 raise
             except Exception as e:  # noqa: BLE001
                 log.exception("turn failed thread=%s", self.thread_id)
-                await self._emit_text(f"⚠️ session error: {e}")
+                # best-effort: a failing post here (e.g. the thread was deleted) must
+                # never escape and kill this loop — that would strand the session.
+                await self._safe_emit(f"⚠️ session error: {e}")
                 await self._try_reconnect()
             finally:
-                if self.status != "stopped":
+                # Don't clobber a terminal "error" (a failed reconnect) back to idle,
+                # or a dead session masquerades as healthy and keeps being reused.
+                if self.status not in ("stopped", "error"):
                     self.status = "idle"
                 self._queue.task_done()
 
@@ -320,7 +338,23 @@ class CoreSession:
         await self._backend.send(turn)
 
         result: ResultMessage | None = None
-        async for message in self._backend.receive():
+        stream = self._backend.receive().__aiter__()
+        while True:
+            try:
+                message = await asyncio.wait_for(
+                    stream.__anext__(), timeout=self.TURN_IDLE_TIMEOUT)
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                # No event for TURN_IDLE_TIMEOUT — the backend is wedged. Interrupt
+                # and raise; _run reports it plainly and reconnects the session.
+                try:
+                    await self._backend.interrupt()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise RuntimeError(
+                    f"no response from the agent for {self.TURN_IDLE_TIMEOUT}s "
+                    f"(turn wedged) — reconnecting")
             if isinstance(message, SystemMessage) and message.subtype == "init":
                 sid = message.data.get("session_id")
                 if sid:
@@ -355,6 +389,15 @@ class CoreSession:
             except Exception:  # noqa: BLE001
                 log.exception("tap failed thread=%s", self.thread_id)
 
+    async def _safe_emit(self, text: str) -> None:
+        """Emit that can never raise — used on error paths so a failing post (e.g. a
+        deleted thread) can't escape and kill the session's run loop."""
+        try:
+            await self._emit_text(text)
+        except Exception:  # noqa: BLE001
+            log.warning("could not post to thread=%s (dropped): %s",
+                        self.thread_id, text[:80])
+
     async def _try_reconnect(self) -> None:
         if self.status == "stopped":
             return
@@ -369,7 +412,7 @@ class CoreSession:
         except Exception as e:  # noqa: BLE001
             self.status = "error"
             log.exception("reconnect failed thread=%s", self.thread_id)
-            await self._emit_text(f"⚠️ could not reconnect the session: {e}")
+            await self._safe_emit(f"⚠️ could not reconnect the session: {e}")
 
     # ---- helpers ---------------------------------------------------------
 

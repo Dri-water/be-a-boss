@@ -69,6 +69,7 @@ class FakeSession:
         self.media: list[tuple[str, int]] = []
         self.status = "idle"
         self.pending = 0
+        self.alive = True
 
     async def submit(self, text):
         self.submitted.append(text)
@@ -156,6 +157,7 @@ def test_wake_drains_notes_arriving_during_digest(tmp_path):
             self.digests = []
             self.status = "idle"
             self.pending = 0
+            self.alive = True
 
         async def submit(self, text):
             self.digests.append(text)
@@ -209,6 +211,18 @@ def test_spawn_worker_worktree_failure_is_clean(tmp_path, monkeypatch):
     assert "isolated workspace" in text
     assert "worker/nova" in text  # surfaces the underlying reason
     assert t.threads == []       # nothing half-created
+
+
+def test_dismissed_worker_is_not_resummoned(tmp_path):
+    """A message to a dismissed worker (worktree gone) must not rebuild a session
+    into a torn-down workspace — it gets a clean explanation instead."""
+    engine, t = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(tmp_path), task="x", worker_status="dismissed"))
+    asyncio.run(engine.on_inbound(InboundMessage(thread_id="55", text="you there?")))
+    assert "55" not in engine.sessions                       # no session created
+    assert any("dismissed" in p.text for p in t.posts)
 
 
 def test_speakers(tmp_path):

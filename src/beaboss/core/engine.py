@@ -31,6 +31,7 @@ log = logging.getLogger("beaboss.core.engine")
 
 ORCHESTRATOR_EMOJI = "🧭"
 WORKER_EMOJI = "⚙️"
+MAX_INBOX = 200  # bound the supervision backlog if the orchestrator can't drain it
 
 CODE_PHILOSOPHY = (
     "Code-quality bar (non-negotiable): robustness through SIMPLICITY. Prefer the "
@@ -152,6 +153,7 @@ class Engine:
         self.sessions: dict[str, CoreSession] = {}
         self._inbox: list[str] = []          # pending notes for the orchestrator
         self._waking = False                 # digest wake in flight
+        self._session_locks: dict[str, asyncio.Lock] = {}  # per-thread start lock
         # The thread that is the orchestrator's "office". Transports may override;
         # the Telegram adapter's General topic maps to "general".
         self.main_thread = "general"
@@ -197,6 +199,17 @@ class Engine:
             ))
             return
 
+        if rec.role == "worker" and rec.worker_status == "dismissed":
+            # Its worktree was torn down at dismiss; don't resurrect it into a gone
+            # workspace (or bring a dismissed worker back to life).
+            await self._post(Outbound(
+                thread_id=msg.thread_id, speaker=SYSTEM,
+                text=(f"{rec.name} was dismissed — its workspace is gone (any work is "
+                      f"on branch worker/{rec.worker_id}). Ask the orchestrator to "
+                      f"hire a fresh worker."),
+            ))
+            return
+
         session = await self._ensure_session(msg.thread_id, rec)
         if session is None:
             return
@@ -228,25 +241,40 @@ class Engine:
 
     async def _ensure_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession | None:
         session = self.sessions.get(thread_id)
-        if session is not None:
+        if session is not None and session.alive:
             return session
-        try:
-            if rec.role == "orchestrator":
-                session = self._make_orchestrator_session(thread_id, rec)
-            elif rec.role == "worker":
-                session = self._make_worker_session(thread_id, rec)
-            else:
-                session = self._make_direct_session(thread_id, rec)
-            await session.start()
-        except Exception as e:  # noqa: BLE001
-            log.exception("failed to start session thread=%s", thread_id)
-            await self._post(Outbound(
-                thread_id=thread_id, speaker=SYSTEM,
-                text=f"⚠️ couldn't start this session: {e}",
-            ))
-            return None
-        self.sessions[thread_id] = session
-        return session
+        # Serialize per thread: two coroutines (a transport handler + a worker's wake,
+        # or two fleet calls) must not both build a session for one thread — the
+        # loser's live subprocess would leak untracked. Also the point where we
+        # replace a zombie (dead run task / failed reconnect) instead of reusing it.
+        lock = self._session_locks.setdefault(thread_id, asyncio.Lock())
+        async with lock:
+            session = self.sessions.get(thread_id)
+            if session is not None and session.alive:
+                return session
+            if session is not None:                    # a zombie/errored session
+                self.sessions.pop(thread_id, None)
+                try:
+                    await session.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                if rec.role == "orchestrator":
+                    session = self._make_orchestrator_session(thread_id, rec)
+                elif rec.role == "worker":
+                    session = self._make_worker_session(thread_id, rec)
+                else:
+                    session = self._make_direct_session(thread_id, rec)
+                await session.start()
+            except Exception as e:  # noqa: BLE001
+                log.exception("failed to start session thread=%s", thread_id)
+                await self._post(Outbound(
+                    thread_id=thread_id, speaker=SYSTEM,
+                    text=f"⚠️ couldn't start this session: {e}",
+                ))
+                return None
+            self.sessions[thread_id] = session
+            return session
 
     def _sid_saver(self, thread_id: str):
         def save(sid: str) -> None:
@@ -308,6 +336,10 @@ class Engine:
 
     def _note(self, text: str) -> None:
         self._inbox.append(text)
+        if len(self._inbox) > MAX_INBOX:
+            drop = len(self._inbox) - MAX_INBOX
+            self._inbox = self._inbox[-MAX_INBOX:]
+            log.warning("inbox exceeded %d notes; dropped %d oldest", MAX_INBOX, drop)
         log.info("inbox note: %s", text[:160])
 
     async def _on_worker_turn_done(self, session: CoreSession, result: ResultMessage) -> None:
@@ -343,11 +375,13 @@ class Engine:
         rec = self.store.get(othread)
         if rec is None:
             return
-        session = await self._ensure_session(othread, rec)
-        if session is None:
-            return
+        # Claim the wake BEFORE any await, or a second worker finishing during the
+        # (suspending) session start passes the guard and double-drains the inbox.
         self._waking = True
         try:
+            session = await self._ensure_session(othread, rec)
+            if session is None:
+                return
             # Loop-drain: a worker finishing while we're mid-digest appends to
             # _inbox; the while-check re-runs with no await between it and the
             # `finally` below, so no completion note can be stranded.
