@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Protocol
@@ -35,6 +36,16 @@ if TYPE_CHECKING:
     from .session import Turn
 
 log = logging.getLogger("beaboss.core.agent_backend")
+
+# The bot's own secrets. An agent CLI runs with bypassPermissions, so it must not
+# inherit these — they'd be a `cat`/`curl` away for a prompt-injected worker. The
+# bot process keeps them; delivery's `gh` push runs in the bot process, not the agent.
+SENSITIVE_ENV = ("TELEGRAM_BOT_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "WEB_TOKEN")
+
+
+def scrubbed_env() -> dict:
+    """os.environ with the bot's secrets removed — for any agent subprocess."""
+    return {k: v for k, v in os.environ.items() if k not in SENSITIVE_ENV}
 
 
 class AgentBackend(Protocol):
@@ -146,6 +157,7 @@ class CodexBackend:
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(self._cwd),
+            env=scrubbed_env(),  # don't hand the bot's secrets to the agent
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

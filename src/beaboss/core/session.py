@@ -26,7 +26,7 @@ from claude_agent_sdk import (
 )
 
 from .. import rendering
-from .agent_backend import AgentBackend, ClaudeAgentBackend
+from .agent_backend import AgentBackend, ClaudeAgentBackend, scrubbed_env
 from .ports import MediaIn, Outbound, Speaker
 
 log = logging.getLogger("beaboss.core.session")
@@ -143,6 +143,7 @@ class CoreSession:
         mcp.update(self._extra_mcp)
         return ClaudeAgentOptions(
             cwd=str(self.cwd),
+            env=scrubbed_env(),  # don't hand the bot's secrets to the agent CLI
             permission_mode=self.settings.permission_mode,
             include_partial_messages=False,
             resume=self.session_id,

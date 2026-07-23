@@ -110,11 +110,12 @@ def test_branch_diff_shows_worker_changes(tmp_path):
     assert "feature.py" in diff
 
 
-def test_merge_into_current_lands_the_branch(tmp_path):
+def test_merge_into_base_lands_the_branch(tmp_path):
     repo = _init_repo(tmp_path / "repo")
     dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
     _commit_in_worktree(dest, "feature.py")
-    landed, detail = asyncio.run(worktrees.merge_into_current(repo, "worker/nova"))
+    base = asyncio.run(worktrees.current_branch(repo))
+    landed, detail = asyncio.run(worktrees.merge_into_base(repo, "worker/nova", base))
     assert landed is True
     assert "merged" in detail
     assert (repo / "feature.py").exists()  # the work is now in the primary checkout
@@ -125,10 +126,34 @@ def test_merge_refuses_dirty_checkout(tmp_path):
     dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
     _commit_in_worktree(dest, "feature.py")
     (repo / "dirty.txt").write_text("uncommitted\n")  # primary checkout not clean
-    landed, detail = asyncio.run(worktrees.merge_into_current(repo, "worker/nova"))
+    base = asyncio.run(worktrees.current_branch(repo))
+    landed, detail = asyncio.run(worktrees.merge_into_base(repo, "worker/nova", base))
     assert landed is False
     assert "uncommitted" in detail
     assert not (repo / "feature.py").exists()  # nothing landed
+
+
+def test_merge_refuses_wrong_base_branch(tmp_path):
+    """The F1 fix: never merge into a branch other than the worker's fork point,
+    even if the primary checkout has since moved to a different branch."""
+    repo = _init_repo(tmp_path / "repo")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
+    _commit_in_worktree(dest, "feature.py")
+    fork = asyncio.run(worktrees.current_branch(repo))
+    _git(repo, "checkout", "-b", "release")  # user switched the checkout
+    landed, detail = asyncio.run(worktrees.merge_into_base(repo, "worker/nova", fork))
+    assert landed is False
+    assert "wrong branch" in detail or "forked from" in detail
+    assert not (repo / "feature.py").exists()  # nothing landed on 'release'
+
+
+def test_branch_ahead(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
+    base = asyncio.run(worktrees.current_branch(repo))
+    assert asyncio.run(worktrees.branch_ahead(repo, base, "worker/nova")) is False
+    _commit_in_worktree(dest, "feature.py")
+    assert asyncio.run(worktrees.branch_ahead(repo, base, "worker/nova")) is True
 
 
 def test_branch_diff_degrades_gracefully_on_huge_change(tmp_path):

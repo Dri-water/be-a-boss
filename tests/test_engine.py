@@ -258,28 +258,37 @@ def test_listing_and_kill_direct(tmp_path):
     assert engine.store.get("7") is None
 
 
-def test_review_then_deliver_merges_committed_work(tmp_path):
-    """End-to-end delivery: review surfaces the diff; deliver lands it in the
-    primary checkout, marks the worker delivered, and posts to the thread."""
+def test_deliver_requests_approval_then_human_lands_it(tmp_path):
+    """The hard gate: deliver_worker only REQUESTS; nothing lands until a human
+    /approve. review surfaces the diff; approve does the merge."""
     engine, t = _engine(tmp_path)
     repo = _repo(tmp_path, "myrepo")
     dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "state" / "worktrees", "nova"))
     (dest / "feature.py").write_text("x = 1\n")
     _git(dest, "add", "-A")
     _git(dest, "commit", "-m", "feat")
+    base = asyncio.run(worktrees.current_branch(repo))
     engine.store.put("55", ThreadRecord(
         role="worker", name="Nova", cwd=str(dest), worker_id="nova",
-        repo=str(repo), task="add feature"))
+        repo=str(repo), base_branch=base, task="add feature"))
 
     review = asyncio.run(engine._review_worker("nova"))["content"][0]["text"]
     assert "feature.py" in review and "merge" in review
 
-    res = asyncio.run(engine._deliver_worker("nova", "merge"))
-    assert res.get("is_error") is not True
-    assert "delivered" in res["content"][0]["text"]
-    assert (repo / "feature.py").exists()  # landed in the primary checkout
+    # deliver only REQUESTS — it must NOT land, and must post an approval prompt
+    req = asyncio.run(engine._deliver_worker("nova", "merge"))
+    assert req.get("is_error") is not True
+    assert "approve" in req["content"][0]["text"].lower()
+    assert not (repo / "feature.py").exists()          # nothing landed yet
+    assert any("🚦" in p.text for p in t.posts)
+    assert engine._pending_delivery.get("nova") == "merge"
+
+    # the human's /approve is the gate that actually lands it
+    result = asyncio.run(engine.approve_delivery("nova"))
+    assert "delivered" in result
+    assert (repo / "feature.py").exists()               # now landed
     assert engine.store.get("55").worker_status == "delivered"
-    assert any("📦" in p.text for p in t.posts)
+    assert "nova" not in engine._pending_delivery
 
 
 def test_deliver_refuses_uncommitted_work(tmp_path):
@@ -287,11 +296,18 @@ def test_deliver_refuses_uncommitted_work(tmp_path):
     repo = _repo(tmp_path, "r2")
     dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "state" / "worktrees", "kite"))
     (dest / "wip.py").write_text("unfinished\n")  # uncommitted
+    base = asyncio.run(worktrees.current_branch(repo))
     engine.store.put("56", ThreadRecord(
         role="worker", name="Kite", cwd=str(dest), worker_id="kite",
-        repo=str(repo), task="x"))
+        repo=str(repo), base_branch=base, task="x"))
 
     res = asyncio.run(engine._deliver_worker("kite", "merge"))
     assert res.get("is_error") is True
     assert "uncommitted" in res["content"][0]["text"]
-    assert not (repo / "wip.py").exists()  # nothing landed
+    assert "kite" not in engine._pending_delivery  # not queued for approval
+
+
+def test_approve_without_request_is_a_noop(tmp_path):
+    engine, t = _engine(tmp_path)
+    result = asyncio.run(engine.approve_delivery("ghost"))
+    assert "No pending delivery" in result

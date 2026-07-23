@@ -32,8 +32,10 @@ class ThreadRecord:
     # worker-only:
     worker_id: str = ""       # short id, e.g. "nova"
     repo: str = ""           # the primary checkout the worktree came from
+    base_branch: str = ""    # the branch the worker forked from (merge/PR target)
+    base_sha: str = ""       # HEAD at spawn (the fork point)
     task: str = ""           # the brief, verbatim
-    worker_status: str = ""   # working | done | blocked | dismissed
+    worker_status: str = ""   # working | done | blocked | dismissed | delivered
 
 
 class CoreStore:

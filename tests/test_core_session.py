@@ -39,6 +39,22 @@ def _session(tmp: Path, post=None) -> CoreSession:
     )
 
 
+def test_scrubbed_env_removes_bot_secrets(monkeypatch):
+    from beaboss.core.agent_backend import scrubbed_env
+    monkeypatch.setenv("GH_TOKEN", "ghp_secret")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("SOMETHING_ELSE", "keepme")
+    env = scrubbed_env()
+    assert "GH_TOKEN" not in env and "TELEGRAM_BOT_TOKEN" not in env
+    assert env.get("SOMETHING_ELSE") == "keepme"  # non-secrets pass through
+
+
+def test_build_options_scrubs_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "ghp_secret")
+    opts = _session(tmp_path)._build_options()
+    assert "GH_TOKEN" not in (opts.env or {})
+
+
 def test_build_options_has_chat_mcp_and_env_prompt(tmp_path):
     opts = _session(tmp_path)._build_options()
     assert "chat" in opts.mcp_servers

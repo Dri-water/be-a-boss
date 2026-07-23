@@ -185,6 +185,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "  /new <path> [name] — classic direct session (no orchestrator)\n"
         "  /list — all threads + status\n"
         "  /status — bot health\n"
+        "  /approve <id> · /reject <id> — land or decline a worker's delivery\n"
         "  /setup — verify this group is configured right\n"
         "  /whoami — your Telegram id + this chat's id\n\n"
         "💬 In any session topic:\n"
@@ -256,6 +257,28 @@ async def cmd_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     lines.append("✅ All set — talk to me in the General topic to get started."
                  if ok else "Fix the ❌ / ⚠️ items above, then run /setup again.")
     await msg.reply_text("\n".join(lines))
+
+
+async def cmd_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _ok(update, ctx):
+        return
+    engine: Engine = ctx.bot_data["engine"]
+    msg = update.effective_message
+    if not ctx.args:
+        await msg.reply_text("Usage: /approve <worker_id> — authorize a pending delivery.")
+        return
+    await msg.reply_text(await engine.approve_delivery(ctx.args[0]))
+
+
+async def cmd_reject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _ok(update, ctx):
+        return
+    engine: Engine = ctx.bot_data["engine"]
+    msg = update.effective_message
+    if not ctx.args:
+        await msg.reply_text("Usage: /reject <worker_id> — decline a pending delivery.")
+        return
+    await msg.reply_text(await engine.reject_delivery(ctx.args[0]))
 
 
 async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -433,6 +456,7 @@ async def _post_init(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("whoami", "show your Telegram id (for setup)"),
         BotCommand("setup", "check this group is configured right"),
+        BotCommand("approve", "approve a worker's delivery: /approve <id>"),
         BotCommand("new", "direct session: /new <path> [name]"),
         BotCommand("list", "list all threads"),
         BotCommand("status", "bot health"),
@@ -491,6 +515,8 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
     app.add_handler(CommandHandler(["start", "help"], cmd_help))
     app.add_handler(CommandHandler("whoami", cmd_whoami))
     app.add_handler(CommandHandler("setup", cmd_setup))
+    app.add_handler(CommandHandler("approve", cmd_approve))
+    app.add_handler(CommandHandler("reject", cmd_reject))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("status", cmd_status))

@@ -126,6 +126,19 @@ async def has_remote(repo: Path) -> bool:
     return code == 0 and bool(out.strip())
 
 
+async def head_sha(repo: Path) -> str:
+    """The primary checkout's current commit — recorded at spawn as the worker's
+    fork point so delivery can notice the base moving out from under an approval."""
+    code, out = await _git(repo, "rev-parse", "HEAD")
+    return out if code == 0 else ""
+
+
+async def branch_ahead(repo: Path, base: str, branch: str) -> bool:
+    """True if `branch` carries commits `base` doesn't — i.e. there's work to land."""
+    code, out = await _git(repo, "rev-list", "--count", f"{base}..{branch}")
+    return code == 0 and out.strip().isdigit() and int(out.strip()) > 0
+
+
 async def gh_available() -> bool:
     """True if the GitHub CLI is installed AND authenticated — i.e. PR mode is on."""
     try:
@@ -145,8 +158,11 @@ async def branch_diff(repo: Path, base: str, branch: str, max_chars: int = 3500)
     "here's every file that changed, plus a preview" rather than an unbounded dump
     that would blow past Telegram's message limit or flood the orchestrator.
     """
-    _, stat = await _git(repo, "diff", "--stat", f"{base}...{branch}")
-    _, patch = await _git(repo, "diff", f"{base}...{branch}")
+    scode, stat = await _git(repo, "diff", "--stat", f"{base}...{branch}")
+    pcode, patch = await _git(repo, "diff", f"{base}...{branch}")
+    if scode != 0 or pcode != 0:
+        return (f"(couldn't diff against '{base}' — is it a valid branch? "
+                f"git said: {_tidy(stat or patch)})")
     stat, patch = stat.strip(), patch.strip()
     if not stat and not patch:
         return "(no changes on the branch yet)"
@@ -159,31 +175,40 @@ async def branch_diff(repo: Path, base: str, branch: str, max_chars: int = 3500)
     return stat + "\n\n" + patch
 
 
-async def merge_into_current(repo: Path, branch: str) -> tuple[bool, str]:
-    """Deterministically merge `branch` into the primary checkout's current branch.
+async def merge_into_base(repo: Path, branch: str, base_branch: str) -> tuple[bool, str]:
+    """Deterministically merge `branch` into `base_branch` — the branch the worker
+    forked from — NOT whatever happens to be checked out now.
 
-    Requires the checkout to be clean; aborts and rolls back on conflict. Never
-    force-pushes or discards anything — a refusal leaves the repo exactly as found.
+    Refuses unless the primary checkout is on `base_branch` and clean; aborts and
+    rolls back on conflict; never force-pushes or discards anything. A refusal
+    leaves the repo exactly as found.
     """
-    base = await current_branch(repo)
-    if base is None:
-        return False, (f"{repo.name}'s main checkout is in a detached HEAD state — "
-                       f"check out a branch there first")
+    current = await current_branch(repo)
+    if current is None:
+        return False, (f"{repo.name}'s checkout is in detached HEAD — check out "
+                       f"'{base_branch}' to land this work")
+    if current != base_branch:
+        return False, (f"{repo.name}'s checkout is on '{current}', but this work forked "
+                       f"from '{base_branch}'. Switch to {base_branch} to merge it, or "
+                       f"deliver via a PR — I won't merge into the wrong branch.")
     if not await is_clean(repo):
-        return False, (f"{repo.name}'s working copy has uncommitted changes on {base} — "
-                       f"commit or stash them first, then deliver again")
+        return False, (f"{repo.name}'s working copy has uncommitted changes on "
+                       f"{base_branch} — commit or stash them first, then deliver again")
     code, out = await _git(
         repo, "merge", "--no-ff", "-m",
         f"Merge {branch} (delivered by be-a-boss)", branch)
     if code != 0:
-        await _git(repo, "merge", "--abort")  # leave the checkout as we found it
-        return False, (f"merging into {base} hit a conflict ({_tidy(out)}) — this one "
+        acode, _aout = await _git(repo, "merge", "--abort")
+        if acode != 0:
+            return False, (f"merging into {base_branch} conflicted AND the auto-abort "
+                           f"failed — {repo.name} may be mid-merge; resolve it by hand")
+        return False, (f"merging into {base_branch} hit a conflict ({_tidy(out)}) — "
                        f"needs a human to resolve, or open a PR instead")
-    return True, f"merged {branch} into {base}"
+    return True, f"merged {branch} into {base_branch}"
 
 
-async def open_pr(repo: Path, branch: str) -> tuple[bool, str]:
-    """Push `branch` and open a GitHub PR via gh. Non-destructive. Returns (ok, url|error)."""
+async def open_pr(repo: Path, branch: str, base_branch: str) -> tuple[bool, str]:
+    """Push `branch` and open a GitHub PR against `base_branch`. Non-destructive."""
     if not await has_remote(repo):
         return False, "no git remote is configured — add one, or deliver via a local merge"
     if not await gh_available():
@@ -194,7 +219,8 @@ async def open_pr(repo: Path, branch: str) -> tuple[bool, str]:
         return False, f"couldn't push {branch} to origin: {_tidy(out)}"
     try:
         proc = await asyncio.create_subprocess_exec(
-            "gh", "pr", "create", "--head", branch, "--fill", cwd=str(repo),
+            "gh", "pr", "create", "--base", base_branch, "--head", branch, "--fill",
+            cwd=str(repo),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         pout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
     except (FileNotFoundError, OSError):

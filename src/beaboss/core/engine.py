@@ -89,13 +89,14 @@ ORCHESTRATOR_APPEND = (
     "retries, or internal mechanics.\n\n"
     "Delivery (the last mile — never skip it):\n"
     "- A finished task must not dead-end on a branch. review_worker to see the diff, "
-    "then show the boss the actual change (a short summary of what changed plus the "
-    "key parts of the diff) with your recommendation.\n"
-    "- Only after the boss's explicit go-ahead, call deliver_worker. Prefer 'pr' when "
-    "it's available (a remote + gh) so the change stays reviewable; otherwise 'merge' "
-    "for a local land. The merge is deterministic and refuses a dirty checkout — if it "
-    "refuses, relay the reason plainly, never force it.\n"
-    "- After a clean delivery you may dismiss the worker.\n\n"
+    "then show the boss the actual change (a short summary plus the key parts of the "
+    "diff) with your recommendation.\n"
+    "- Call deliver_worker to REQUEST landing it (method 'pr' when a remote + gh are "
+    "available so it stays reviewable, else 'merge'). You do NOT land work yourself — "
+    "deliver_worker asks the boss, and only their /approve command actually merges or "
+    "opens the PR. Tell them they need to /approve <worker>; never claim it's landed "
+    "until you see the delivery confirmation.\n"
+    "- After a confirmed delivery you may dismiss the worker.\n\n"
     "Talk in outcomes, not mechanics — and SHOW, don't tell. The boss cares about the "
     "project and the RESULT, not your internals: say 'isolated copy' not 'worktree', "
     "'instructions' not 'brief', 'cleanup' not 'teardown', name workers only when it "
@@ -154,6 +155,7 @@ class Engine:
         self._inbox: list[str] = []          # pending notes for the orchestrator
         self._waking = False                 # digest wake in flight
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-thread start lock
+        self._pending_delivery: dict[str, str] = {}        # worker_id -> method, awaiting /approve
         # The thread that is the orchestrator's "office". Transports may override;
         # the Telegram adapter's General topic maps to "general".
         self.main_thread = "general"
@@ -501,11 +503,12 @@ class Engine:
 
         @tool(
             "deliver_worker",
-            "Land a worker's work — ONLY after the boss has explicitly approved. "
-            "method='merge' deterministically merges the worker's branch into your "
-            "checkout's current branch (requires it clean; aborts on conflict, never "
-            "force-anything). method='pr' pushes the branch and opens a GitHub PR "
-            "(requires a remote + authenticated gh). Refuses uncommitted work.",
+            "REQUEST that a worker's finished work be landed. This does NOT land it — "
+            "it asks the boss to approve, and the merge/PR runs only when they issue "
+            "/approve. method='merge' (local merge into the branch the worker forked "
+            "from) or 'pr' (push + open a GitHub PR). Call it once the work is "
+            "committed and you've shown the boss the diff. Refuses uncommitted or "
+            "empty branches.",
             {"type": "object",
              "properties": {
                  "worker_id": {"type": "string"},
@@ -549,9 +552,13 @@ class Engine:
         name = pick_name(taken)
         worker_id = name.lower()
 
-        # workspace: isolated worktree when the repo is git, else the repo itself
+        # workspace: isolated worktree when the repo is git, else the repo itself.
+        # Record the fork point (branch + SHA) so delivery lands on the right branch.
+        base_branch, base_sha = "", ""
         try:
             if await worktrees.is_git_repo(repo):
+                base_branch = await worktrees.current_branch(repo) or ""
+                base_sha = await worktrees.head_sha(repo)
                 wt = await worktrees.create_worktree(
                     repo, self.settings.state_dir / "worktrees", worker_id)
                 cwd, isolated = wt, True
@@ -566,7 +573,8 @@ class Engine:
 
         rec = ThreadRecord(
             role="worker", name=name, cwd=str(cwd), worker_id=worker_id,
-            repo=str(repo), task=task.strip(), worker_status="working",
+            repo=str(repo), base_branch=base_branch, base_sha=base_sha,
+            task=task.strip(), worker_status="working",
         )
         self.store.put(thread_id, rec)
 
@@ -654,47 +662,110 @@ class Engine:
         _tid, rec = found
         if not rec.repo or rec.cwd == rec.repo:
             return err(f"{rec.name} isn't working in a git worktree — nothing to review or deliver")
+        if not Path(rec.cwd).is_dir():
+            return err(f"{rec.name}'s workspace is gone (was it dismissed?) — its work, "
+                       f"if any, is on branch worker/{rec.worker_id}")
         repo = Path(rec.repo)
         branch = f"worker/{rec.worker_id}"
-        base = await worktrees.current_branch(repo) or "the base branch"
+        base = rec.base_branch or await worktrees.current_branch(repo)
+        if not base:
+            return err(f"can't determine {rec.name}'s base branch (detached HEAD) — "
+                       f"check out a branch in {repo.name}")
         committed = await worktrees.is_clean(Path(rec.cwd))
+        has_work = await worktrees.branch_ahead(repo, base, branch)
         diff = await worktrees.branch_diff(repo, base, branch)
         routes = ["merge"]
         if await worktrees.has_remote(repo) and await worktrees.gh_available():
             routes.insert(0, "pr")
         commit_note = ("all changes committed" if committed else
-                       "⚠️ uncommitted changes remain — have the worker commit before delivery")
+                       "⚠️ uncommitted changes remain — have the worker commit first")
+        work_note = "" if has_work else "\n- ⚠️ nothing committed on the branch yet"
         return {"content": [{"type": "text", "text":
                 f"Review of {rec.name} — branch {branch} vs {base}:\n"
                 f"- {commit_note}\n"
-                f"- delivery routes available: {', '.join(routes)}\n\n{diff}"}]}
+                f"- delivery routes available: {', '.join(routes)}{work_note}\n\n{diff}"}]}
 
     async def _deliver_worker(self, worker_id: str, method: str) -> dict[str, Any]:
+        """The orchestrator REQUESTS delivery; it never lands work itself. The actual
+        merge/PR runs only when a human issues /approve — a gate the LLM can't forge
+        (an injected worker could otherwise talk the orchestrator into pushing)."""
         def err(t: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": t}], "is_error": True}
 
         found = self._find_worker(worker_id.strip())
         if found is None:
             return err(f"no such worker: {worker_id}")
-        thread_id, rec = found
+        _thread_id, rec = found
+        if method not in ("merge", "pr"):
+            return err("method must be 'merge' or 'pr'")
+        if rec.worker_status == "delivered":
+            return err(f"{rec.name}'s work was already delivered")
         if not rec.repo or rec.cwd == rec.repo:
             return err(f"{rec.name} isn't in a git worktree — nothing to deliver")
+        if not Path(rec.cwd).is_dir():
+            return err(f"{rec.name}'s workspace is gone — nothing to deliver")
         if not await worktrees.is_clean(Path(rec.cwd)):
-            return err(f"{rec.name} has uncommitted changes — have them commit before delivery")
-        branch = f"worker/{rec.worker_id}"
+            return err(f"{rec.name} has uncommitted changes — have them commit first")
         repo = Path(rec.repo)
+        base = rec.base_branch or await worktrees.current_branch(repo)
+        if not base:
+            return err(f"can't determine {rec.name}'s base branch — nothing to deliver into")
+        if not await worktrees.branch_ahead(repo, base, f"worker/{rec.worker_id}"):
+            return err(f"{rec.name} hasn't committed anything to deliver")
+        # Hard gate: record the request and ask the boss to confirm with a command.
+        self._pending_delivery[rec.worker_id] = method
+        verb = "open a pull request for" if method == "pr" else "locally merge"
+        await self._post(Outbound(
+            thread_id=self.main_thread, speaker=SYSTEM,
+            text=(f"🚦 {rec.name} is ready to deliver. Approve to {verb} their work "
+                  f"into '{base}'?\n"
+                  f"    /approve {rec.worker_id}    ·    /reject {rec.worker_id}")))
+        return {"content": [{"type": "text", "text":
+                f"delivery of {rec.name} via {method} requested — the boss must "
+                f"/approve {rec.worker_id} to authorize it (I can't land it myself)."}]}
+
+    async def approve_delivery(self, worker_id: str) -> str:
+        """The hard gate: called only by an allowlisted human's /approve, so an
+        injected orchestrator can't self-authorize a push/merge."""
+        wid = worker_id.strip().lower()
+        method = self._pending_delivery.pop(wid, None)
+        if method is None:
+            return f"No pending delivery for '{wid}'."
+        return await self._execute_delivery(wid, method)
+
+    async def reject_delivery(self, worker_id: str) -> str:
+        wid = worker_id.strip().lower()
+        method = self._pending_delivery.pop(wid, None)
+        if method is None:
+            return f"No pending delivery for '{wid}'."
+        found = self._find_worker(wid)
+        name = found[1].name if found else wid
+        self._note(f"the boss rejected delivery of {name}")
+        await self._wake_orchestrator()
+        return f"Rejected {name}'s delivery; the orchestrator has been told."
+
+    async def _execute_delivery(self, worker_id: str, method: str) -> str:
+        found = self._find_worker(worker_id)
+        if found is None:
+            return f"Worker '{worker_id}' is gone; nothing delivered."
+        thread_id, rec = found
+        repo = Path(rec.repo)
+        branch = f"worker/{rec.worker_id}"
+        base = rec.base_branch or await worktrees.current_branch(repo) or ""
         if method == "pr":
-            landed, detail = await worktrees.open_pr(repo, branch)
-        elif method == "merge":
-            landed, detail = await worktrees.merge_into_current(repo, branch)
+            landed, detail = await worktrees.open_pr(repo, branch, base)
         else:
-            return err("method must be 'merge' or 'pr'")
+            landed, detail = await worktrees.merge_into_base(repo, branch, base)
         if not landed:
-            return err(f"delivery failed: {detail}")
+            self._note(f"delivery of {rec.name} failed: {detail}")
+            await self._wake_orchestrator()
+            return f"⚠️ delivery of {rec.name} failed: {detail}"
         self.store.update(thread_id, worker_status="delivered")
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM, text=f"📦 {detail}."))
-        return {"content": [{"type": "text", "text": f"{rec.name}'s work delivered — {detail}"}]}
+        self._note(f"{rec.name}'s work delivered — {detail}")
+        await self._wake_orchestrator()
+        return f"✅ {rec.name}'s work delivered — {detail}"
 
     # ---- direct sessions (orchestrator-less, via /new) -------------------
 
