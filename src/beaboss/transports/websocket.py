@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from urllib.parse import parse_qs, urlsplit
 
 from websockets.asyncio.server import ServerConnection, serve
 
@@ -148,9 +149,35 @@ def make_handler(engine, transport: WebSocketTransport):
     return handler
 
 
+def _gatekeeper(token: str, allowed_origins: set[str]):
+    """Reject the two ways a hostile client reaches a localhost WebSocket:
+
+    - a cross-origin BROWSER page (the CSWSH → drive-by-RCE vector): browsers send
+      an honest Origin header, so anything not in our allowlist is refused;
+    - a NON-browser local process (no/forged Origin): gated by a required handshake
+      token in the query string.
+
+    A localhost bind alone is NOT a boundary against either — this is.
+    """
+    def process_request(connection: ServerConnection, request):
+        origin = request.headers.get("Origin")
+        if origin is not None and origin not in allowed_origins:
+            log.warning("web: refused connection from origin %r", origin)
+            return connection.respond(403, "origin not allowed\n")
+        supplied = parse_qs(urlsplit(request.path).query).get("token", [""])[0]
+        if not token or supplied != token:
+            log.warning("web: refused connection with missing/invalid token")
+            return connection.respond(401, "missing or invalid token\n")
+        return None
+    return process_request
+
+
 async def serve_forever(engine, transport: WebSocketTransport,
-                        host: str, port: int) -> None:
-    """Run the WebSocket server until cancelled."""
-    async with serve(make_handler(engine, transport), host, port):
+                        host: str, port: int, token: str) -> None:
+    """Run the WebSocket server until cancelled, gated by Origin + handshake token."""
+    allowed = {"null", f"http://{host}:{port}",
+               f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
+    async with serve(make_handler(engine, transport), host, port,
+                     process_request=_gatekeeper(token, allowed)):
         log.info("websocket transport listening on ws://%s:%s", host, port)
         await asyncio.Future()  # run forever

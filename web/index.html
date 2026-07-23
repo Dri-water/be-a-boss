@@ -55,8 +55,12 @@
   <script src="client.js"></script>
   <script>
     // Default to the same host the page is served from, else the dev default.
+    // The server gates the handshake on a token (printed at startup) + Origin; read
+    // the token from our own URL (open web/index.html?token=… as the server logs).
+    const token = new URLSearchParams(location.search).get("token") || "";
     const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") +
-      (location.host || "127.0.0.1:8765");
+      (location.host || "127.0.0.1:8765") +
+      (token ? "?token=" + encodeURIComponent(token) : "");
     beaboss.connect(wsUrl);
   </script>
 </body>

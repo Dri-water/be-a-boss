@@ -9,11 +9,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 
 from ..config import Settings
 from ..core.engine import Engine
 from ..core.store import CoreStore
 from ..transports.websocket import WebSocketTransport, serve_forever
+
+log = logging.getLogger("beaboss.web")
 
 
 def main() -> None:
@@ -44,8 +47,16 @@ def main() -> None:
             "auth/proxy, set WEB_ALLOW_INSECURE_BIND=1 to override."
         )
 
+    # A required handshake token — with the Origin check in the transport, this is
+    # what actually makes the localhost bind a boundary (a malicious web page you
+    # visit can otherwise open ws://127.0.0.1 and drive the orchestrator).
+    token = os.getenv("WEB_TOKEN", "").strip() or secrets.token_urlsafe(16)
+    log.info("web UI token: %s", token)
+    log.info("open the UI:  web/index.html?token=%s   (or set WEB_TOKEN to pin it)",
+             token)
+
     try:
-        asyncio.run(serve_forever(engine, transport, host, port))
+        asyncio.run(serve_forever(engine, transport, host, port, token))
     except KeyboardInterrupt:
         pass
 

@@ -8,11 +8,12 @@ engine Outbound -> client. No browser, no Claude.
 import asyncio
 import json
 
+import pytest
 import websockets
 from websockets.asyncio.server import serve
 
 from beaboss.core.ports import Outbound, Speaker, Transport
-from beaboss.transports.websocket import WebSocketTransport, make_handler
+from beaboss.transports.websocket import WebSocketTransport, _gatekeeper, make_handler
 
 
 def test_implements_transport_contract():
@@ -71,6 +72,43 @@ async def _roundtrip():
 
 def test_websocket_roundtrip():
     asyncio.run(_roundtrip())
+
+
+def test_gate_rejects_bad_origin_and_missing_token():
+    """CSWSH defense: a cross-origin browser page and a token-less client are both
+    refused; only the correct token (with an allowed/absent Origin) connects."""
+
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        gate = _gatekeeper("s3cret", {"null"})
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0,
+                         process_request=gate) as server:
+            port = server.sockets[0].getsockname()[1]
+            base = f"ws://127.0.0.1:{port}"
+
+            # correct token, no Origin (non-browser) → connects
+            async with websockets.connect(f"{base}?token=s3cret") as ws:
+                assert json.loads(await ws.recv())["type"] == "threads"
+
+            # missing token → refused
+            with pytest.raises(websockets.exceptions.InvalidStatus):
+                async with websockets.connect(base):
+                    pass
+
+            # wrong token → refused
+            with pytest.raises(websockets.exceptions.InvalidStatus):
+                async with websockets.connect(f"{base}?token=nope"):
+                    pass
+
+            # cross-origin browser page (even with the token) → refused
+            with pytest.raises(websockets.exceptions.InvalidStatus):
+                async with websockets.connect(
+                        f"{base}?token=s3cret",
+                        additional_headers={"Origin": "https://evil.example"}):
+                    pass
+
+    asyncio.run(scenario())
 
 
 def test_create_thread_broadcasts_to_clients():
