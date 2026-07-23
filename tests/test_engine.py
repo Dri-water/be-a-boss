@@ -241,6 +241,30 @@ def test_dismissed_worker_is_not_resummoned(tmp_path):
     assert any("dismissed" in p.text for p in t.posts)
 
 
+def test_inspect_repo_grounds_the_orchestrator(tmp_path):
+    """inspect_repo returns the repo's real guide docs, layout, and a detected check
+    command — so the orchestrator briefs/reviews from knowledge, not the outside."""
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myapp")
+    (repo / "AGENTS.md").write_text("# myapp\nA widget service. Run tests with pytest.\n")
+    (repo / "pyproject.toml").write_text("[project]\nname='myapp'\n")
+    (repo / "src").mkdir()
+
+    res = asyncio.run(engine._inspect_repo("myapp"))
+    text = res["content"][0]["text"]
+    assert res.get("is_error") is not True
+    assert "A widget service" in text          # read the guide doc
+    assert "src/" in text                        # saw the layout
+    assert "uv run pytest" in text               # detected the check command
+
+
+def test_inspect_repo_unknown_is_clean_error(tmp_path):
+    engine, _ = _engine(tmp_path)
+    res = asyncio.run(engine._inspect_repo("nope"))
+    assert res.get("is_error") is True
+    assert "no such repo" in res["content"][0]["text"]
+
+
 def test_speakers(tmp_path):
     engine, _ = _engine(tmp_path)
     o = engine.orchestrator_speaker()

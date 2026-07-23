@@ -46,7 +46,10 @@ ORCHESTRATOR_APPEND = (
     "You are the ORCHESTRATOR of a small software organisation, talking with your "
     "boss in a chat thread. You do not write project code yourself — you run a "
     "team of worker agents and use your fleet tools to get work done:\n"
-    "- mcp__fleet__list_repos() — see the available repositories\n"
+    "- mcp__fleet__list_repos() — see the available repositories (path + one-liner)\n"
+    "- mcp__fleet__inspect_repo(repo) — look inside a repo before you brief or "
+    "review: its guide docs (AGENTS.md/CLAUDE.md/README), layout, likely test "
+    "command. You can also Read/Grep any repo directly at its path\n"
     "- mcp__fleet__spawn_worker(repo, task) — hire a worker: creates a visible "
     "thread and an isolated git worktree, briefs them, and they start working\n"
     "- mcp__fleet__message_worker(worker_id, text) — speak to a worker (your message "
@@ -69,6 +72,15 @@ ORCHESTRATOR_APPEND = (
     "teardown is a stop-and-investigate, not an obstacle.\n"
     "4. Report outcomes faithfully. If work failed, say so plainly with the "
     "evidence.\n\n"
+    "Be a technical lead, not a message router:\n"
+    "- Before you brief a worker or judge their work, UNDERSTAND the codebase. "
+    "inspect_repo for its guide docs, layout, and test command, and Read/Grep the "
+    "repo directly at its path when you need to (you never edit it yourself — that's "
+    "the workers' job — but you know it cold). Manage from real knowledge of the code.\n"
+    "- A brief must show you looked: name the real files, the real stack, the "
+    "existing conventions and the actual test command — not vague goals. Review a "
+    "worker's diff on its merits, not on their say-so. A brief or a review you could "
+    "have written WITHOUT opening the repo isn't good enough.\n\n"
     "How to brief a worker:\n"
     "- A brief must be SELF-CONTAINED: the worker knows nothing about this chat. "
     "State the repo context, the concrete goal, constraints, acceptance criteria, and "
@@ -155,6 +167,60 @@ WORKER_APPEND_EXTRA = (
     "  STATUS: done | working | blocked: <what you need> | "
     "needs-decision: <the options>\n\n"
 ) + CODE_PHILOSOPHY
+
+
+# --- repo grounding (so the orchestrator manages from knowledge, not vibes) ----
+
+
+def _read_doc(path: Path, limit: int) -> str:
+    try:
+        if not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    return (text[:limit] + "\n…(truncated — read the file directly for more)…"
+            if len(text) > limit else text)
+
+
+def _repo_hint(repo: Path) -> str:
+    """One line describing a repo, for the repo list — first real line of its guide."""
+    for doc in ("AGENTS.md", "README.md"):
+        text = _read_doc(repo / doc, limit=600)
+        for line in text.splitlines():
+            line = line.strip().lstrip("#").strip()
+            if line and not line.startswith("![") and not line.startswith("<"):
+                return line[:140]
+    return ""
+
+
+def _top_level(repo: Path) -> str:
+    try:
+        entries = sorted(repo.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+    except OSError as e:
+        return f"(couldn't list: {e})"
+    rows = []
+    for p in entries:
+        if p.name.startswith(".") and p.name != ".github":
+            continue
+        rows.append(f"- {p.name}/" if p.is_dir() else f"- {p.name}")
+    return "\n".join(rows[:40]) or "(empty)"
+
+
+def _test_hint(repo: Path) -> str:
+    """A best-guess check command from the repo's shape. A HINT — the orchestrator
+    still verifies by actually running it via run_checks on a worker."""
+    if (repo / "pyproject.toml").is_file():
+        return "uv run pytest"
+    if (repo / "package.json").is_file():
+        return "npm test"
+    if (repo / "Cargo.toml").is_file():
+        return "cargo test"
+    if (repo / "go.mod").is_file():
+        return "go test ./..."
+    if (repo / "Makefile").is_file():
+        return "make test"
+    return ""
 
 
 class Engine:
@@ -425,7 +491,8 @@ class Engine:
 
         @tool(
             "list_repos",
-            "List the repositories available under the projects root.",
+            "List the repositories available under the projects root, with their "
+            "path and a one-line description. inspect_repo one before you brief.",
             {"type": "object", "properties": {}},
         )
         async def list_repos(args: dict[str, Any]) -> dict[str, Any]:
@@ -433,12 +500,32 @@ class Engine:
             try:
                 rows = []
                 for p in sorted(root.iterdir()):
-                    if p.is_dir() and not p.name.startswith("."):
-                        tag = " (git)" if (p / ".git").exists() else ""
-                        rows.append(f"- {p.name}{tag}")
+                    if not p.is_dir() or p.name.startswith("."):
+                        continue
+                    if (p / ".git").exists():
+                        hint = _repo_hint(p)
+                        rows.append(f"- {p.name} — {p}" + (f" · {hint}" if hint else ""))
+                    else:
+                        rows.append(f"- {p.name} — {p} (not a git repo)")
                 return ok("\n".join(rows) or "(no repositories found)")
             except OSError as e:
                 return err(f"could not list {root}: {e}")
+
+        @tool(
+            "inspect_repo",
+            "Look inside a repo BEFORE you brief a worker or judge their work: its "
+            "guide docs (AGENTS.md / CLAUDE.md / README), top-level layout, and the "
+            "likely check command. Manage as a technical lead who's read the code — "
+            "you can also Read/Grep the repo directly at its path.",
+            {"type": "object",
+             "properties": {
+                 "repo": {"type": "string",
+                          "description": "repo name under the projects root, or absolute path"},
+             },
+             "required": ["repo"]},
+        )
+        async def inspect_repo(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._inspect_repo(str(args.get("repo", "")))
 
         @tool(
             "spawn_worker",
@@ -555,8 +642,9 @@ class Engine:
 
         return create_sdk_mcp_server(
             "fleet",
-            tools=[list_repos, spawn_worker, message_worker, worker_status,
-                   review_worker, run_checks, deliver_worker, dismiss_worker],
+            tools=[list_repos, inspect_repo, spawn_worker, message_worker,
+                   worker_status, review_worker, run_checks, deliver_worker,
+                   dismiss_worker],
         )
 
     # ---- fleet operations ------------------------------------------------
@@ -567,18 +655,47 @@ class Engine:
                 return tid, rec
         return None
 
+    def _resolve_repo(self, repo_raw: str) -> Path | None:
+        """A repo name under the projects root, or an absolute path → a real dir."""
+        if not repo_raw.strip():
+            return None
+        repo = Path(repo_raw)
+        if not repo.is_absolute():
+            repo = self.settings.projects_root / repo_raw
+        repo = repo.resolve()
+        return repo if repo.is_dir() else None
+
+    async def _inspect_repo(self, repo_raw: str) -> dict[str, Any]:
+        """Ground the orchestrator in a repo: its guide docs, layout, check command —
+        so it briefs and reviews from real knowledge of the code, not from the outside."""
+        repo = self._resolve_repo(repo_raw)
+        if repo is None:
+            return {"content": [{"type": "text",
+                    "text": f"no such repo: {repo_raw}"}], "is_error": True}
+        parts = [f"# {repo.name} — {repo}"]
+        for doc in ("AGENTS.md", "CLAUDE.md", "README.md"):
+            text = _read_doc(repo / doc, limit=1800)
+            if text:
+                parts.append(f"\n## {doc}\n{text}")
+        parts.append("\n## Top-level layout\n" + _top_level(repo))
+        hint = _test_hint(repo)
+        if hint:
+            parts.append(f"\n## Likely check command\n`{hint}` — verify by actually "
+                         f"running it with run_checks once a worker's on it.")
+        body = "\n".join(parts)
+        if len(body) > 6000:
+            body = body[:6000] + "\n…(truncated — Read/Grep the repo directly for more)"
+        return {"content": [{"type": "text", "text": body}]}
+
     async def _spawn_worker(self, repo_raw: str, task: str) -> dict[str, Any]:
         def err(text: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": text}], "is_error": True}
 
         if not repo_raw.strip() or not task.strip():
             return err("repo and task are both required")
-        repo = Path(repo_raw)
-        if not repo.is_absolute():
-            repo = self.settings.projects_root / repo_raw
-        repo = repo.resolve()
-        if not repo.is_dir():
-            return err(f"no such repo: {repo}")
+        repo = self._resolve_repo(repo_raw)
+        if repo is None:
+            return err(f"no such repo: {repo_raw}")
 
         taken = {r.worker_id for r in self.store.workers().values()}
         taken |= {r.name.lower() for r in self.store.workers().values()}
