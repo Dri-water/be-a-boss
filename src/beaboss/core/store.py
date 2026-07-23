@@ -32,6 +32,7 @@ class ThreadRecord:
     # worker-only:
     worker_id: str = ""       # short id, e.g. "nova"
     repo: str = ""           # the primary checkout the worktree came from
+    origin: str = ""         # office thread that spawned this worker (routes its events)
     base_branch: str = ""    # the branch the worker forked from (merge/PR target)
     base_sha: str = ""       # HEAD at spawn (the fork point)
     checks: str = ""         # last run_checks verdict: "" | pass | fail

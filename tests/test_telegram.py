@@ -9,6 +9,8 @@ from beaboss.core.store import CoreStore
 from beaboss.transports.telegram import (
     MAX_MSG_CHUNKS,
     TelegramTransport,
+    _ok,
+    _thread_of,
     build_application,
 )
 
@@ -58,3 +60,74 @@ def test_post_normal_message_not_truncated():
                    speaker=Speaker(role="direct", name="d"), text="a short reply")
     asyncio.run(transport.post(out))
     assert bot.sent == ["a short reply"]
+
+
+class RecordingBot:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def send_message(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+def test_route_maps_dm_general_and_topic():
+    t = TelegramTransport(RecordingBot(), _settings())  # group chat_id=1
+    assert t._route("dm:42") == (42, None)     # a DM → the user's chat, no topic
+    assert t._route("dm:42#nova") == (42, None)  # a DM worker streams into that DM
+    assert t._route("general") == (1, None)    # #general → the group, no topic
+    assert t._route("777") == (1, 777)         # a worker topic → the group + topic id
+
+
+def test_post_to_dm_routes_to_user_chat():
+    bot = RecordingBot()
+    t = TelegramTransport(bot, _settings())
+    asyncio.run(t.post(Outbound(
+        thread_id="dm:42",
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"), text="hi")))
+    assert bot.calls[0]["chat_id"] == 42                 # went to the user, not group 1
+    assert bot.calls[0]["message_thread_id"] is None
+
+
+class _U:
+    def __init__(self, uid): self.id = uid; self.username = "u"; self.first_name = "U"
+
+
+class _C:
+    def __init__(self, cid, ctype): self.id = cid; self.type = ctype
+
+
+class _M:
+    def __init__(self, tid=None): self.message_thread_id = tid
+
+
+class _Upd:
+    def __init__(self, user, chat, msg):
+        self.effective_user = user; self.effective_chat = chat
+        self.effective_message = msg
+
+
+class _Ctx:
+    def __init__(self, settings, transport):
+        self.bot_data = {"settings": settings, "transport": transport}
+
+
+def test_guard_accepts_allowlisted_dm_but_not_foreign_group():
+    settings = _settings()  # allowed={1}, group chat_id=1
+    ctx = _Ctx(settings, TelegramTransport(RecordingBot(), settings))
+
+    # allowlisted user's DM → allowed; its office thread is 'dm:<uid>'
+    dm = _Upd(_U(1), _C(999, "private"), _M())
+    assert _ok(dm, ctx) is True
+    assert _thread_of(dm) == "dm:1"
+
+    # a stranger's DM → refused
+    assert _ok(_Upd(_U(2), _C(2, "private"), _M()), ctx) is False
+
+    # allowlisted user in some OTHER group → refused (only the bound group counts)
+    assert _ok(_Upd(_U(1), _C(555, "supergroup"), _M()), ctx) is False
+
+    # allowlisted user in the bound group → allowed; #general / topic threads
+    grp = _Upd(_U(1), _C(1, "supergroup"), _M())
+    assert _ok(grp, ctx) is True
+    assert _thread_of(grp) == "general"
+    assert _thread_of(_Upd(_U(1), _C(1, "supergroup"), _M(7))) == "7"

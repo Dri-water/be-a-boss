@@ -41,60 +41,83 @@ GENERAL = "general"
 MAX_MSG_CHUNKS = 5
 
 
-def _to_thread_id(message_thread_id: int | None) -> str:
-    return GENERAL if not message_thread_id else str(message_thread_id)
-
-
-def _to_topic_id(thread_id: str) -> int | None:
-    return None if thread_id == GENERAL else int(thread_id)
+def _thread_of(update: Update) -> str:
+    """The core thread_id for an incoming update: a private DM is its own office
+    'dm:<user_id>', the group's General is 'general', a group topic is its numeric id."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat and chat.type == "private" and user:
+        return f"dm:{user.id}"
+    msg = update.effective_message
+    tid = msg.message_thread_id if msg else None
+    return GENERAL if not tid else str(tid)
 
 
 class TelegramTransport:
-    """Implements core.ports.Transport over a Telegram supergroup with Topics."""
+    """Implements core.ports.Transport over Telegram. Two kinds of chat:
+    the supergroup (worker topics, #general, the dashboard) and per-boss DMs (private
+    offices). A thread_id routes to one of them via `_route`."""
 
     def __init__(self, bot, settings: Settings):
         self.bot = bot
         self.settings = settings
-        self.chat_id: int | None = settings.chat_id
+        self.group_chat_id: int | None = settings.chat_id
 
-    def ensure_chat(self, chat_id: int) -> None:
-        if self.chat_id is None:
-            self.chat_id = chat_id
-            log.info("bound to chat_id=%s (pin this in TELEGRAM_CHAT_ID)", chat_id)
+    def ensure_group(self, chat_id: int) -> None:
+        if self.group_chat_id is None:
+            self.group_chat_id = chat_id
+            log.info("bound to group chat_id=%s (pin this in TELEGRAM_CHAT_ID)", chat_id)
+
+    def _route(self, thread_id: str) -> tuple[int | None, int | None]:
+        """thread_id → (chat_id, message_thread_id). DMs go to the user's chat with
+        no topic; #general + worker topics go to the supergroup."""
+        if thread_id.startswith("dm:"):
+            # 'dm:<uid>' is the office; 'dm:<uid>#<worker>' is a worker that streams
+            # into that same DM (DMs have no sub-threads) — both route to the chat.
+            rest = thread_id[3:].split("#", 1)[0]
+            try:
+                return int(rest), None
+            except ValueError:
+                return None, None
+        if thread_id == GENERAL:
+            return self.group_chat_id, None
+        try:
+            return self.group_chat_id, int(thread_id)
+        except ValueError:
+            return self.group_chat_id, None
 
     # ---- Transport interface --------------------------------------------
 
     async def create_thread(self, title: str) -> str:
-        assert self.chat_id is not None, "no chat bound yet"
+        # Worker topics + direct sessions always live in the supergroup.
+        assert self.group_chat_id is not None, "no group bound yet"
         topic = await self.bot.create_forum_topic(
-            chat_id=self.chat_id, name=title[:128])
+            chat_id=self.group_chat_id, name=title[:128])
         return str(topic.message_thread_id)
 
     async def rename_thread(self, thread_id: str, title: str) -> None:
-        if self.chat_id is None or thread_id == GENERAL:
+        chat_id, topic_id = self._route(thread_id)
+        if chat_id is None or topic_id is None:  # only group topics have titles
             return
         try:
             await self.bot.edit_forum_topic(
-                chat_id=self.chat_id,
-                message_thread_id=_to_topic_id(thread_id),
-                name=title[:128],
-            )
+                chat_id=chat_id, message_thread_id=topic_id, name=title[:128])
         except Exception:  # noqa: BLE001
             pass
 
     async def close_thread(self, thread_id: str) -> None:
-        if self.chat_id is None or thread_id == GENERAL:
+        chat_id, topic_id = self._route(thread_id)
+        if chat_id is None or topic_id is None:
             return
         try:
             await self.bot.close_forum_topic(
-                chat_id=self.chat_id,
-                message_thread_id=_to_topic_id(thread_id),
-            )
+                chat_id=chat_id, message_thread_id=topic_id)
         except Exception:  # noqa: BLE001
             pass
 
     async def post(self, out: Outbound) -> None:
-        if self.chat_id is None:
+        chat_id, topic_id = self._route(out.thread_id)
+        if chat_id is None:
             return
         header = self._header(out)
         if out.media_path is not None:
@@ -102,9 +125,7 @@ class TelegramTransport:
             if header:
                 cap = f"{header}\n{cap}".strip()
             cap = cap[:1024] or None
-            common = dict(chat_id=self.chat_id,
-                          message_thread_id=_to_topic_id(out.thread_id),
-                          caption=cap)
+            common = dict(chat_id=chat_id, message_thread_id=topic_id, caption=cap)
             p = Path(out.media_path)
             if out.media_kind == "photo":
                 await self.bot.send_photo(photo=p, **common)
@@ -125,19 +146,16 @@ class TelegramTransport:
                 f"If you need the whole thing, ask for it as a file."]
         for part in parts:
             await self.bot.send_message(
-                chat_id=self.chat_id,
-                message_thread_id=_to_topic_id(out.thread_id),
-                text=part,
-            )
+                chat_id=chat_id, message_thread_id=topic_id, text=part)
 
     async def indicate_busy(self, thread_id: str) -> None:
-        if self.chat_id is None:
+        chat_id, topic_id = self._route(thread_id)
+        if chat_id is None:
             return
         try:
             await self.bot.send_chat_action(
-                chat_id=self.chat_id, action=ChatAction.TYPING,
-                message_thread_id=_to_topic_id(thread_id),
-            )
+                chat_id=chat_id, action=ChatAction.TYPING,
+                message_thread_id=topic_id)
         except Exception:  # noqa: BLE001
             pass
 
@@ -161,10 +179,15 @@ def _ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
     if not user or user.id not in settings.allowed_user_ids:
         return False
+    # A private DM from an allowlisted user is always allowed — it's that user's
+    # own office. Group messages must come from the bound supergroup (the shared
+    # office + shop floor), which we bind on first sight if not pinned yet.
+    if chat and chat.type == "private":
+        return True
     if settings.chat_id is not None and (not chat or chat.id != settings.chat_id):
         return False
     if chat:
-        ctx.bot_data["transport"].ensure_chat(chat.id)
+        ctx.bot_data["transport"].ensure_group(chat.id)
     return True
 
 
@@ -286,6 +309,11 @@ async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     engine: Engine = ctx.bot_data["engine"]
     msg = update.effective_message
+    chat = update.effective_chat
+    if chat and chat.type == "private":
+        await msg.reply_text("Run /new in the group — a direct session lives in its "
+                             "own topic there. In a DM, just tell me what you need.")
+        return
     if not ctx.args:
         await msg.reply_text("Usage: /new <path> [name] — path relative to "
                              "PROJECTS_ROOT, or absolute.")
@@ -298,7 +326,7 @@ async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     thread_id, title = result
     await ctx.bot.send_message(
         chat_id=update.effective_chat.id,
-        message_thread_id=_to_topic_id(thread_id),
+        message_thread_id=int(thread_id),
         text=(f"✅ direct session ready: {title}\n"
               "Type to talk to it. /stop interrupts, /kill ends it."),
     )
@@ -337,9 +365,9 @@ async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     engine: Engine = ctx.bot_data["engine"]
     msg = update.effective_message
-    thread_id = _to_thread_id(msg.message_thread_id)
-    if thread_id == GENERAL:
-        await msg.reply_text("Run /kill inside a session topic.")
+    thread_id = _thread_of(update)
+    if thread_id == GENERAL or thread_id.startswith("dm:"):
+        await msg.reply_text("Run /kill inside a session topic, not the office.")
         return
     existed = await engine.kill(thread_id)
     if not existed:
@@ -356,7 +384,7 @@ async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _ok(update, ctx):
         return
     engine: Engine = ctx.bot_data["engine"]
-    thread_id = _to_thread_id(update.effective_message.message_thread_id)
+    thread_id = _thread_of(update)
     ok = await engine.interrupt(thread_id)
     await update.effective_message.reply_text(
         "⏹ interrupting…" if ok else "Nothing running here.")
@@ -438,7 +466,7 @@ async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     user = update.effective_user
     await engine.on_inbound(InboundMessage(
-        thread_id=_to_thread_id(msg.message_thread_id),
+        thread_id=_thread_of(update),
         text=text,
         media=media,
         sender_name=(user.first_name or user.username or "the boss") if user else "",
