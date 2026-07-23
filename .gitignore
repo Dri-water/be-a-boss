@@ -8,9 +8,10 @@ dist/
 
 # Secrets & local state
 .env
+.env.*
+!.env.example
 state/
 *.log
 
 # Generated / runtime
-landing/preview.png
 .beaboss-inbox/
