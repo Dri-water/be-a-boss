@@ -43,6 +43,7 @@ class ThreadRecord:
     checks_sha: str = ""     # branch tip when checks last ran (to detect staleness)
     task: str = ""           # the brief, verbatim
     worker_status: str = ""   # working | done | blocked | dismissed | delivered
+    model: str = ""          # resolved model id for this worker ("" = global default)
 
 
 class CoreStore:

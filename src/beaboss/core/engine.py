@@ -351,6 +351,9 @@ class Engine:
                 if self.settings.session_system_append is not None
                 else DEFAULT_SESSION_APPEND)
         worker_append = base + WORKER_APPEND_EXTRA
+        # The model this worker was hired with (its dispatched tier), resolved at spawn
+        # and persisted, so a restart reuses it. "" => the global settings.model.
+        model = rec.model or None
         # A worker may run on Codex instead of Claude; the choice lives here (the
         # single worker-construction point). Codex needs the prompt handed in (it has
         # no system-prompt channel) and the persisted id to resume across restarts.
@@ -364,7 +367,7 @@ class Engine:
             )
             backend = CodexBackend(
                 cwd, system_prompt=worker_append, resume_id=rec.session_id,
-                model=self.settings.model, cli_path=self.settings.cli_path)
+                model=model or self.settings.model, cli_path=self.settings.cli_path)
         else:
             backend = None  # None => CoreSession builds the default ClaudeAgentBackend
         session = CoreSession(
@@ -374,6 +377,7 @@ class Engine:
             on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
             system_append=worker_append,
             backend=backend,
+            model_override=model,  # ignored on the codex path (codex uses its own model=)
         )
         session.on_turn_done = self._on_worker_turn_done
         session.on_turn_error = self._on_worker_turn_error
@@ -593,12 +597,19 @@ class Engine:
                  "repo": {"type": "string",
                           "description": "repo name under the projects root, or absolute path"},
                  "task": {"type": "string", "description": "the self-contained brief"},
+                 "tier": {"type": "string", "enum": ["fast", "balanced", "deep"],
+                          "description": "model tier for this worker: 'fast' (cheap/quick "
+                                         "— routine or mechanical work), 'balanced' "
+                                         "(default), 'deep' (top model — hard or ambiguous "
+                                         "work). Match the model to the difficulty; omit "
+                                         "for balanced."},
              },
              "required": ["repo", "task"]},
         )
         async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
-            return await engine._spawn_worker(str(args.get("repo", "")),
-                                             str(args.get("task", "")))
+            return await engine._spawn_worker(
+                str(args.get("repo", "")), str(args.get("task", "")),
+                tier=str(args.get("tier", "")).strip().lower() or None)
 
         @tool(
             "message_worker",
@@ -750,15 +761,19 @@ class Engine:
             body = body[:6000] + "\n…(truncated — Read/Grep the repo directly for more)"
         return {"content": [{"type": "text", "text": body}]}
 
-    async def _spawn_worker(self, repo_raw: str, task: str) -> dict[str, Any]:
+    async def _spawn_worker(self, repo_raw: str, task: str,
+                            tier: str | None = None) -> dict[str, Any]:
         def err(text: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": text}], "is_error": True}
 
         if not repo_raw.strip() or not task.strip():
             return err("repo and task are both required")
+        if tier and tier not in ("fast", "balanced", "deep"):
+            return err(f"unknown tier '{tier}' — use fast, balanced, or deep")
         repo = self._resolve_repo(repo_raw)
         if repo is None:
             return err(f"no such repo: {repo_raw}")
+        model = self.settings.resolve_worker_model(tier)  # allowlisted by construction
 
         taken = {r.worker_id for r in self.store.workers().values()}
         taken |= {r.name.lower() for r in self.store.workers().values()}
@@ -786,7 +801,7 @@ class Engine:
         rec = ThreadRecord(
             role="worker", name=name, cwd=str(cwd), worker_id=worker_id,
             repo=str(repo), base_branch=base_branch,
-            task=task.strip(), worker_status="working",
+            task=task.strip(), worker_status="working", model=model or "",
         )
         self.store.put(thread_id, rec)
 
@@ -808,7 +823,8 @@ class Engine:
             f"[Brief from the orchestrator]\n{task.strip()}"
         )
         await self._refresh_dashboard()
-        self._action(f"spawn_worker → {name} · {repo.name}")
+        self._action(f"spawn_worker → {name} · {repo.name}"
+                     + (f" [{tier}]" if tier else ""))
         return {"content": [{"type": "text", "text":
                 f"spawned worker {worker_id} ({name}) in {iso_note}; "
                 f"thread created. They will report back via the fleet inbox."}]}

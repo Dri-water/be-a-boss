@@ -10,6 +10,9 @@ _KEYS = [
     "AGENT_PERMISSION_MODE", "AGENT_MODEL", "AGENT_MAX_TURNS", "AGENT_CLI_PATH",
     "CLAUDE_PERMISSION_MODE", "CLAUDE_MODEL", "CLAUDE_MAX_TURNS", "CLAUDE_CLI_PATH",
     "CODEX_PERMISSION_MODE", "CODEX_MODEL", "CODEX_MAX_TURNS", "CODEX_CLI_PATH",
+    "AGENT_MODEL_FAST", "AGENT_MODEL_BALANCED", "AGENT_MODEL_DEEP",
+    "CLAUDE_MODEL_FAST", "CLAUDE_MODEL_BALANCED", "CLAUDE_MODEL_DEEP",
+    "CODEX_MODEL_FAST", "CODEX_MODEL_BALANCED", "CODEX_MODEL_DEEP", "DEPLOY_BRAVENESS",
 ]
 
 
@@ -169,3 +172,33 @@ def test_deploy_braveness_default_and_override(monkeypatch):
     assert Settings.from_env().deploy_braveness == "conservative"
     monkeypatch.setenv("DEPLOY_BRAVENESS", "wat")                      # unknown → default
     assert Settings.from_env().deploy_braveness == "balanced"
+
+
+def test_model_tiers_default_map(clean_env):
+    """Model dispatch exposes fast/deep tiers; 'balanced' is empty so it falls through
+    to the global model (unset tier == today's behavior)."""
+    s = Settings.from_env(clean_env)
+    assert s.model_tiers.get("fast") == "haiku"
+    assert s.model_tiers.get("deep") == "opus"
+    assert s.model_tiers.get("balanced") == ""
+
+
+def test_model_tier_env_override(clean_env, monkeypatch):
+    """Tiers are env-overridable with the same precedence as every agent knob —
+    a backend-specific CLAUDE_MODEL_DEEP wins over the neutral AGENT_MODEL_DEEP."""
+    monkeypatch.setenv("AGENT_MODEL_FAST", "custom-fast")
+    monkeypatch.setenv("AGENT_MODEL_DEEP", "neutral-deep")
+    monkeypatch.setenv("CLAUDE_MODEL_DEEP", "claude-deep")   # backend-specific wins
+    s = Settings.from_env(clean_env)
+    assert s.model_tiers["fast"] == "custom-fast"
+    assert s.model_tiers["deep"] == "claude-deep"
+
+
+def test_resolve_worker_model_fallback(clean_env, monkeypatch):
+    """The fallback chain: per-tier id -> global AGENT_MODEL -> None (CLI default)."""
+    monkeypatch.setenv("AGENT_MODEL", "global-default")
+    s = Settings.from_env(clean_env)
+    assert s.resolve_worker_model("deep") == "opus"               # tier wins
+    assert s.resolve_worker_model("balanced") == "global-default"  # "" tier -> global
+    assert s.resolve_worker_model(None) == "global-default"        # no tier -> global
+    assert s.resolve_worker_model("bogus") == "global-default"     # unknown -> global

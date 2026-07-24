@@ -121,6 +121,7 @@ class CoreSession:
         backend: AgentBackend | None = None,
         final_only: bool = False,
         footer_fn: Callable[[], str | None] | None = None,
+        model_override: str | None = None,
     ):
         self.thread_id = thread_id
         self.cwd = cwd
@@ -141,6 +142,8 @@ class CoreSession:
         # footer_fn: called at reply time; whatever it returns is appended to the
         # reply as code-generated ground truth (e.g. the fleet actions this turn).
         self._footer_fn = footer_fn
+        # A per-session model (a worker's dispatched tier); None => the global settings.model.
+        self._model_override = model_override
         self._tool_buf: list[str] = []   # batched 🔧 lines (streaming sessions)
         # The agent runtime is a swappable seam; default to the Claude Code SDK.
         self._backend = backend or ClaudeAgentBackend(self._build_options)
@@ -179,7 +182,7 @@ class CoreSession:
             permission_mode=self.settings.permission_mode,
             include_partial_messages=False,
             resume=self.session_id,
-            model=self.settings.model or None,
+            model=self._model_override or self.settings.model or None,
             max_turns=self.settings.max_turns,
             cli_path=self.settings.cli_path or None,
             setting_sources=SETTING_SOURCES,

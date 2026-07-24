@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -53,6 +53,28 @@ def _agent_setting(knob: str, backend: str) -> tuple[str, str]:
     return os.getenv(f"AGENT_{knob}", "").strip(), f"AGENT_{knob}"
 
 
+# Model tiers the orchestrator picks per worker (fast/routine vs deep/hard) so it stops
+# burning the top model on a rename. The tier NAME is the allowlist — the LLM can only
+# pass one of these three, never a raw (bogus) model id. "" for a tier means "fall
+# through to the global AGENT_MODEL / CLI default", so an unset tier == today's behavior.
+_DEFAULT_TIERS = {
+    # claude aliases resolve to the current concrete model in the CLI, so they don't rot.
+    "claude": {"fast": "haiku", "balanced": "", "deep": "opus"},
+    "codex": {"fast": "", "balanced": "", "deep": ""},  # operator sets CODEX_MODEL_* ids
+}
+
+
+def _agent_model_tiers(backend: str) -> dict[str, str]:
+    """Per-tier model map, backend-aware and env-overridable via AGENT_MODEL_<TIER> /
+    <BACKEND>_MODEL_<TIER> (same precedence as every other agent knob)."""
+    tiers = dict(_DEFAULT_TIERS.get(backend, {}))
+    for tier in ("fast", "balanced", "deep"):
+        val, _ = _agent_setting(f"MODEL_{tier.upper()}", backend)
+        if val:
+            tiers[tier] = val
+    return tiers
+
+
 @dataclass
 class Settings:
     bot_token: str | None
@@ -72,6 +94,14 @@ class Settings:
     # conversational gate, right for greenfield/solo. "conservative": nothing lands
     # without an explicit programmatic /approve the LLM can't forge.
     deploy_braveness: str = "balanced"
+    # Per-worker model tiers (fast/balanced/deep) -> concrete model ids; the orchestrator
+    # picks a tier at spawn. Empty for a tier => fall back to `model` (AGENT_MODEL/default).
+    model_tiers: dict[str, str] = field(default_factory=dict)
+
+    def resolve_worker_model(self, tier: str | None) -> str | None:
+        """A worker's model from its tier, with a safe fallback chain:
+        per-tier id -> global AGENT_MODEL (self.model) -> None (CLI default)."""
+        return self.model_tiers.get(tier or "", "") or self.model or None
 
     @classmethod
     def from_env(cls, env_path: str | os.PathLike[str] | None = None) -> "Settings":
@@ -123,4 +153,5 @@ class Settings:
                 "conservative"
                 if os.getenv("DEPLOY_BRAVENESS", "").strip().lower() == "conservative"
                 else "balanced"),
+            model_tiers=_agent_model_tiers(backend),
         )

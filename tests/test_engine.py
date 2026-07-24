@@ -748,3 +748,48 @@ def test_worker_turn_error_wakes_the_orchestrator(tmp_path, monkeypatch):
     notes = " ".join(engine._inbox).lower()
     assert "nova" in notes and "buffer size" in notes       # …and told what broke
     assert "reconnected" in notes                           # recovered → retry/re-brief hint
+
+
+def test_spawn_worker_records_dispatched_tier_model(tmp_path, monkeypatch):
+    """Model dispatch: a tier resolves to a concrete model id, persisted on the worker
+    record so it's deterministic and survives a restart."""
+    engine, t = _engine(tmp_path)
+    engine.settings.model_tiers = {"fast": "haiku", "balanced": "", "deep": "opus"}
+    (tmp_path / "projects" / "myrepo").mkdir(parents=True)
+
+    async def fake_is_git(path): return True
+    async def fake_branch(path): return "main"
+    async def fake_create(*a, **k): return tmp_path / "wt"
+
+    class FS:                       # a fake session so no real backend starts
+        async def submit(self, *a, **k): pass
+    async def fake_ensure(thread_id, rec): return FS()
+
+    monkeypatch.setattr(worktrees, "is_git_repo", fake_is_git)
+    monkeypatch.setattr(worktrees, "current_branch", fake_branch)
+    monkeypatch.setattr(worktrees, "create_worktree", fake_create)
+    monkeypatch.setattr(engine, "_ensure_session", fake_ensure)
+
+    res = asyncio.run(engine._spawn_worker("myrepo", "rename a var", tier="deep"))
+    assert res.get("is_error") is not True
+    recs = list(engine.store.workers().values())
+    assert len(recs) == 1 and recs[0].model == "opus"     # deep -> opus, persisted
+
+
+def test_spawn_worker_rejects_bogus_tier(tmp_path):
+    """The enum is the allowlist, but _spawn_worker validates defensively too — a bad
+    tier errors cleanly and creates nothing."""
+    engine, t = _engine(tmp_path)
+    res = asyncio.run(engine._spawn_worker("myrepo", "task", tier="ultra"))
+    assert res.get("is_error") is True and "tier" in res["content"][0]["text"]
+    assert engine.store.workers() == {}
+
+
+def test_make_worker_session_uses_dispatched_model(tmp_path):
+    """The persisted model reaches the CoreSession as its override — restart-proof,
+    since _make_worker_session reads rec.model, not the (gone) tier."""
+    engine, t = _engine(tmp_path)
+    rec = ThreadRecord(role="worker", name="Nova", worker_id="nova",
+                       cwd=str(tmp_path), repo=str(tmp_path), model="haiku")
+    sess = engine._make_worker_session("55", rec)
+    assert sess._model_override == "haiku"
