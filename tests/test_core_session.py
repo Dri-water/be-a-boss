@@ -599,3 +599,60 @@ def test_crashed_turn_self_heals_and_notifies(tmp_path):
     assert seen and "buffer size" in str(seen[0])   # the supervisor WAS told of the crash
     assert backend.started == 2                      # it reconnected (initial + reconnect)
     assert status_after == "idle"                    # recovered and reusable, not wedged
+
+
+class FlakyBackend(FakeBackend):
+    """Fails the first turn with a RECOVERABLE (rate-limit) error, then succeeds — the
+    shape of a credit/rate limit clearing."""
+
+    def __init__(self, scripted):
+        super().__init__(scripted)
+        self._failed = False
+
+    def receive(self):
+        if not self._failed:
+            self._failed = True
+
+            async def boom():
+                raise RuntimeError("rate limit exceeded — 429 too many requests")
+                yield
+
+            return boom()
+        return super().receive()
+
+
+def test_recoverable_error_auto_retries_without_a_nudge(tmp_path):
+    """A transient rate/credit error resumes on its OWN when it clears — the boss does
+    not have to say 'continue', and on_turn_error is not fired (it self-healed)."""
+    backend = FlakyBackend([
+        ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+                      num_turns=1, session_id="s", total_cost_usd=0.0,
+                      result="finished after the limit cleared"),
+    ])
+    gave_up: list[BaseException] = []
+
+    async def on_err(_s, e):
+        gave_up.append(e)
+
+    post = SinkPost()
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path, speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+    sess.on_turn_error = on_err
+    sess.RETRY_BASE = 0.01                  # no real waiting in the test
+
+    async def drive():
+        await sess.start()
+        await sess.submit("go")
+        for _ in range(100):                # let the auto-retry land + complete
+            await asyncio.sleep(0.01)
+            if any("cleared" in o.text for o in post.out):
+                break
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert gave_up == []                     # never gave up — it self-healed
+    assert any("finished after the limit cleared" in o.text for o in post.out)  # resumed
+    assert backend.started >= 2              # reconnected before retrying
