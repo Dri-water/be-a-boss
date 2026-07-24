@@ -207,3 +207,85 @@ def test_dashboard_not_modified_does_not_duplicate(tmp_path):
     asyncio.run(t.update_dashboard("same text"))
     assert bot.sent == []                      # no new message created
     assert store.dashboard_msg_id == 101       # board id unchanged
+
+
+# ---- factory-reset message deletion (#general + DMs have no topic to drop) --------
+
+class _MsgFull:
+    def __init__(self, mid, tid=None):
+        self.message_id = mid
+        self.message_thread_id = tid
+
+
+class IdBot:
+    """Returns Message-like objects with ids (so office sends are trackable) and
+    records deletions, so reset() can be asserted."""
+    def __init__(self):
+        self._next = 1000
+        self.deleted: list[tuple] = []
+
+    async def send_message(self, **kw):
+        self._next += 1
+        return type("M", (), {"chat_id": kw["chat_id"], "message_id": self._next})()
+
+    async def delete_messages(self, chat_id, message_ids):
+        self.deleted.append(("bulk", chat_id, list(message_ids)))
+
+    async def delete_message(self, chat_id, message_id):
+        self.deleted.append(("one", chat_id, message_id))
+
+
+def test_store_office_message_ids_persist_cap_clear(tmp_path, monkeypatch):
+    from beaboss.core import store as store_mod
+    s = CoreStore(tmp_path / "state")
+    s.record_office_message(1, 10)
+    s.record_office_message(1, 11)
+    s.record_office_message(2, 20)
+    assert s.office_message_ids == {"1": [10, 11], "2": [20]}
+    assert CoreStore(tmp_path / "state").office_message_ids == {"1": [10, 11], "2": [20]}
+
+    monkeypatch.setattr(store_mod, "OFFICE_MSG_CAP", 5)
+    for i in range(8):
+        s.record_office_message(3, i)
+    assert s.office_message_ids["3"] == [3, 4, 5, 6, 7]   # capped, oldest dropped
+
+    s.clear_office_messages()
+    assert s.office_message_ids == {}
+
+
+def test_office_messages_tracked_on_post_and_deleted_on_reset(tmp_path):
+    bot = IdBot()
+    store = CoreStore(tmp_path / "state")
+    t = TelegramTransport(bot, _settings(), store)  # group chat_id=1
+    sp = Speaker(role="orchestrator", name="Orc", emoji="🧭")
+
+    asyncio.run(t.post(Outbound(thread_id="general", speaker=sp, text="office hello")))
+    asyncio.run(t.post(Outbound(thread_id="55", speaker=sp, text="worker note")))
+
+    assert list(store.office_message_ids) == ["1"]        # only the office chat
+    assert len(store.office_message_ids["1"]) == 1        # the worker-topic post is not tracked
+
+    tracked = store.office_message_ids["1"][0]
+    asyncio.run(t.reset())
+    assert bot.deleted == [("bulk", 1, [tracked])]         # bulk-deleted the office message
+    assert store.office_message_ids == {}                  # tracking cleared
+
+
+def test_record_incoming_tracks_only_office_messages(tmp_path):
+    from beaboss.transports.telegram import record_incoming
+    settings = _settings()
+    settings.allowed_user_ids = {42}                       # avoid the group-id/user-id clash
+    store = CoreStore(tmp_path / "state")
+    ctx = _Ctx(settings, TelegramTransport(RecordingBot(), settings, store))  # group id=1
+
+    def rec(update):
+        asyncio.run(record_incoming(update, ctx))
+
+    rec(_Upd(_U(42), _C(1, "supergroup"), _MsgFull(101)))          # #general → tracked
+    rec(_Upd(_U(42), _C(1, "supergroup"), _MsgFull(102, tid=7)))   # worker topic → skipped
+    rec(_Upd(_U(42), _C(42, "private"), _MsgFull(201)))            # allowlisted DM → tracked
+    rec(_Upd(_U(7), _C(7, "private"), _MsgFull(202)))             # stranger DM → skipped
+
+    assert store.office_message_ids.get("1") == [101]              # general only, not the topic
+    assert store.office_message_ids.get("42") == [201]             # the allowlisted DM
+    assert "7" not in store.office_message_ids                     # stranger dropped

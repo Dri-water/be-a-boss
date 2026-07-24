@@ -127,12 +127,13 @@ class TelegramTransport:
                 kw["caption"] = to_telegram_html(combined)
                 kw["parse_mode"] = "HTML"
             try:
-                await self._send_media(p, out.media_kind, kw)
+                sent = await self._send_media(p, out.media_kind, kw)
             except BadRequest:
                 kw = dict(common)
                 if combined:
                     kw["caption"] = combined
-                await self._send_media(p, out.media_kind, kw)
+                sent = await self._send_media(p, out.media_kind, kw)
+            self._track_office(topic_id, sent)
             if overflow:
                 await self.post(Outbound(
                     thread_id=out.thread_id, speaker=out.speaker, text=overflow))
@@ -152,20 +153,30 @@ class TelegramTransport:
             # plain-text fallback if Telegram rejects the entities — never drop
             # a message over formatting.
             try:
-                await self.bot.send_message(
+                sent = await self.bot.send_message(
                     chat_id=chat_id, message_thread_id=topic_id,
                     text=to_telegram_html(part), parse_mode="HTML")
             except BadRequest:
-                await self.bot.send_message(
+                sent = await self.bot.send_message(
                     chat_id=chat_id, message_thread_id=topic_id, text=part)
+            self._track_office(topic_id, sent)
 
-    async def _send_media(self, p: Path, kind: str | None, kw: dict) -> None:
+    async def _send_media(self, p: Path, kind: str | None, kw: dict):
         if kind == "photo":
-            await self.bot.send_photo(photo=p, **kw)
-        elif kind == "video":
-            await self.bot.send_video(video=p, supports_streaming=True, **kw)
-        else:
-            await self.bot.send_document(document=p, **kw)
+            return await self.bot.send_photo(photo=p, **kw)
+        if kind == "video":
+            return await self.bot.send_video(video=p, supports_streaming=True, **kw)
+        return await self.bot.send_document(document=p, **kw)
+
+    def _track_office(self, topic_id: int | None, message) -> None:
+        """Remember a message posted in an office (#general or a DM — no topic) so a
+        factory reset can delete it. Worker/direct topics (topic_id set) are dropped
+        wholesale instead, so their messages need no per-id tracking."""
+        if topic_id is None and message is not None:
+            try:
+                self.store.record_office_message(message.chat_id, message.message_id)
+            except Exception:  # noqa: BLE001
+                pass
 
     async def indicate_busy(self, thread_id: str) -> None:
         chat_id, topic_id = self._route(thread_id)
@@ -225,6 +236,28 @@ class TelegramTransport:
                 chat_id=chat_id, message_thread_id=topic_id)
         except Exception:  # noqa: BLE001
             pass
+
+    async def reset(self) -> None:
+        """Factory reset: delete every tracked message in the offices (#general + DMs),
+        which — unlike worker topics — have no topic to drop wholesale. Best-effort:
+        it needs the bot's 'delete messages' admin right in the group (a DM's incoming
+        messages it can always delete), and any id already gone is skipped."""
+        for chat_str, ids in dict(self.store.office_message_ids).items():
+            try:
+                chat_id = int(chat_str)
+            except (TypeError, ValueError):
+                continue
+            for i in range(0, len(ids), 100):        # deleteMessages takes ≤100 at once
+                batch = ids[i:i + 100]
+                try:
+                    await self.bot.delete_messages(chat_id=chat_id, message_ids=batch)
+                except Exception:  # noqa: BLE001 — no perms / already gone: fall back
+                    for mid in batch:  # one un-deletable id shouldn't drop the whole batch
+                        try:
+                            await self.bot.delete_message(chat_id=chat_id, message_id=mid)
+                        except Exception:  # noqa: BLE001
+                            pass
+        self.store.clear_office_messages()
 
     async def delete_dashboard(self) -> None:
         """Factory reset: unpin + delete the status board."""
@@ -362,6 +395,11 @@ async def cmd_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         lines.append(("✅" if can_topics else "❌") + " I can manage topics"
                      + ("" if can_topics else " — grant me the “Manage Topics” admin right"))
         ok &= is_admin and can_topics
+        # Optional: only needed so /reset can also delete the #general/DM history.
+        can_delete = is_admin and bool(getattr(member, "can_delete_messages", False))
+        lines.append(("✅" if can_delete else "◽") + " I can delete messages"
+                     + ("" if can_delete else " — optional; grant “Delete Messages” so "
+                        "/reset can wipe the #general/DM history too"))
     except Exception as e:  # noqa: BLE001
         lines.append(f"⚠️ couldn't read my own membership ({e})")
         ok = False
@@ -410,11 +448,15 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "🏭 Factory reset wipes EVERYTHING I know: all conversation memory, "
             "every worker (topics deleted, worktrees discarded — committed "
             "worker/* branches stay in your repos), the dashboard, all records. "
-            "Old #general/DM messages stay visible to you, but I can't read them — "
-            "a fresh me starts truly blank.\n\nThis cannot be undone. "
-            "Run /reset confirm to do it.")
+            "I'll also delete the #general/DM messages I've posted and seen (I need "
+            "the “Delete messages” admin right in the group for that) — a truly blank "
+            "slate.\n\nThis cannot be undone. Run /reset confirm to do it.")
         return
-    await msg.reply_text(await engine.factory_reset())
+    result = await engine.factory_reset()
+    # The /reset message itself was just deleted by the wipe, so DON'T reply to it —
+    # send a standalone confirmation to the same place instead.
+    await ctx.bot.send_message(
+        chat_id=msg.chat_id, message_thread_id=msg.message_thread_id, text=result)
 
 
 async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -547,6 +589,27 @@ async def _collect_media(msg) -> tuple[list[MediaIn], str | None]:
     return items, None
 
 
+async def record_incoming(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs before the real handlers (group -1) for every incoming update: remember
+    the message ids in the offices (#general + allowlisted DMs) so /reset can delete
+    them. Records and returns — never blocks the message or stops propagation."""
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    transport = ctx.bot_data.get("transport")
+    if not msg or not chat or transport is None:
+        return
+    allowed = ctx.bot_data["settings"].allowed_user_ids
+    is_office = (
+        (chat.id == transport.group_chat_id and msg.message_thread_id is None)
+        or (chat.type == "private" and user is not None and user.id in allowed))
+    if is_office:
+        try:
+            transport.store.record_office_message(chat.id, msg.message_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _ok(update, ctx):
         return
@@ -658,6 +721,10 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
     app.bot_data["settings"] = settings
     app.bot_data["engine"] = engine
     app.bot_data["transport"] = transport
+
+    # Runs first (group -1), for every update, to remember office message ids for
+    # /reset. It doesn't stop propagation, so the real handlers below still fire.
+    app.add_handler(MessageHandler(filters.ALL, record_incoming), group=-1)
 
     app.add_handler(CommandHandler(["start", "help"], cmd_help))
     app.add_handler(CommandHandler("whoami", cmd_whoami))

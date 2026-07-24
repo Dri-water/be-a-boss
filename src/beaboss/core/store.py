@@ -17,7 +17,13 @@ log = logging.getLogger("beaboss.core.store")
 
 # Bump when the on-disk shape changes incompatibly; guards a self-developed change
 # from silently mangling state written by a different version of the code.
+# (office_message_ids was added as an additive field — old code ignores it, new code
+# defaults it — so no bump was needed.)
 SCHEMA_VERSION = 1
+
+# Per-office cap on tracked message ids: a factory reset deletes these, and this keeps
+# the state file bounded on a long-lived, chatty deployment. ~10k ids ≈ tens of KB.
+OFFICE_MSG_CAP = 10_000
 
 
 @dataclass
@@ -48,6 +54,10 @@ class CoreStore:
         self.orchestrator_thread: str | None = None
         self.dashboard_msg_id: int | None = None   # the pinned #general status board
         self.pending_delivery: dict[str, str] = {}  # worker_id -> method, awaiting /approve
+        # Message ids in the orchestrator's offices (#general + DMs), keyed by chat id.
+        # Worker topics are deleted wholesale on reset; these have no topic to drop, so
+        # a factory reset deletes them by id. Bounded so it can't grow without limit.
+        self.office_message_ids: dict[str, list[int]] = {}
         self._load()
 
     # ---- persistence -----------------------------------------------------
@@ -71,6 +81,10 @@ class CoreStore:
         self.orchestrator_thread = raw.get("orchestrator_thread")
         self.dashboard_msg_id = raw.get("dashboard_msg_id")
         self.pending_delivery = dict(raw.get("pending_delivery") or {})
+        self.office_message_ids = {
+            str(k): [int(i) for i in v]
+            for k, v in (raw.get("office_message_ids") or {}).items()
+            if isinstance(v, list)}
         # Restore every field the current schema knows about (ignoring any it no
         # longer has). Enumerating by hand here silently dropped base_branch/base_sha
         # on restart once — deriving from the dataclass means new fields persist for
@@ -100,6 +114,7 @@ class CoreStore:
             "orchestrator_thread": self.orchestrator_thread,
             "dashboard_msg_id": self.dashboard_msg_id,
             "pending_delivery": self.pending_delivery,
+            "office_message_ids": self.office_message_ids,
             "threads": {k: asdict(v) for k, v in self._threads.items()},
         }
         try:
@@ -156,12 +171,27 @@ class CoreStore:
             self.pending_delivery = dict(pending)
             self._flush()
 
+    def record_office_message(self, chat_id: int, message_id: int) -> None:
+        """Remember a message in an office chat so a factory reset can delete it.
+        Bounded per chat — the oldest ids drop once past the cap."""
+        ids = self.office_message_ids.setdefault(str(chat_id), [])
+        ids.append(int(message_id))
+        if len(ids) > OFFICE_MSG_CAP:
+            del ids[:-OFFICE_MSG_CAP]
+        self._flush()
+
+    def clear_office_messages(self) -> None:
+        if self.office_message_ids:
+            self.office_message_ids = {}
+            self._flush()
+
     def wipe(self) -> None:
         """Factory reset: forget every thread, the office, and the dashboard."""
         self._threads.clear()
         self.orchestrator_thread = None
         self.dashboard_msg_id = None
         self.pending_delivery = {}
+        self.office_message_ids = {}
         self._flush()
 
     def workers(self) -> dict[str, ThreadRecord]:

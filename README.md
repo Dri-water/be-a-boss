@@ -233,8 +233,10 @@ runs locally, gated by who can run a process on the host.
 ### Option C — Telegram (always-on bot)
 
 1. **Create the bot:** [@BotFather](https://t.me/BotFather) → `/newbot` → copy the
-   token. **Add it as an Admin** (with **Manage Topics**) of a **supergroup that has
-   Topics enabled**. (Admins receive all messages — no need to touch privacy mode.)
+   token. **Add it as an Admin** (with **Manage Topics**, and optionally **Delete
+   Messages** so `/reset` can also clear the #general/DM history) of a **supergroup
+   that has Topics enabled**. (Admins receive all messages — no need to touch privacy
+   mode.)
 2. **Configure:** `cp .env.example .env`, set `TELEGRAM_BOT_TOKEN` and (for Docker)
    `HOST_DOCUMENTS` + `HOST_CLAUDE_DIR`. Leave `TELEGRAM_ALLOWED_USER_IDS` **blank**
    for now.
@@ -290,7 +292,7 @@ Commands in **General**:
 | `/list` | All threads (orchestrator, workers, direct) + status |
 | `/status` | Bot health |
 | `/setup` | Check the group is configured right |
-| `/reset` | Factory reset — wipe all memory, state, and the on-screen conversation (asks to confirm) |
+| `/reset` | Factory reset — wipe all memory, state, worker topics, and the conversation itself: on web/CLI the log is cleared; on Telegram the #general/DM messages are deleted if I have the Delete-Messages right (asks to confirm) |
 | `/whoami` | Your Telegram id + the chat id (handy for the allowlist) |
 
 In any **session/worker topic**:
