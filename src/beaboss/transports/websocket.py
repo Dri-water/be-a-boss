@@ -216,7 +216,22 @@ class WebSocketTransport:
             await self._broadcast({"type": "thread", "id": thread_id,
                                    "title": "", "open": False, "removed": True})
 
+    async def reset(self) -> None:
+        """Factory reset: drop the scrollback and re-broadcast the (now bare) thread
+        snapshot, so every live client clears its message log (its `threads` handler
+        wipes messages) and no old message replays on the next reload."""
+        self.history.clear()
+        self.dashboard = ""
+        await self._broadcast(self._snapshot())
+
     # ---- client plumbing -------------------------------------------------
+
+    def _snapshot(self) -> dict:
+        """The connect/reset thread snapshot; a client clears its log and rebuilds
+        from this + whatever history replay follows."""
+        return {"type": "threads", "bot_name": self.bot_name, "threads": [
+            {"id": tid, "title": t["title"], "open": t["open"]}
+            for tid, t in self.threads.items()]}
 
     async def register(self, ws: ServerConnection) -> None:
         self.clients.add(ws)
@@ -225,11 +240,7 @@ class WebSocketTransport:
         # time means no message is missed and none is delivered twice.
         history = list(self.history)
         dashboard = self.dashboard
-        snapshot = {"type": "threads", "bot_name": self.bot_name, "threads": [
-            {"id": tid, "title": t["title"], "open": t["open"]}
-            for tid, t in self.threads.items()
-        ]}
-        await ws.send(json.dumps(snapshot))
+        await ws.send(json.dumps(self._snapshot()))
         for event in history:                 # replay recent conversation (no amnesia)
             await ws.send(json.dumps(event))
         if dashboard:

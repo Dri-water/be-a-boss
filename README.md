@@ -290,7 +290,7 @@ Commands in **General**:
 | `/list` | All threads (orchestrator, workers, direct) + status |
 | `/status` | Bot health |
 | `/setup` | Check the group is configured right |
-| `/reset` | Factory reset — wipe all memory + state (asks to confirm) |
+| `/reset` | Factory reset — wipe all memory, state, and the on-screen conversation (asks to confirm) |
 | `/whoami` | Your Telegram id + the chat id (handy for the allowlist) |
 
 In any **session/worker topic**:

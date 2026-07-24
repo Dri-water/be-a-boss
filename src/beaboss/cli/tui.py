@@ -101,13 +101,23 @@ class Cockpit(App):
         elif t == "dashboard":
             self._ingest_dashboard(event.get("text", ""))
         elif t == "threads":
-            # connect/rehydrate snapshot: seed the sidebar so restarted workers show
+            # A full snapshot = "this is everything there is now". Re-sync the view to
+            # exactly it: seeds restarted workers on connect, and on a factory reset
+            # wipes the old conversation instead of leaving it on screen.
+            self.titles = {OFFICE: "🧭 Orchestrator"}
+            self.msgs = {OFFICE: []}
+            self.unread = {}
+            self.working = set()
             for th in event.get("threads", []):
                 if th["id"] != OFFICE:
                     self.titles[th["id"]] = th["title"]
                     self.msgs.setdefault(th["id"], [])
+            if self.active not in self.titles:
+                self.active = OFFICE
             self._reveal_frames()
             self._refresh_sidebar()
+            self._render_active()
+            self._refresh_activity()
         elif t == "busy":
             # a thread just started a turn — show it's working until its reply lands
             tid = event.get("thread_id", OFFICE)

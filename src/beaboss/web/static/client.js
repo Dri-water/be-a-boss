@@ -259,8 +259,12 @@
     });
 
     client.on("threads", () => {
-      if (active === null && client.threads.size) {
-        active = client.threads.keys().next().value;
+      // A snapshot is the full current truth — connect, reconnect, or a factory reset.
+      // The protocol layer already cleared the message log; clear the view state that
+      // shadows it too, and make sure we're pointed at a thread that still exists.
+      busy.clear(); unread.clear();
+      if (active === null || !client.threads.has(active)) {
+        active = client.threads.size ? client.threads.keys().next().value : null;
       }
       if (client.botName) {
         const brand = document.querySelector("#brand .org");

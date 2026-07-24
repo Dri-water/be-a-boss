@@ -670,3 +670,36 @@ def test_none_is_not_eaten_as_a_quiet_sentinel(tmp_path):
     assert _is_quiet_reply("none") is False
     assert _is_quiet_reply("quiet") is False
     assert _is_quiet_reply("Done — see PR") is False
+
+
+def test_factory_reset_clears_scrollback_and_keeps_the_office(tmp_path):
+    """Reported live: after `/reset confirm` the old messages were still on screen.
+
+    Reset must be a true blank slate on the SURFACE too — the transport's replay
+    scrollback is dropped (so nothing reappears on reload) and worker threads vanish —
+    while the orchestrator's office survives so you land on a fresh, empty conversation
+    rather than a threadless void.
+    """
+    from beaboss.core.ports import Speaker
+    from beaboss.transports.websocket import WebSocketTransport
+
+    store = CoreStore(tmp_path / "state")
+    store.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))
+    store.put("7", ThreadRecord(role="worker", name="Nova", worker_id="nova",
+                                repo=str(tmp_path / "r"), worker_status="working"))
+    transport = WebSocketTransport(store)
+    engine = Engine(_settings(tmp_path), store)
+    engine.attach_transport(transport)
+
+    you = Speaker(role="you", name="You", emoji="")
+    for i in range(3):
+        asyncio.run(transport.post(Outbound(thread_id="general", speaker=you,
+                                            text=f"old msg {i}")))
+    assert len(transport.history) == 3 and "7" in transport.threads
+
+    asyncio.run(engine.factory_reset())
+
+    assert transport.history == []                 # nothing replays on reload
+    assert "7" not in transport.threads            # the worker thread is gone
+    assert "general" in transport.threads          # …but the office is still there
+    assert transport.dashboard == ""

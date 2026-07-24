@@ -1127,8 +1127,10 @@ class Engine:
                     await worktrees.force_remove_worktree(Path(rec.repo), Path(rec.cwd))
                 except Exception:  # noqa: BLE001
                     pass
-            if delete_thread is not None:
-                try:  # worker/direct topics vanish, messages and all
+            # Keep the orchestrator's office(s) so you land on a fresh, empty
+            # conversation — only worker/direct threads vanish, messages and all.
+            if delete_thread is not None and not self._is_orchestrator_thread(tid):
+                try:
                     await delete_thread(tid)
                 except Exception:  # noqa: BLE001
                     pass
@@ -1136,6 +1138,15 @@ class Engine:
         if delete_dashboard is not None:
             try:
                 await delete_dashboard()
+            except Exception:  # noqa: BLE001
+                pass
+        # Wipe the surface's scrollback too, and tell live clients to clear their
+        # message logs — otherwise the old conversation lingers on screen and replays
+        # on the next reload. A true blank slate.
+        reset = getattr(self.transport, "reset", None)
+        if reset is not None:
+            try:
+                await reset()
             except Exception:  # noqa: BLE001
                 pass
 

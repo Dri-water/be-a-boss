@@ -253,3 +253,28 @@ def test_tui_idle_clears_working_without_a_message():
             assert "working" not in app._activity_text
 
     asyncio.run(go())
+
+
+def test_tui_snapshot_wipes_the_old_conversation():
+    """Factory reset re-emits a bare snapshot; the cockpit must clear the old
+    conversation (and stale worker threads) instead of leaving them on screen."""
+    import pytest
+    pytest.importorskip("textual")
+    from beaboss.cli.tui import Cockpit
+
+    async def go():
+        app = Cockpit(bot_name="X", demo_events=[
+            {"type": "thread", "id": "7", "title": "⚙️ Nova · app", "open": True},
+            {"type": "message", "thread_id": "general",
+             "speaker": {"role": "you", "name": "You"}, "text": "old talk"},
+        ])
+        async with app.run_test():
+            assert app.msgs["general"] and "7" in app.titles     # a live conversation
+            app.active = "7"
+            await app.apply_event({"type": "threads", "threads": [
+                {"id": "general", "title": "Orchestrator", "open": True}]})
+            assert app.msgs["general"] == []      # old conversation wiped
+            assert "7" not in app.titles          # worker thread gone
+            assert app.active == "general"         # landed back on a fresh office
+
+    asyncio.run(go())

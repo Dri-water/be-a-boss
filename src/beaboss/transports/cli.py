@@ -136,6 +136,12 @@ class CLITransport:
         self.dashboard = ""
         await self._emit({"type": "dashboard", "text": ""})
 
+    async def reset(self) -> None:
+        """Factory reset: re-emit the (now bare) snapshot so the cockpit clears its
+        message log — a blank slate on screen, not just in the store."""
+        self.dashboard = ""
+        await self._emit(self.snapshot())
+
     def snapshot(self) -> dict:
         """The connect-time snapshot a driver replays to a fresh screen."""
         return {"type": "threads", "threads": [
