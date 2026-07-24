@@ -716,3 +716,35 @@ def test_reset_confirmation_owns_its_surface_caveat(tmp_path):
     plain.reset_caveat = "\n\n⚠️ older messages may remain."
     msg2 = asyncio.run(engine.factory_reset())
     assert msg2.endswith("older messages may remain.")
+
+
+def test_worker_turn_error_wakes_the_orchestrator(tmp_path, monkeypatch):
+    """Self-heal regression (the live JSON-buffer bug): a worker turn that CRASHES has
+    no ResultMessage, so on_turn_done never fires — the orchestrator must still be woken
+    with a note so it follows up, instead of the worker dying quietly."""
+    engine, t = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(role="worker", name="Nova", worker_id="nova",
+                                        task="do the art", worker_status="working"))
+    woke: list[bool] = []
+
+    async def fake_wake():
+        woke.append(True)
+
+    async def anoop(*a, **k):
+        pass
+
+    monkeypatch.setattr(engine, "_wake_orchestrator", fake_wake)
+    monkeypatch.setattr(engine, "_refresh_dashboard", anoop)
+
+    class CrashedSession:            # crashed but self-reconnected
+        thread_id = "55"
+        status = "idle"
+
+    err = RuntimeError("Failed to decode JSON: JSON message exceeded maximum "
+                       "buffer size of 1048576 bytes")
+    asyncio.run(engine._on_worker_turn_error(CrashedSession(), err))
+
+    assert woke == [True]                                   # orchestrator was woken
+    notes = " ".join(engine._inbox).lower()
+    assert "nova" in notes and "buffer size" in notes       # …and told what broke
+    assert "reconnected" in notes                           # recovered → retry/re-brief hint

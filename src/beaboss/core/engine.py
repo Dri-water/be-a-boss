@@ -376,6 +376,7 @@ class Engine:
             backend=backend,
         )
         session.on_turn_done = self._on_worker_turn_done
+        session.on_turn_error = self._on_worker_turn_error
         return session
 
     async def _ensure_orchestrator(self, thread_id: str) -> None:
@@ -468,6 +469,29 @@ class Engine:
         status = "errored" if result.is_error else "finished a turn"
         self._note(f"worker {rec.worker_id} ({rec.name}, task: {rec.task[:80]}) "
                    f"{status}: {tail or '(no text)'}")
+        await self._refresh_dashboard()
+        await self._wake_orchestrator()
+
+    async def _on_worker_turn_error(self, session: CoreSession, error: BaseException) -> None:
+        """A worker's turn CRASHED (no ResultMessage — e.g. the SDK hit a fatal read
+        error on an oversized message). The session already tried to reconnect itself;
+        wake the orchestrator so it FOLLOWS UP — retries, re-briefs, or tells the boss —
+        instead of leaving the worker silently stalled. This is the self-heal path."""
+        rec = self.store.get(session.thread_id)
+        if rec is None:
+            return
+        detail = str(error) or error.__class__.__name__
+        if len(detail) > 300:
+            detail = detail[:300] + "…"
+        recovered = session.status not in ("error", "stopped")
+        self._note(
+            f"worker {rec.worker_id} ({rec.name}) hit an error mid-turn and that turn "
+            f"was lost: {detail}. "
+            + ("I reconnected the session — decide how to get it moving again (retry, or "
+               "re-brief to avoid the trigger, e.g. don't dump huge outputs into the chat), "
+               "or tell the boss if it's not worth continuing."
+               if recovered else
+               "The session could NOT recover — tell the boss it needs a look."))
         await self._refresh_dashboard()
         await self._wake_orchestrator()
 

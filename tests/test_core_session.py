@@ -553,3 +553,49 @@ def test_submit_media_unsupported_image_mime_saved_but_not_vision(tmp_path):
     turn = sess._queue.get_nowait()
     assert [i["media_type"] for i in turn.images] == ["image/png"]   # svg excluded
     assert (tmp_path / ".beaboss-inbox" / "logo.svg").is_file()      # …but still saved
+
+
+class ErroringBackend(FakeBackend):
+    """Simulates the agent SDK dying mid-turn — e.g. the 1 MB JSON-buffer overflow
+    that killed a live worker. receive() raises as soon as the turn streams, with no
+    ResultMessage — the exact shape of the reported failure."""
+
+    def receive(self):
+        async def gen():
+            raise RuntimeError(
+                "Failed to decode JSON: JSON message exceeded maximum buffer size")
+            yield  # unreachable — makes this an async generator
+
+        return gen()
+
+
+def test_crashed_turn_self_heals_and_notifies(tmp_path):
+    """Robustness regression (reported live): a turn that crashes mid-stream must NOT
+    die silently — the session reconnects itself AND fires on_turn_error so a
+    supervisor can follow up, instead of leaving the worker stalled."""
+    backend = ErroringBackend([])
+    seen: list[BaseException] = []
+
+    async def on_err(_sess, e):
+        seen.append(e)
+
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
+        settings=_settings(tmp_path), post=SinkPost(), busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend,
+    )
+    sess.on_turn_error = on_err
+
+    async def drive():
+        await sess.start()
+        await sess.submit("go")
+        await sess._queue.join()
+        status_after = sess.status     # capture before stop() flips it to "stopped"
+        await sess.stop()
+        return status_after
+
+    status_after = asyncio.run(drive())
+    assert seen and "buffer size" in str(seen[0])   # the supervisor WAS told of the crash
+    assert backend.started == 2                      # it reconnected (initial + reconnect)
+    assert status_after == "idle"                    # recovered and reusable, not wedged

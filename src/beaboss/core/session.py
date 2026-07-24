@@ -32,6 +32,10 @@ log = logging.getLogger("beaboss.core.session")
 SETTING_SOURCES = ["project", "local"]
 INBOX_DIRNAME = ".beaboss-inbox"
 MAX_SEND_BYTES = 50 * 1024 * 1024
+# The SDK caps a single JSON message from the CLI at 1 MB by default; a large tool
+# result (a big file, an inline asset) blows past it and kills the turn. Raise the
+# ceiling so ordinary big outputs survive — self-healing (below) covers the rest.
+_MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 # Image types the model's vision actually accepts — anything else is saved as a plain
 # file (readable from its path) rather than sent as a vision block the API would 400 on.
 VISION_MIMES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
@@ -147,6 +151,9 @@ class CoreSession:
         self.status = "new"  # new | idle | busy | error | stopped
         self.turns = 0
         self.on_turn_done: Callable[["CoreSession", ResultMessage], Awaitable[None]] | None = None
+        # Fires when a turn CRASHES (no ResultMessage) — so a supervisor can follow up
+        # on a worker that died mid-turn instead of leaving it silently stalled.
+        self.on_turn_error: Callable[["CoreSession", BaseException], Awaitable[None]] | None = None
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -179,6 +186,7 @@ class CoreSession:
             system_prompt=system_prompt,
             mcp_servers=mcp,
             stderr=self._on_stderr,
+            max_buffer_size=_MAX_MESSAGE_BYTES,
         )
 
     def _build_chat_server(self):
@@ -360,6 +368,14 @@ class CoreSession:
                 # never escape and kill this loop — that would strand the session.
                 await self._safe_emit(f"⚠️ session error: {e}")
                 await self._try_reconnect()
+                # A crashed turn produces no ResultMessage, so on_turn_done never fires.
+                # Tell the supervisor here instead — a worker that dies quietly and is
+                # never followed up on is the opposite of self-healing.
+                if self.on_turn_error is not None:
+                    try:
+                        await self.on_turn_error(self, e)
+                    except Exception:  # noqa: BLE001
+                        log.exception("on_turn_error hook failed thread=%s", self.thread_id)
             finally:
                 # Don't clobber a terminal "error" (a failed reconnect) back to idle,
                 # or a dead session masquerades as healthy and keeps being reused.
