@@ -95,12 +95,11 @@ def render_result(msg: ResultMessage) -> list[str]:
             detail = msg.subtype or "error"
         return [f"⚠️ {_truncate(str(detail), 1000)}"]
 
-    cost = ""
-    if msg.total_cost_usd:
-        cost = f" · ${msg.total_cost_usd:.4f}"
-    # Status-neutral on purpose: "done" here would contradict a worker that just
-    # reported "STATUS: blocked" in the same breath.
-    return [f"— turn ended · {msg.num_turns} turns{cost}"]
+    # No cost figure: the agent runs on a Claude subscription (the mounted CLI auth),
+    # not the pay-per-token API, so the SDK's total_cost_usd is an irrelevant estimate,
+    # not a real charge — showing it just confuses. Status-neutral on purpose too:
+    # "done" here would contradict a worker that just reported "STATUS: blocked".
+    return [f"— turn ended · {msg.num_turns} turns"]
 
 
 def chunk(text: str, size: int = _CHUNK) -> list[str]:

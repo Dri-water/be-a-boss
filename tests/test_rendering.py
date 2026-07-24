@@ -52,9 +52,11 @@ def test_render_assistant_drops_thinking_and_blank():
     assert out == []
 
 
-def test_render_result_success_footer_with_cost():
+def test_render_result_footer_never_shows_cost():
+    # On a Claude subscription the SDK's dollar estimate is irrelevant noise — the
+    # footer must NOT surface it even when total_cost_usd is set.
     assert rendering.render_result(R(num_turns=3, total_cost_usd=0.0123)) == [
-        "— turn ended · 3 turns · $0.0123"
+        "— turn ended · 3 turns"
     ]
 
 
