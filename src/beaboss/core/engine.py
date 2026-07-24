@@ -162,6 +162,20 @@ class Engine:
                 if (mime or "").startswith("image/"):
                     self._pending_vision.append(str(out.media_path))
                     self._pending_vision = self._pending_vision[-6:]  # keep the recent few
+                    # And surface it in the boss's OWN chat, reliably — a worker's visual
+                    # work should land where the boss is looking, not depend on the
+                    # orchestrator remembering to send_photo it. (It still gets it as
+                    # vision to judge; this just guarantees the boss sees the art.)
+                    boss = self._last_boss_thread
+                    if (boss and boss != out.thread_id
+                            and self._is_orchestrator_thread(boss)):
+                        try:
+                            await self.transport.post(Outbound(
+                                thread_id=boss, speaker=out.speaker,
+                                media_path=out.media_path, media_kind=out.media_kind,
+                                caption=f"⚙️ {rec.name}: {(out.caption or '').strip()}".strip()))
+                        except Exception:  # noqa: BLE001 — a failed forward mustn't block the real post
+                            log.exception("failed to forward worker screenshot to the boss")
         await self.transport.post(out)
 
     def _vision_items(self, paths: list[str]) -> list[MediaIn]:

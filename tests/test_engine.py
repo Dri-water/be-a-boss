@@ -821,3 +821,22 @@ def test_worker_screenshots_are_captured_for_orchestrator_vision(tmp_path):
                 media_path=png, media_kind="photo")))
     assert engine._pending_vision == []
     assert engine._vision_items([str(tmp_path / "gone.png")]) == []
+
+
+def test_worker_screenshot_is_forwarded_to_the_boss(tmp_path):
+    """Reliability fix: a worker's screenshot lands in the boss's OWN chat automatically
+    — not only if the orchestrator remembers to send it."""
+    from beaboss.core.ports import Outbound, Speaker
+    engine, t = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(role="worker", name="Nova", worker_id="nova"))
+    engine._last_boss_thread = "dm:123"        # where the boss talks to the orchestrator
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 16)
+    worker = Speaker(role="worker", name="Nova", emoji="⚙️")
+
+    asyncio.run(engine._post(Outbound(thread_id="55", speaker=worker,
+                media_path=png, media_kind="photo", caption="round 1")))
+
+    fwd = [o for o in t.posts if o.thread_id == "dm:123" and o.media_path == png]
+    assert len(fwd) == 1 and "Nova" in (fwd[0].caption or "")   # forwarded to the boss
+    assert any(o.thread_id == "55" for o in t.posts)            # original still posted too
