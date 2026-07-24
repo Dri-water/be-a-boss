@@ -1154,8 +1154,13 @@ class Engine:
         for sub in ("orchestrator-home", "worktrees"):
             shutil.rmtree(self.settings.state_dir / sub, ignore_errors=True)
         log.warning("factory reset executed — all state wiped")
-        return ("🏭 Factory reset complete — blank slate. Committed worker/* "
-                "branches in your repos were left untouched.")
+        msg = ("🏭 Factory reset complete — memory, state, and worker threads wiped. "
+               "Committed worker/* branches in your repos were left untouched.")
+        # A surface may not be able to remove every old message from the screen (e.g.
+        # Telegram can only delete messages it tracked). Let it own that caveat here so
+        # the confirmation never over-claims a blank slate it didn't fully deliver.
+        caveat = getattr(self.transport, "reset_caveat", "")
+        return f"{msg}{caveat}" if caveat else msg
 
     async def shutdown(self) -> None:
         for session in list(self.sessions.values()):

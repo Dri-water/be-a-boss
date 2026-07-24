@@ -317,7 +317,7 @@ def test_factory_reset_wipes_everything(tmp_path):
     engine._pending_delivery["nova"] = "merge"
 
     result = asyncio.run(engine.factory_reset())
-    assert "blank slate" in result
+    assert "Factory reset complete" in result
     assert engine.store.all() == {}
     assert engine.store.orchestrator_thread is None
     assert engine.sessions == {}
@@ -703,3 +703,16 @@ def test_factory_reset_clears_scrollback_and_keeps_the_office(tmp_path):
     assert "7" not in transport.threads            # the worker thread is gone
     assert "general" in transport.threads          # …but the office is still there
     assert transport.dashboard == ""
+
+
+def test_reset_confirmation_owns_its_surface_caveat(tmp_path):
+    """The confirmation must not over-claim a 'blank slate' the surface couldn't
+    deliver: a transport that can't clear old messages contributes a caveat, and one
+    that fully wipes (web/CLI) doesn't."""
+    engine, plain = _engine(tmp_path)          # FakeTransport: no reset_caveat
+    msg = asyncio.run(engine.factory_reset())
+    assert "Factory reset complete" in msg and "⚠️" not in msg
+
+    plain.reset_caveat = "\n\n⚠️ older messages may remain."
+    msg2 = asyncio.run(engine.factory_reset())
+    assert msg2.endswith("older messages may remain.")

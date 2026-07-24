@@ -237,6 +237,15 @@ class TelegramTransport:
         except Exception:  # noqa: BLE001
             pass
 
+    # Appended to the reset confirmation (see Engine.factory_reset): Telegram bots
+    # can't read or bulk-clear a chat's past, only delete messages they tracked as they
+    # happened — so the confirmation is honest about what may still be on screen.
+    reset_caveat = (
+        "\n\n⚠️ Note: I can only delete chat messages I've tracked since I last "
+        "started, so anything older may still be visible above (in a group I also need "
+        "the “Delete Messages” admin right). Use Telegram's “Clear History” on the chat "
+        "to remove the rest.")
+
     async def reset(self) -> None:
         """Factory reset: delete every tracked message in the offices (#general + DMs),
         which — unlike worker topics — have no topic to drop wholesale. Best-effort:
