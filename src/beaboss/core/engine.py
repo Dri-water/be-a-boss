@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import shutil
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from .agent_backend import CodexBackend
 from .names import pick_name
 from .prompts import (DELIVERY_BALANCED, DELIVERY_CONSERVATIVE,
                       ORCHESTRATOR_APPEND, WORKER_APPEND_EXTRA)
-from .ports import InboundMessage, Outbound, Speaker, SYSTEM, Transport
+from .ports import InboundMessage, MediaIn, Outbound, Speaker, SYSTEM, Transport
 from .session import CoreSession, DEFAULT_SESSION_APPEND
 from .store import CoreStore, ThreadRecord
 from . import worktrees
@@ -121,6 +122,7 @@ class Engine:
         self.transport: Transport | None = None
         self.sessions: dict[str, CoreSession] = {}
         self._inbox: list[str] = []          # pending supervision notes for the orchestrator
+        self._pending_vision: list[str] = []  # recent worker screenshots to show the orchestrator
         self._waking = False                 # digest wake in flight
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-thread start lock
         # worker_id -> method, awaiting /approve. Restored from the store: a 🚦
@@ -146,7 +148,33 @@ class Engine:
 
     async def _post(self, out: Outbound) -> None:
         assert self.transport is not None
+        # Give the orchestrator EYES: remember a worker's screenshots so its next
+        # supervision turn can SEE the work and judge it, not just read a description.
+        # Detect images by the actual file type, not the media_kind label.
+        if out.media_path is not None:
+            rec = self.store.get(out.thread_id)
+            if rec is not None and rec.role == "worker":
+                mime, _ = mimetypes.guess_type(str(out.media_path))
+                if (mime or "").startswith("image/"):
+                    self._pending_vision.append(str(out.media_path))
+                    self._pending_vision = self._pending_vision[-6:]  # keep the recent few
         await self.transport.post(out)
+
+    def _vision_items(self, paths: list[str]) -> list[MediaIn]:
+        """Turn recent worker screenshot paths into MediaIn for the orchestrator to see.
+        Skips anything gone/unreadable/non-image — a missing screenshot must never
+        break a wake."""
+        items: list[MediaIn] = []
+        for p in paths:
+            try:
+                data = Path(p).read_bytes()
+            except OSError:
+                continue
+            mime, _ = mimetypes.guess_type(p)
+            if not (mime or "").startswith("image/"):
+                continue
+            items.append(MediaIn(kind="image", filename=Path(p).name, mime=mime, data=data))
+        return items
 
     async def _busy(self, thread_id: str) -> None:
         if self.transport is not None:
@@ -532,8 +560,19 @@ class Engine:
                 digest = "[fleet inbox]\n" + "\n".join(f"- {n}" for n in notes)
                 # reply where the boss actually is, not into a silent #general;
                 # quiet_ok: a checkpoint needing nothing boss-facing posts no message.
-                await session.submit(
-                    digest, reply_to=self._last_boss_thread, quiet_ok=True)
+                vision, self._pending_vision = self._pending_vision, []
+                items = self._vision_items(vision)
+                if items:
+                    # hand the orchestrator the worker's latest screenshots as VISION so
+                    # it can judge the work with its own eyes, not relay a text summary.
+                    await session.submit_media(
+                        digest + "\n\n[The worker's latest screenshots are attached — "
+                        "LOOK at them and judge the quality yourself before you report "
+                        "up or send the worker back.]",
+                        items, reply_to=self._last_boss_thread, quiet_ok=True)
+                else:
+                    await session.submit(
+                        digest, reply_to=self._last_boss_thread, quiet_ok=True)
         finally:
             self._waking = False
 

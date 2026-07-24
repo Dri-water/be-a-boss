@@ -793,3 +793,31 @@ def test_make_worker_session_uses_dispatched_model(tmp_path):
                        cwd=str(tmp_path), repo=str(tmp_path), model="haiku")
     sess = engine._make_worker_session("55", rec)
     assert sess._model_override == "haiku"
+
+
+def test_worker_screenshots_are_captured_for_orchestrator_vision(tmp_path):
+    """The 'eyes' fix: a worker's posted screenshot is remembered so the orchestrator's
+    next supervision turn can SEE it (vision), not just read a text summary."""
+    from beaboss.core.ports import Outbound, Speaker
+    engine, t = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(role="worker", name="Nova", worker_id="nova"))
+    engine.store.put("general", ThreadRecord(role="orchestrator", name="orch"))
+    png = tmp_path / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+
+    worker = Speaker(role="worker", name="Nova", emoji="⚙️")
+    asyncio.run(engine._post(Outbound(thread_id="55", speaker=worker,
+                media_path=png, media_kind="photo", caption="round 1")))
+    assert engine._pending_vision == [str(png)]            # a worker screenshot is remembered
+
+    items = engine._vision_items(engine._pending_vision)
+    assert len(items) == 1 and items[0].kind == "image"
+    assert items[0].data.startswith(b"\x89PNG")            # real bytes, ready as vision
+
+    # the orchestrator's own media is NOT fed back to it, and a missing file is skipped
+    engine._pending_vision.clear()
+    orch = Speaker(role="orchestrator", name="O", emoji="🧭")
+    asyncio.run(engine._post(Outbound(thread_id="general", speaker=orch,
+                media_path=png, media_kind="photo")))
+    assert engine._pending_vision == []
+    assert engine._vision_items([str(tmp_path / "gone.png")]) == []

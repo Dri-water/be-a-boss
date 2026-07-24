@@ -319,7 +319,8 @@ class CoreSession:
         await self._queue.put(Turn(text=text, reply_to=reply_to, quiet_ok=quiet_ok))
 
     async def submit_media(self, caption: str, items: list[MediaIn],
-                           reply_to: str | None = None) -> None:
+                           reply_to: str | None = None,
+                           quiet_ok: bool = False) -> None:
         """Save incoming files under the workspace inbox and queue a turn."""
         inbox = self.cwd / INBOX_DIRNAME
         inbox.mkdir(parents=True, exist_ok=True)
@@ -351,7 +352,8 @@ class CoreSession:
             for dest, mime in saved:
                 lines.append(f"- {dest.relative_to(self.cwd)} ({mime or 'unknown type'})")
         text = "\n".join(lines) if lines else "(the user sent media with no caption)"
-        await self._queue.put(Turn(text=text, images=images, reply_to=reply_to))
+        await self._queue.put(
+            Turn(text=text, images=images, reply_to=reply_to, quiet_ok=quiet_ok))
 
     @property
     def pending(self) -> int:
