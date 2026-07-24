@@ -148,6 +148,10 @@ class Engine:
 
     async def _post(self, out: Outbound) -> None:
         assert self.transport is not None
+        # Audit trail: log what the orchestrator actually SAYS. Its replies/decisions
+        # were previously unlogged, which made a run impossible to review after the fact.
+        if out.speaker.role == "orchestrator" and out.text.strip():
+            log.info("orchestrator -> %s: %s", out.thread_id, out.text.strip()[:300])
         # Give the orchestrator EYES: remember a worker's screenshots so its next
         # supervision turn can SEE the work and judge it, not just read a description.
         # Detect images by the actual file type, not the media_kind label.
@@ -221,6 +225,7 @@ class Engine:
     def _action(self, line: str) -> None:
         """Record a fleet action for the current orchestrator turn's footer."""
         self._turn_actions.append(line)
+        log.info("orchestrator action: %s", line)   # audit trail of what it actually DID
 
     def _drain_turn_actions(self) -> str | None:
         """The code-generated footer for the orchestrator's reply: what it actually

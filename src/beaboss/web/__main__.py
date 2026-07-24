@@ -21,11 +21,9 @@ log = logging.getLogger("beaboss.web")
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
     settings = Settings.from_env()
+    from ..logsetup import setup_logging
+    setup_logging(settings.state_dir)  # console + a rotating file that survives redeploys
     store = CoreStore(settings.state_dir)
 
     engine = Engine(settings, store)
