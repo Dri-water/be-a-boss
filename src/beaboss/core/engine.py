@@ -571,9 +571,13 @@ class Engine:
                     # hand the orchestrator the worker's latest screenshots as VISION so
                     # it can judge the work with its own eyes, not relay a text summary.
                     await session.submit_media(
-                        digest + "\n\n[The worker's latest screenshots are attached — "
-                        "LOOK at them and judge the quality yourself before you report "
-                        "up or send the worker back.]",
+                        digest + "\n\n[The worker's latest screenshots are attached AND "
+                        "saved in your ./.beaboss-inbox/. SCRUTINISE them for what's WRONG "
+                        "— clipping, cut-off edges, artifacts, wrong perspective, muddy or "
+                        "ugly work — not just what's right; a visible flaw you approve that "
+                        "the boss then catches is a failure. If you report this to the boss, "
+                        "SHOW it: mcp__chat__send_photo('.beaboss-inbox/<filename>') so they "
+                        "SEE it, don't just describe it.]",
                         items, reply_to=self._last_boss_thread, quiet_ok=True)
                 else:
                     await session.submit(
