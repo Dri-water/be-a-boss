@@ -239,9 +239,16 @@ async def merge_into_base(repo: Path, branch: str, base_branch: str) -> tuple[bo
         return True, f"merged {branch} into {base_branch} (local only — no remote configured)"
     pcode, pout = await _git(repo, "push", "origin", base_branch, timeout=120)
     if pcode != 0:
+        low = pout.lower()
+        if "workflow" in low and ("scope" in low or "refusing" in low):
+            tail = (" — the push token lacks the 'workflow' scope, required to push "
+                    "anything under .github/workflows/. This is NOT something you or a "
+                    "worker can fix: the boss must regenerate GH_TOKEN with 'repo' AND "
+                    "'workflow' scope. Flag it to them plainly.")
+        else:
+            tail = " — delivery is incomplete; retry to push the existing local merge"
         return False, (f"merged {branch} into {base_branch} locally, but pushing to "
-                       f"origin/{base_branch} failed: {_tidy(pout)} — delivery is "
-                       f"incomplete; retry to push the existing local merge")
+                       f"origin/{base_branch} failed: {_tidy(pout)}{tail}")
     return True, f"merged {branch} into {base_branch} and pushed to origin/{base_branch}"
 
 
