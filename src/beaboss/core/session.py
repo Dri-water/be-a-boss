@@ -199,9 +199,10 @@ class CoreSession:
 
         @tool(
             "send_photo",
-            "Send an image file into this thread so it renders inline "
-            "(screenshots, charts, generated images). Path must be inside the "
-            "workspace.",
+            "Send an image into this thread so it renders inline — screenshots, charts, "
+            "renders, PROOF of visual work. Whenever you report on anything visual, SHOW "
+            "it with this instead of only describing it; a picture the reader can see "
+            "beats any words. Path must be inside your workspace.",
             {"type": "object",
              "properties": {"path": {"type": "string"}, "caption": {"type": "string"}},
              "required": ["path"]},
@@ -232,8 +233,9 @@ class CoreSession:
 
         @tool(
             "send_message",
-            "Send an extra plain-text message into this thread (separate from "
-            "your normal reply).",
+            "Send an extra plain-text message into this thread (separate from your "
+            "normal reply). If you're reporting VISUAL work, don't lean on words alone — "
+            "send_photo the actual screenshot so the reader SEES it, don't just describe it.",
             {"type": "object",
              "properties": {"text": {"type": "string"}},
              "required": ["text"]},
