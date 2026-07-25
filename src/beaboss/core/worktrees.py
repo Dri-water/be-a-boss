@@ -53,8 +53,9 @@ async def is_git_repo(path: Path) -> bool:
     return code == 0
 
 
-async def create_worktree(repo: Path, worktrees_dir: Path, worker_id: str) -> Path:
-    """Create <worktrees_dir>/<worker_id> on new branch worker/<worker_id>."""
+async def create_worktree(repo: Path, worktrees_dir: Path, worker_id: str,
+                          base_branch: str | None = None) -> Path:
+    """Create <worktrees_dir>/<worker_id> on a new worker branch."""
     if not await is_git_repo(repo):
         raise WorktreeError(
             f"not a git repository: {repo} — run `git init` there (and make an "
@@ -68,17 +69,19 @@ async def create_worktree(repo: Path, worktrees_dir: Path, worker_id: str) -> Pa
             f"have been cleaned up; remove it (git worktree remove {dest}) and retry"
         )
     branch = f"worker/{worker_id}"
-    code, out = await _git(repo, "worktree", "add", "-b", branch, str(dest))
+    args = ["worktree", "add", "-b", branch, str(dest)]
+    if base_branch:
+        args.append(base_branch)
+    code, out = await _git(repo, *args)
     if code != 0:
-        # branch may linger from an earlier run — retry attaching to it
-        code2, out2 = await _git(repo, "worktree", "add", str(dest), branch)
-        if code2 != 0:
-            raise WorktreeError(
-                f"could not create an isolated worktree for '{worker_id}'. "
-                f"git said: {_tidy(out2 or out)}. Likely the branch '{branch}' "
-                f"or path is already in use — remove the stale worktree "
-                f"(git worktree remove) or branch (git branch -D {branch}) and retry"
-            )
+        # Never attach a fresh worker to an old branch: that can mix a previous
+        # task's commits into a new brief after a reset.
+        raise WorktreeError(
+            f"could not create an isolated worktree for '{worker_id}'. "
+            f"git said: {_tidy(out)}. Likely the branch '{branch}' or path is "
+            f"already in use — preserve any unlanded work, then remove the stale "
+            f"worktree/branch or use a fresh worker id and retry"
+        )
     log.info("worktree created repo=%s dest=%s branch=%s", repo, dest, branch)
     return dest
 
@@ -138,10 +141,28 @@ async def head_sha(repo: Path) -> str:
     return out if code == 0 else ""
 
 
+async def ref_sha(repo: Path, ref: str) -> str:
+    """Resolve a branch/ref without depending on the checkout's current branch."""
+    code, out = await _git(repo, "rev-parse", ref)
+    return out if code == 0 else ""
+
+
+async def branch_exists(repo: Path, branch: str) -> bool:
+    code, _ = await _git(repo, "show-ref", "--verify", "--quiet",
+                         f"refs/heads/{branch}")
+    return code == 0
+
+
 async def branch_ahead(repo: Path, base: str, branch: str) -> bool:
     """True if `branch` carries commits `base` doesn't — i.e. there's work to land."""
     code, out = await _git(repo, "rev-list", "--count", f"{base}..{branch}")
     return code == 0 and out.strip().isdigit() and int(out.strip()) > 0
+
+
+async def branch_merged(repo: Path, base: str, branch: str) -> bool:
+    """True when the worker tip is already contained in the local base branch."""
+    code, _ = await _git(repo, "merge-base", "--is-ancestor", branch, base)
+    return code == 0
 
 
 async def gh_available() -> bool:
@@ -199,16 +220,18 @@ async def merge_into_base(repo: Path, branch: str, base_branch: str) -> tuple[bo
     if not await is_clean(repo, untracked=False):
         return False, (f"{repo.name}'s working copy has uncommitted changes on "
                        f"{base_branch} — commit or stash them first, then deliver again")
-    code, out = await _git(
-        repo, "merge", "--no-ff", "-m",
-        f"Merge {branch} (delivered by be-a-boss)", branch)
-    if code != 0:
-        acode, _aout = await _git(repo, "merge", "--abort")
-        if acode != 0:
-            return False, (f"merging into {base_branch} conflicted AND the auto-abort "
-                           f"failed — {repo.name} may be mid-merge; resolve it by hand")
-        return False, (f"merging into {base_branch} hit a conflict ({_tidy(out)}) — "
-                       f"needs a human to resolve, or open a PR instead")
+    already_merged = await branch_merged(repo, base_branch, branch)
+    if not already_merged:
+        code, out = await _git(
+            repo, "merge", "--no-ff", "-m",
+            f"Merge {branch} (delivered by be-a-boss)", branch)
+        if code != 0:
+            acode, _aout = await _git(repo, "merge", "--abort")
+            if acode != 0:
+                return False, (f"merging into {base_branch} conflicted AND the auto-abort "
+                               f"failed — {repo.name} may be mid-merge; resolve it by hand")
+            return False, (f"merging into {base_branch} hit a conflict ({_tidy(out)}) — "
+                           f"needs a human to resolve, or open a PR instead")
     # Land it on the remote too, so the change actually reaches prod — a local merge
     # alone never leaves this box. Plain push, never forced: if origin/<base> has moved
     # on, we say so rather than clobber it.
@@ -216,9 +239,9 @@ async def merge_into_base(repo: Path, branch: str, base_branch: str) -> tuple[bo
         return True, f"merged {branch} into {base_branch} (local only — no remote configured)"
     pcode, pout = await _git(repo, "push", "origin", base_branch, timeout=120)
     if pcode != 0:
-        return True, (f"merged {branch} into {base_branch} locally, but pushing to "
-                      f"origin/{base_branch} failed: {_tidy(pout)} — the merge is landed "
-                      f"here; push {base_branch} by hand to reach the remote")
+        return False, (f"merged {branch} into {base_branch} locally, but pushing to "
+                       f"origin/{base_branch} failed: {_tidy(pout)} — delivery is "
+                       f"incomplete; retry to push the existing local merge")
     return True, f"merged {branch} into {base_branch} and pushed to origin/{base_branch}"
 
 
@@ -228,7 +251,12 @@ async def default_branch(repo: Path) -> str | None:
     code, out = await _git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
     if code == 0 and out.strip():
         return out.strip().rsplit("/", 1)[-1]  # "origin/master" -> "master"
-    return None
+    for branch in ("main", "master"):
+        code, _ = await _git(repo, "show-ref", "--verify", "--quiet",
+                             f"refs/heads/{branch}")
+        if code == 0:
+            return branch
+    return await current_branch(repo)
 
 
 async def open_pr(repo: Path, branch: str, base_branch: str) -> tuple[bool, str]:

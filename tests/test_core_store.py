@@ -91,6 +91,8 @@ def test_wipe_clears_everything_and_persists(tmp_path):
 def test_pending_delivery_persists(tmp_path):
     from beaboss.core.store import CoreStore
     s = CoreStore(tmp_path / "state")
-    s.set_pending_delivery({"nova": "merge"})
+    pending = {
+        "nova": {"method": "merge", "sha": "abc123", "base_sha": "def456"}}
+    s.set_pending_delivery(pending)
     reloaded = CoreStore(tmp_path / "state")
-    assert reloaded.pending_delivery == {"nova": "merge"}   # /approve survives restart
+    assert reloaded.pending_delivery == pending   # /approve survives restart

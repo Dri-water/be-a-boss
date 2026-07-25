@@ -54,7 +54,9 @@ class CoreStore:
         self._threads: dict[str, ThreadRecord] = {}
         self.orchestrator_thread: str | None = None
         self.dashboard_msg_id: int | None = None   # the pinned #general status board
-        self.pending_delivery: dict[str, str] = {}  # worker_id -> method, awaiting /approve
+        # worker_id -> {method, sha, base_sha}, awaiting a revision-bound /approve.
+        # Legacy state may still contain a plain method string and is refused safely.
+        self.pending_delivery: dict[str, dict[str, str] | str] = {}
         # Message ids in the orchestrator's offices (#general + DMs), keyed by chat id.
         # Worker topics are deleted wholesale on reset; these have no topic to drop, so
         # a factory reset deletes them by id. Bounded so it can't grow without limit.
@@ -166,7 +168,9 @@ class CoreStore:
             self.dashboard_msg_id = mid
             self._flush()
 
-    def set_pending_delivery(self, pending: dict[str, str]) -> None:
+    def set_pending_delivery(
+        self, pending: dict[str, dict[str, str] | str],
+    ) -> None:
         """Persist the awaiting-/approve set — an approval must survive a restart."""
         if self.pending_delivery != pending:
             self.pending_delivery = dict(pending)

@@ -17,6 +17,7 @@ import asyncio
 import logging
 import mimetypes
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,19 @@ log = logging.getLogger("beaboss.core.engine")
 ORCHESTRATOR_EMOJI = "🧭"
 WORKER_EMOJI = "⚙️"
 MAX_INBOX = 200  # bound the supervision backlog if the orchestrator can't drain it
+
+
+@dataclass(frozen=True)
+class DeliveryPlan:
+    thread_id: str
+    rec: ThreadRecord
+    repo: Path
+    worktree: Path
+    branch: str
+    base: str
+    tip: str
+    base_tip: str
+    checks_note: str
 
 
 
@@ -125,9 +139,10 @@ class Engine:
         self._pending_vision: list[str] = []  # recent worker screenshots to show the orchestrator
         self._waking = False                 # digest wake in flight
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-thread start lock
-        # worker_id -> method, awaiting /approve. Restored from the store: a 🚦
-        # prompt must still be approvable after a restart.
-        self._pending_delivery: dict[str, str] = dict(store.pending_delivery)
+        # worker_id -> {method, sha, base_sha}, awaiting /approve. Restored so the
+        # exact reviewed source and target remain approvable after a restart.
+        self._pending_delivery: dict[str, dict[str, str] | str] = dict(
+            store.pending_delivery)
         self._last_dashboard = ""                          # last rendered board (skip no-op edits)
         # Where the boss last spoke to the orchestrator (#general or a DM). Digest
         # replies and approval prompts follow the boss there instead of stranding
@@ -695,8 +710,8 @@ class Engine:
 
         @tool(
             "dismiss_worker",
-            "End a worker's engagement. Their worktree is removed if clean; a "
-            "dirty worktree is preserved and its path reported.",
+            "End a worker's engagement and remove its clean worktree. Refuses a "
+            "dirty worktree so uncommitted work remains active and visible.",
             {"type": "object",
              "properties": {"worker_id": {"type": "string"}},
              "required": ["worker_id"]},
@@ -735,14 +750,19 @@ class Engine:
             return await engine._run_checks(str(args.get("worker_id", "")),
                                             str(args.get("command", "")))
 
+        delivery_behavior = (
+            "records a request bound to the current commit; the boss's /approve "
+            "lands that exact revision"
+            if engine.settings.deploy_braveness == "conservative"
+            else "lands immediately; call it only after the boss has clearly approved"
+        )
+
         @tool(
             "deliver_worker",
-            "REQUEST that a worker's finished work be landed. This does NOT land it — "
-            "it asks the boss to approve, and the merge/PR runs only when they issue "
-            "/approve. method='merge' (local merge into the branch the worker forked "
-            "from) or 'pr' (push + open a GitHub PR). Call it once the work is "
-            "committed and you've shown the boss the diff. Refuses uncommitted or "
-            "empty branches.",
+            "Deliver a worker's finished work after review. In this deployment it "
+            f"{delivery_behavior}. method='merge' merges into the repository's "
+            "resolved default branch and pushes it when a remote exists; method='pr' "
+            "pushes and opens a GitHub PR. Refuses dirty, empty, or failed-check work.",
             {"type": "object",
              "properties": {
                  "worker_id": {"type": "string"},
@@ -832,14 +852,26 @@ class Engine:
         name = pick_name(taken)
         worker_id = name.lower()
 
-        # workspace: isolated worktree when the repo is git, else the repo itself.
-        # Record the fork branch so delivery lands on the right branch.
+        # Workers fork the repository's default branch, not whichever branch happens
+        # to be checked out when the tool call arrives.
         base_branch = ""
         try:
             if await worktrees.is_git_repo(repo):
-                base_branch = await worktrees.current_branch(repo) or ""
+                base_branch = await worktrees.default_branch(repo) or ""
+                if not base_branch:
+                    return err(f"can't determine the default branch for {repo.name}")
+                worktrees_dir = self.settings.state_dir / "worktrees"
+                while (
+                    await worktrees.branch_exists(repo, f"worker/{worker_id}")
+                    or (worktrees_dir / worker_id).exists()
+                ):
+                    # A reset deliberately preserves old branches. Give new work a
+                    # fresh identity instead of attaching it to an earlier task.
+                    taken.add(worker_id)
+                    name = pick_name(taken)
+                    worker_id = name.lower()
                 wt = await worktrees.create_worktree(
-                    repo, self.settings.state_dir / "worktrees", worker_id)
+                    repo, worktrees_dir, worker_id, base_branch=base_branch)
                 cwd, isolated = wt, True
             else:
                 cwd, isolated = repo, False
@@ -913,23 +945,28 @@ class Engine:
             return err(f"no such worker: {worker_id}")
         thread_id, rec = found
 
+        wt = Path(rec.cwd)
+        has_worktree = bool(rec.repo) and wt != Path(rec.repo)
+        if has_worktree and wt.exists() and not await worktrees.is_clean(wt):
+            return err(
+                f"refused to dismiss {rec.name}: their workspace has uncommitted "
+                f"changes at {wt}. Have them commit the work, or explicitly discard "
+                f"it outside this action.")
+
         session = self.sessions.pop(thread_id, None)
         if session is not None:
             await session.stop()
 
         detail = ""
-        wt = Path(rec.cwd)
-        if rec.repo and wt != Path(rec.repo):
+        if has_worktree:
             removed, detail = await worktrees.remove_worktree(Path(rec.repo), wt)
             if not removed:
-                detail = f" ({detail})"
-            else:
-                detail = ""
+                return err(f"couldn't dismiss {rec.name}: {detail}")
 
         self.store.update(thread_id, worker_status="dismissed")
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM,
-            text=f"{rec.name} dismissed by the orchestrator.{detail}",
+            text=f"{rec.name} dismissed by the orchestrator.",
         ))
         if self.transport is not None:
             try:
@@ -938,7 +975,7 @@ class Engine:
                 pass
         await self._refresh_dashboard()
         self._action(f"dismiss_worker({worker_id})")
-        return {"content": [{"type": "text", "text": f"dismissed {worker_id}{detail}"}]}
+        return {"content": [{"type": "text", "text": f"dismissed {worker_id}"}]}
 
     async def _review_worker(self, worker_id: str) -> dict[str, Any]:
         def err(t: str) -> dict[str, Any]:
@@ -961,13 +998,24 @@ class Engine:
                        f"check out a branch in {repo.name}")
         committed = await worktrees.is_clean(Path(rec.cwd))
         has_work = await worktrees.branch_ahead(repo, base, branch)
+        tip = await worktrees.head_sha(Path(rec.cwd))
+        base_tip = await worktrees.ref_sha(repo, base)
+        merged_local = (
+            bool(tip and base_tip and tip != base_tip)
+            and await worktrees.branch_merged(repo, base, branch)
+        )
         diff = await worktrees.branch_diff(repo, base, branch)
         routes = ["merge"]
         if await worktrees.has_remote(repo) and await worktrees.gh_available():
             routes.insert(0, "pr")
         commit_note = ("all changes committed" if committed else
                        "⚠️ uncommitted changes remain — have the worker commit first")
-        work_note = "" if has_work else "\n- ⚠️ nothing committed on the branch yet"
+        if has_work:
+            work_note = ""
+        elif merged_local:
+            work_note = "\n- branch is merged locally; remote delivery may still need retrying"
+        else:
+            work_note = "\n- ⚠️ nothing committed on the branch yet"
         checks_line = {
             "pass": "✅ passed" if rec.checks_sha and rec.checks_sha == await worktrees.head_sha(Path(rec.cwd))
                     else "passed earlier, but the branch moved since (stale — re-run)",
@@ -1009,66 +1057,100 @@ class Engine:
         return {"content": [{"type": "text", "text":
                 f"checks for {rec.name} — `{command}` — {verdict}\n\n{output}"}]}
 
-    async def _deliver_worker(self, worker_id: str, method: str) -> dict[str, Any]:
-        """Land a worker's branch. In 'conservative' braveness the orchestrator only
-        REQUESTS — the merge/PR runs solely on a human /approve the LLM can't forge.
-        In 'balanced' (default) the orchestrator may land it directly, trusted to
-        call this only once the boss has clearly said so; the checks gate and every
-        safety guard below apply in BOTH modes."""
-        def err(t: str) -> dict[str, Any]:
-            return {"content": [{"type": "text", "text": t}], "is_error": True}
-
+    async def _delivery_preflight(
+        self, worker_id: str, method: str, expected_sha: str | None = None,
+        expected_base_sha: str | None = None,
+    ) -> tuple[DeliveryPlan | None, str | None]:
+        """Re-observe the facts delivery depends on immediately before it runs."""
         found = self._find_worker(worker_id.strip())
         if found is None:
-            return err(f"no such worker: {worker_id}")
-        _thread_id, rec = found
+            return None, f"no such worker: {worker_id}"
+        thread_id, rec = found
         if method not in ("merge", "pr"):
-            return err("method must be 'merge' or 'pr'")
+            return None, "method must be 'merge' or 'pr'"
         if rec.worker_status == "delivered":
-            return err(f"{rec.name}'s work was already delivered")
+            return None, f"{rec.name}'s work was already delivered"
         if not rec.repo or rec.cwd == rec.repo:
-            return err(f"{rec.name} isn't in a git worktree — nothing to deliver")
-        if not Path(rec.cwd).is_dir():
-            return err(f"{rec.name}'s workspace is gone — nothing to deliver")
-        if not await worktrees.is_clean(Path(rec.cwd)):
-            return err(f"{rec.name} has uncommitted changes — have them commit first")
+            return None, f"{rec.name} isn't in a git worktree — nothing to deliver"
+
+        worktree = Path(rec.cwd)
+        if not worktree.is_dir():
+            return None, f"{rec.name}'s workspace is gone — nothing to deliver"
+        if not await worktrees.is_clean(worktree):
+            return None, f"{rec.name} has uncommitted changes — have them commit first"
+
         repo = Path(rec.repo)
-        base = rec.base_branch or await worktrees.current_branch(repo)
+        base = rec.base_branch or await worktrees.default_branch(repo)
         if not base:
-            return err(f"can't determine {rec.name}'s base branch — nothing to deliver into")
-        if not await worktrees.branch_ahead(repo, base, f"worker/{rec.worker_id}"):
-            return err(f"{rec.name} hasn't committed anything to deliver")
-        # Verification gate: work whose checks last FAILED can't be delivered until
-        # they're green again. (Not-yet-run is a soft warning, not a wall — the boss
-        # decides, informed.)
+            return None, f"can't determine {rec.name}'s base branch"
+        branch = f"worker/{rec.worker_id}"
+        tip = await worktrees.head_sha(worktree)
+        base_tip = await worktrees.ref_sha(repo, base)
+        ahead = await worktrees.branch_ahead(repo, base, branch)
+        already_merged = (
+            method == "merge"
+            and bool(tip and base_tip and tip != base_tip)
+            and await worktrees.branch_merged(repo, base, branch)
+        )
+        if not ahead and not already_merged:
+            return None, f"{rec.name} hasn't committed anything to deliver"
+
+        if expected_sha and tip != expected_sha:
+            return None, (
+                f"{rec.name}'s branch changed after delivery was requested "
+                f"({expected_sha[:8]} → {tip[:8]}). Review the new revision and "
+                f"request delivery again.")
+        if expected_base_sha and base_tip != expected_base_sha:
+            return None, (
+                f"the target branch changed after delivery was requested "
+                f"({expected_base_sha[:8]} → {base_tip[:8]}). Review against the "
+                f"new base and request delivery again.")
         if rec.checks == "fail":
-            return err(f"{rec.name}'s checks last FAILED — have them fix it and re-run "
-                       f"run_checks until it's green before you can deliver.")
-        tip = await worktrees.head_sha(Path(rec.cwd))
+            return None, (
+                f"{rec.name}'s checks last FAILED — have them fix it and re-run "
+                f"run_checks until it's green before delivery.")
         if rec.checks == "pass" and rec.checks_sha == tip:
             checks_note = "\n✅ checks passed on this exact revision"
         elif rec.checks == "pass":
-            checks_note = ("\n⚠️ checks passed earlier, but there are new commits since — "
-                           "consider run_checks again before approving")
+            checks_note = (
+                "\n⚠️ checks passed earlier, but the branch moved since — "
+                "consider run_checks again")
         else:
-            checks_note = "\n⚠️ no checks recorded — consider run_checks first to verify"
+            checks_note = "\n⚠️ no checks recorded — consider run_checks first"
+
+        return DeliveryPlan(
+            thread_id=thread_id, rec=rec, repo=repo, worktree=worktree,
+            branch=branch, base=base, tip=tip, base_tip=base_tip,
+            checks_note=checks_note,
+        ), None
+
+    async def _deliver_worker(self, worker_id: str, method: str) -> dict[str, Any]:
+        """Deliver now in balanced mode, or bind an approval to this revision."""
+        def err(t: str) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": t}], "is_error": True}
+
+        plan, problem = await self._delivery_preflight(worker_id, method)
+        if plan is None:
+            return err(problem or "delivery preflight failed")
+        rec = plan.rec
 
         if self.settings.deploy_braveness == "balanced":
-            # Soft gate: the boss has told the orchestrator to land it — do it now.
-            # (An injected orchestrator could abuse this; that's the trade the boss
-            # opted into by choosing balanced. checks-fail above still blocks it.)
-            result = await self._execute_delivery(rec.worker_id, method)
+            result = await self._execute_delivery(
+                rec.worker_id, method, expected_sha=plan.tip,
+                expected_base_sha=plan.base_tip)
             self._action(f"deliver_worker({rec.worker_id}, {method})")
             return {"content": [{"type": "text", "text": result}]}
 
-        # Conservative: record the request and require an explicit human /approve.
-        self._pending_delivery[rec.worker_id] = method
+        # Conservative approval authorizes one observed revision, not a moving branch.
+        self._pending_delivery[rec.worker_id] = {
+            "method": method, "sha": plan.tip, "base_sha": plan.base_tip,
+        }
         self.store.set_pending_delivery(self._pending_delivery)
         verb = "open a pull request for" if method == "pr" else "locally merge"
         await self._post(Outbound(
             thread_id=self._last_boss_thread, speaker=SYSTEM,
             text=(f"🚦 {rec.name} is ready to deliver. Approve to {verb} their work "
-                  f"into '{base}'?{checks_note}\n"
+                  f"at {plan.tip[:8]} into '{plan.base}'?{plan.checks_note}\n"
                   f"    /approve {rec.worker_id}    ·    /reject {rec.worker_id}")))
         await self._refresh_dashboard()
         self._action(f"deliver_worker({rec.worker_id}, {method}) → 🚦")
@@ -1080,11 +1162,18 @@ class Engine:
         """The hard gate: called only by an allowlisted human's /approve, so an
         injected orchestrator can't self-authorize a push/merge."""
         wid = worker_id.strip().lower()
-        method = self._pending_delivery.pop(wid, None)
-        if method is None:
+        pending = self._pending_delivery.pop(wid, None)
+        if pending is None:
             return f"No pending delivery for '{wid}'."
         self.store.set_pending_delivery(self._pending_delivery)
-        return await self._execute_delivery(wid, method)
+        if isinstance(pending, str):
+            return (
+                f"Delivery request for '{wid}' predates revision-bound approvals. "
+                "Review it and request delivery again.")
+        return await self._execute_delivery(
+            wid, str(pending.get("method", "")),
+            expected_sha=str(pending.get("sha", "")) or None,
+            expected_base_sha=str(pending.get("base_sha", "")) or None)
 
     async def reject_delivery(self, worker_id: str) -> str:
         wid = worker_id.strip().lower()
@@ -1099,25 +1188,29 @@ class Engine:
         await self._wake_orchestrator()
         return f"Rejected {name}'s delivery; the orchestrator has been told."
 
-    async def _execute_delivery(self, worker_id: str, method: str) -> str:
-        found = self._find_worker(worker_id)
-        if found is None:
-            return f"Worker '{worker_id}' is gone; nothing delivered."
-        thread_id, rec = found
-        repo = Path(rec.repo)
-        branch = f"worker/{rec.worker_id}"
-        base = rec.base_branch or await worktrees.current_branch(repo) or ""
+    async def _execute_delivery(
+        self, worker_id: str, method: str, expected_sha: str | None = None,
+        expected_base_sha: str | None = None,
+    ) -> str:
+        plan, problem = await self._delivery_preflight(
+            worker_id, method, expected_sha=expected_sha,
+            expected_base_sha=expected_base_sha)
+        if plan is None:
+            return f"⚠️ delivery refused: {problem}"
+        rec = plan.rec
         if method == "pr":
-            landed, detail = await worktrees.open_pr(repo, branch, base)
+            landed, detail = await worktrees.open_pr(
+                plan.repo, plan.branch, plan.base)
         else:
-            landed, detail = await worktrees.merge_into_base(repo, branch, base)
+            landed, detail = await worktrees.merge_into_base(
+                plan.repo, plan.branch, plan.base)
         if not landed:
             self._note(f"delivery of {rec.name} failed: {detail}")
             await self._wake_orchestrator()
             return f"⚠️ delivery of {rec.name} failed: {detail}"
-        self.store.update(thread_id, worker_status="delivered")
+        self.store.update(plan.thread_id, worker_status="delivered")
         await self._post(Outbound(
-            thread_id=thread_id, speaker=SYSTEM, text=f"📦 {detail}."))
+            thread_id=plan.thread_id, speaker=SYSTEM, text=f"📦 {detail}."))
         self._note(f"{rec.name}'s work delivered — {detail}")
         await self._refresh_dashboard()
         await self._wake_orchestrator()

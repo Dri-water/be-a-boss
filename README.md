@@ -68,8 +68,9 @@ flowchart LR
 - **You can interject in any worker topic.** Your message reaches the worker as
   input *and* the orchestrator's inbox — both see it, like walking up to a desk.
 - **Isolated worktrees.** Each worker works on its own branch (`worker/<name>`) in
-  its own git worktree — same-repo parallelism is safe; work survives on the
-  branch after the worker is dismissed. Dirty worktrees are never deleted.
+  its own git worktree forked from the resolved default branch — same-repo
+  parallelism is safe. Dismissal refuses dirty worktrees, so uncommitted work
+  remains active and visible.
 - **Direct sessions still exist**: `/new <path>` gives you a classic
   1-topic-=-1-session thread with no orchestrator in between — perfect for quick
   hands-on work.
@@ -93,7 +94,7 @@ sender per message.
   or a **PR** (`gh pr create`) when you've set up a remote + `GH_TOKEN`. How landing
   is authorized is your call (`DEPLOY_BRAVENESS`): **balanced** (default) lets the
   orchestrator land on your clear say-so ("merge it"); **conservative** requires an
-  explicit `/approve`. A failed `run_checks` blocks delivery in both.
+  explicit, revision-bound `/approve`. A failed `run_checks` blocks delivery in both.
 - **Checkpoint supervision** — workers run autonomously; the orchestrator is woken
   only at meaningful checkpoints (done / blocked / needs-decision / interjection),
   never per token. Wakes are coalesced to save tokens.
@@ -353,7 +354,8 @@ per-connection **token + same-origin check** so nothing else on the machine can 
 it. Worker subprocesses run with the bot's own secrets (`TELEGRAM_BOT_TOKEN`,
 `GH_TOKEN`, `WEB_TOKEN`) **scrubbed from their environment**. How a change *lands* is
 governed by `DEPLOY_BRAVENESS`: **conservative** requires an explicit human
-**`/approve`** (the orchestrator can request but can't merge by itself), while
+**`/approve`** bound to the reviewed commit (the orchestrator can request but can't
+merge by itself), while
 **balanced** (the default) lets it land on your clear say-so — convenient, but a soft
 gate; set `conservative` when you don't fully trust the inputs. A failed `run_checks`
 blocks delivery either way. And whatever the mode, sessions can only touch what you

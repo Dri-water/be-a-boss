@@ -143,8 +143,9 @@ How landing is **authorized** is set by `DEPLOY_BRAVENESS`:
 
 - **`conservative`** — a two-step hard gate no injected agent can talk its way past:
   `deliver_worker(worker_id, method)` does **not** land anything; it records a pending
-  request and posts a `🚦` prompt, and only an allowlisted human's **`/approve
-  <worker>`** executes the delivery. The LLM has no path to authorize it.
+  request bound to the worker's current commit and posts a `🚦` prompt. Only an
+  allowlisted human's **`/approve <worker>`** executes that exact revision; if the
+  branch moves, it must be reviewed and requested again.
 - **`balanced`** (the default) — a soft gate: `deliver_worker` lands immediately,
   trusting the orchestrator to call it only once the boss clearly said so. Convenient
   for solo/greenfield; an injected orchestrator that *believes* it was told to ship
@@ -155,9 +156,10 @@ softens the *authorization* step, never correctness.
 
 The two routes:
 
-- **`merge`** — a deterministic local merge of `worker/<id>` into the **base branch
-  the worker forked from** (recorded at spawn), *not* whatever happens to be checked
-  out now. Refuses unless the primary checkout is on that base branch and clean,
+- **`merge`** — a deterministic local merge of `worker/<id>` into the repository's
+  resolved **default branch**, which the worker forked from at spawn, *not* whatever
+  happened to be checked out then. Refuses unless the primary checkout is on that
+  default branch and clean,
   aborts + rolls back on conflict, never force-anything. The one irreversible step is
   boring, gated code — not the LLM freehanding git.
 - **`pr`** — pushes the branch and opens a GitHub PR against the base branch

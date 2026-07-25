@@ -201,10 +201,18 @@ def test_spawn_worker_worktree_failure_is_clean(tmp_path, monkeypatch):
     async def fake_is_git(path):
         return True
 
+    async def fake_default_branch(path):
+        return "main"
+
+    async def fake_branch_exists(path, branch):
+        return False
+
     async def fake_create(*args, **kwargs):
         raise worktrees.WorktreeError("branch 'worker/nova' already exists — retry")
 
     monkeypatch.setattr(worktrees, "is_git_repo", fake_is_git)
+    monkeypatch.setattr(worktrees, "default_branch", fake_default_branch)
+    monkeypatch.setattr(worktrees, "branch_exists", fake_branch_exists)
     monkeypatch.setattr(worktrees, "create_worktree", fake_create)
 
     res = asyncio.run(engine._spawn_worker("myrepo", "do a task"))
@@ -418,7 +426,8 @@ def test_deliver_requests_approval_then_human_lands_it(tmp_path):
     assert "approve" in req["content"][0]["text"].lower()
     assert not (repo / "feature.py").exists()          # nothing landed yet
     assert any("🚦" in p.text for p in t.posts)
-    assert engine._pending_delivery.get("nova") == "merge"
+    pending = engine._pending_delivery.get("nova")
+    assert pending["method"] == "merge" and pending["sha"] and pending["base_sha"]
 
     # the human's /approve is the gate that actually lands it
     result = asyncio.run(engine.approve_delivery("nova"))
@@ -442,6 +451,25 @@ def test_deliver_refuses_uncommitted_work(tmp_path):
     assert res.get("is_error") is True
     assert "uncommitted" in res["content"][0]["text"]
     assert "kite" not in engine._pending_delivery  # not queued for approval
+
+
+def test_dismiss_refuses_dirty_worker_without_closing_it(tmp_path):
+    engine, t = _engine(tmp_path)
+    repo = _repo(tmp_path, "dirty-dismiss")
+    dest = asyncio.run(worktrees.create_worktree(
+        repo, tmp_path / "state" / "worktrees", "nova"))
+    (dest / "wip.py").write_text("unfinished\n")
+    base = asyncio.run(worktrees.current_branch(repo))
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(dest), worker_id="nova",
+        repo=str(repo), base_branch=base, task="x", worker_status="working"))
+
+    res = asyncio.run(engine._dismiss_worker("nova"))
+
+    assert res.get("is_error") is True
+    assert engine.store.get("55").worker_status == "working"
+    assert dest.exists()
+    assert t.closed == []
 
 
 def test_approve_without_request_is_a_noop(tmp_path):
@@ -507,8 +535,43 @@ def test_passing_checks_surface_in_approval_prompt(tmp_path):
     asyncio.run(engine._run_checks("ada", "python -c \"exit(0)\""))
     req = asyncio.run(engine._deliver_worker("ada", "merge"))
     assert req.get("is_error") is not True
-    assert engine._pending_delivery.get("ada") == "merge"
+    pending = engine._pending_delivery.get("ada")
+    assert pending["method"] == "merge" and pending["sha"] and pending["base_sha"]
     assert any("🚦" in p.text and "✅ checks passed" in p.text for p in t.posts)
+
+
+def test_approval_is_bound_to_the_reviewed_revision(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.settings.deploy_braveness = "conservative"
+    repo, dest = _worker_with_commit(engine, tmp_path, "moving", "nova")
+    asyncio.run(engine._run_checks("nova", "python -c \"exit(0)\""))
+    asyncio.run(engine._deliver_worker("nova", "merge"))
+
+    (dest / "feature.py").write_text("x = 2\n")
+    _git(dest, "add", "-A")
+    _git(dest, "commit", "-m", "change after approval request")
+    result = asyncio.run(engine.approve_delivery("nova"))
+
+    assert "changed after delivery was requested" in result
+    assert not (repo / "feature.py").exists()
+    assert engine.store.get("55").worker_status != "delivered"
+    assert "nova" not in engine._pending_delivery
+
+
+def test_approval_is_bound_to_the_reviewed_base_revision(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.settings.deploy_braveness = "conservative"
+    repo, _dest = _worker_with_commit(engine, tmp_path, "moving-base", "nova")
+    asyncio.run(engine._deliver_worker("nova", "merge"))
+
+    (repo / "base-change.py").write_text("new base\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "base moved after approval request")
+    result = asyncio.run(engine.approve_delivery("nova"))
+
+    assert "target branch changed after delivery was requested" in result
+    assert not (repo / "feature.py").exists()
+    assert engine.store.get("55").worker_status != "delivered"
 
 
 def test_balanced_mode_lands_directly(tmp_path):
@@ -559,11 +622,13 @@ def test_turn_actions_drain_into_footer_once(tmp_path):
 def test_pending_approval_survives_restart(tmp_path):
     """A 🚦 prompt issued before a restart must still be approvable after it."""
     engine, t = _engine(tmp_path)
-    engine._pending_delivery["nova"] = "merge"
+    engine._pending_delivery["nova"] = {
+        "method": "merge", "sha": "abc123", "base_sha": "def456"}
     engine.store.set_pending_delivery(engine._pending_delivery)
     # simulate restart: fresh engine over the same store
     engine2 = Engine(_settings(tmp_path), CoreStore(tmp_path / "state"))
-    assert engine2._pending_delivery == {"nova": "merge"}
+    assert engine2._pending_delivery == {
+        "nova": {"method": "merge", "sha": "abc123", "base_sha": "def456"}}
 
 
 def test_interrupt_is_honest_about_idle_sessions(tmp_path):
@@ -759,6 +824,7 @@ def test_spawn_worker_records_dispatched_tier_model(tmp_path, monkeypatch):
 
     async def fake_is_git(path): return True
     async def fake_branch(path): return "main"
+    async def fake_branch_exists(path, branch): return False
     async def fake_create(*a, **k): return tmp_path / "wt"
 
     class FS:                       # a fake session so no real backend starts
@@ -766,7 +832,8 @@ def test_spawn_worker_records_dispatched_tier_model(tmp_path, monkeypatch):
     async def fake_ensure(thread_id, rec): return FS()
 
     monkeypatch.setattr(worktrees, "is_git_repo", fake_is_git)
-    monkeypatch.setattr(worktrees, "current_branch", fake_branch)
+    monkeypatch.setattr(worktrees, "default_branch", fake_branch)
+    monkeypatch.setattr(worktrees, "branch_exists", fake_branch_exists)
     monkeypatch.setattr(worktrees, "create_worktree", fake_create)
     monkeypatch.setattr(engine, "_ensure_session", fake_ensure)
 
@@ -774,6 +841,25 @@ def test_spawn_worker_records_dispatched_tier_model(tmp_path, monkeypatch):
     assert res.get("is_error") is not True
     recs = list(engine.store.workers().values())
     assert len(recs) == 1 and recs[0].model == "opus"     # deep -> opus, persisted
+
+
+def test_spawn_uses_fresh_identity_when_old_worker_branch_survives(tmp_path, monkeypatch):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    _git(repo, "branch", "worker/nova")
+
+    class FS:
+        async def submit(self, *a, **k): pass
+
+    async def fake_ensure(thread_id, rec): return FS()
+    monkeypatch.setattr(engine, "_ensure_session", fake_ensure)
+
+    res = asyncio.run(engine._spawn_worker("myrepo", "new task"))
+
+    assert res.get("is_error") is not True
+    rec = next(iter(engine.store.workers().values()))
+    assert rec.worker_id == "kite"
+    assert Path(rec.cwd).name == "kite"
 
 
 def test_spawn_worker_rejects_bogus_tier(tmp_path):

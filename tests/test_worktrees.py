@@ -101,6 +101,27 @@ def test_current_branch_and_no_remote(tmp_path):
     assert asyncio.run(worktrees.has_remote(repo)) is False
 
 
+def test_default_branch_and_worktree_base_do_not_follow_current_checkout(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    initial = asyncio.run(worktrees.current_branch(repo))
+    _git(repo, "checkout", "-b", "production")
+    (repo / "production.txt").write_text("ships\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "production")
+    _git(repo, "update-ref", "refs/remotes/origin/production", "HEAD")
+    _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD",
+         "refs/remotes/origin/production")
+    _git(repo, "checkout", initial)
+    _git(repo, "checkout", "-b", "scratch")
+
+    default = asyncio.run(worktrees.default_branch(repo))
+    dest = asyncio.run(worktrees.create_worktree(
+        repo, tmp_path / "wts", "nova", base_branch=default))
+
+    assert default == "production"
+    assert (dest / "production.txt").read_text() == "ships\n"
+
+
 def test_branch_diff_shows_worker_changes(tmp_path):
     repo = _init_repo(tmp_path / "repo")
     dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
@@ -119,6 +140,29 @@ def test_merge_into_base_lands_the_branch(tmp_path):
     assert landed is True
     assert "merged" in detail
     assert (repo / "feature.py").exists()  # the work is now in the primary checkout
+
+
+def test_merge_push_failure_is_incomplete_and_retryable(tmp_path):
+    repo = _init_repo(tmp_path / "repo")
+    dest = asyncio.run(worktrees.create_worktree(repo, tmp_path / "wts", "nova"))
+    _commit_in_worktree(dest, "feature.py")
+    base = asyncio.run(worktrees.current_branch(repo))
+    _git(repo, "remote", "add", "origin", str(tmp_path / "missing.git"))
+
+    landed, detail = asyncio.run(
+        worktrees.merge_into_base(repo, "worker/nova", base))
+    assert landed is False
+    assert "delivery is incomplete" in detail
+    assert (repo / "feature.py").exists()  # local merge happened
+
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git(remote, "init", "--bare")
+    _git(repo, "remote", "set-url", "origin", str(remote))
+    landed, detail = asyncio.run(
+        worktrees.merge_into_base(repo, "worker/nova", base))
+    assert landed is True
+    assert "pushed" in detail
 
 
 def test_merge_refuses_dirty_checkout(tmp_path):

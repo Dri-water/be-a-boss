@@ -59,12 +59,14 @@ worker says it passes"), then lands it. How landing is *authorized* is set by
   you've clearly told it to ("merge it", "ship it", "just merge for now"). A natural,
   conversational gate, right for solo/greenfield work.
 - **conservative** — delivery is a **command you issue**: the orchestrator posts a
-  `🚦` prompt and only your **`/approve <worker>`** actually merges or opens the PR —
-  it can request, never authorize. Choose this when you want the hard gate.
+  `🚦` prompt bound to the reviewed commit, and only your **`/approve <worker>`**
+  merges or opens the PR. If the branch changes, it must be reviewed and requested
+  again. Choose this when you want the hard gate.
 
 Work whose checks failed can't be delivered at all until they're green, in **either**
-mode. The route is either a **local merge** into the branch the worker forked from
-(deterministic; refuses a dirty or wrong-branch checkout; rolls back a conflict) or,
+mode. The route is either a **local merge** into the resolved default branch the
+worker forked from (deterministic; refuses a dirty or wrong-branch checkout; rolls
+back a conflict) or,
 if you've set up a GitHub remote + `gh`, a **pull request** — the orchestrator picks
 the route from what your box can actually do (no `gh` → local merge).
 
