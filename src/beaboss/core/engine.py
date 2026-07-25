@@ -795,6 +795,10 @@ class Engine:
             return {"content": [{"type": "text",
                     "text": f"no such repo: {repo_raw}"}], "is_error": True}
         parts = [f"# {repo.name} — {repo}"]
+        default = await worktrees.default_branch(repo)
+        if default:
+            parts.append(f"\n## Default (prod) branch\n`{default}` — this is what ships; "
+                         f"land work here to reach prod, NOT a guessed 'main'/'master'.")
         for doc in ("AGENTS.md", "CLAUDE.md", "README.md"):
             text = _read_doc(repo / doc, limit=1800)
             if text:

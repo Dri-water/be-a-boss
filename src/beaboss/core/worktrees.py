@@ -209,7 +209,26 @@ async def merge_into_base(repo: Path, branch: str, base_branch: str) -> tuple[bo
                            f"failed — {repo.name} may be mid-merge; resolve it by hand")
         return False, (f"merging into {base_branch} hit a conflict ({_tidy(out)}) — "
                        f"needs a human to resolve, or open a PR instead")
-    return True, f"merged {branch} into {base_branch}"
+    # Land it on the remote too, so the change actually reaches prod — a local merge
+    # alone never leaves this box. Plain push, never forced: if origin/<base> has moved
+    # on, we say so rather than clobber it.
+    if not await has_remote(repo):
+        return True, f"merged {branch} into {base_branch} (local only — no remote configured)"
+    pcode, pout = await _git(repo, "push", "origin", base_branch, timeout=120)
+    if pcode != 0:
+        return True, (f"merged {branch} into {base_branch} locally, but pushing to "
+                      f"origin/{base_branch} failed: {_tidy(pout)} — the merge is landed "
+                      f"here; push {base_branch} by hand to reach the remote")
+    return True, f"merged {branch} into {base_branch} and pushed to origin/{base_branch}"
+
+
+async def default_branch(repo: Path) -> str | None:
+    """The repo's default/prod branch — origin's HEAD (e.g. 'master' or 'main'), so
+    delivery targets the branch that actually ships, not a guessed 'main'."""
+    code, out = await _git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if code == 0 and out.strip():
+        return out.strip().rsplit("/", 1)[-1]  # "origin/master" -> "master"
+    return None
 
 
 async def open_pr(repo: Path, branch: str, base_branch: str) -> tuple[bool, str]:
