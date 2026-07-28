@@ -253,8 +253,13 @@ def test_turn_idle_timeout_reconnects_and_schedules_retry(tmp_path):
     async def drive():
         await sess.start()
         await sess.submit("do something")
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if sess.status == "waiting" and sess._retry_task is not None:
+                break
+        retry_scheduled = sess.status == "waiting" and sess._retry_task is not None
+        await sess.interrupt()
         await sess._queue.join()
-        retry_scheduled = sess._retry_task is not None
         await sess.stop()
         return retry_scheduled
 
@@ -262,8 +267,9 @@ def test_turn_idle_timeout_reconnects_and_schedules_retry(tmp_path):
     assert backend.interrupted >= 1                   # the wedged turn was interrupted
     assert any("turn stalled" in o.text for o in post.out)
     assert backend.started >= 2                        # reconnected after the timeout
-    assert sess.status != "busy"                        # not stuck busy
+    assert sess.status == "stopped"
     assert retry_scheduled is True                      # the original turn was retained
+    assert any("stopped" in o.text for o in post.out)   # /stop cancels the wait
     assert gave_up == []                                # not misclassified as terminal
 
 
@@ -318,6 +324,80 @@ def test_watchdog_stall_retries_the_original_turn(tmp_path):
     ]
     assert any("agent turn stalled" in o.text for o in post.out)
     assert any("recovered the supervision turn" in o.text for o in post.out)
+
+
+def test_usage_limit_retry_budget_covers_six_hours(tmp_path):
+    sess = _session(tmp_path)
+    usage_error = RuntimeError("Claude usage limit reached")
+
+    assert sess._retry_limit(usage_error) == 40
+    assert sess._retry_limit(RuntimeError("connection unavailable")) == 10
+    total_delay = sum(
+        sess._retry_delay(attempt)
+        for attempt in range(1, sess._retry_limit(usage_error) + 1)
+    )
+    assert 6 * 60 * 60 <= total_delay < 6.25 * 60 * 60
+
+
+class UsageLimitOnceBackend(FakeBackend):
+    def __init__(self):
+        super().__init__([])
+        self._failed = False
+        self._current = ""
+
+    async def send(self, turn: Turn):
+        await super().send(turn)
+        self._current = turn.text
+
+    def receive(self):
+        current = self._current
+
+        async def gen():
+            if not self._failed:
+                self._failed = True
+                yield ResultMessage(
+                    subtype="error_during_execution", duration_ms=1,
+                    duration_api_ms=1, is_error=True, num_turns=0,
+                    session_id="s", total_cost_usd=0.0,
+                    result="You've hit your limit · resets in five hours",
+                )
+                return
+            yield ResultMessage(
+                subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+                num_turns=1, session_id="s", total_cost_usd=0.0,
+                result=f"done: {current}",
+            )
+
+        return gen()
+
+
+def test_backlogged_messages_remain_fifo_during_usage_retry(tmp_path):
+    backend = UsageLimitOnceBackend()
+    post = SinkPost()
+    sess = CoreSession(
+        thread_id="general", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+    sess.RETRY_BASE = 0.02
+
+    async def drive():
+        await sess.start()
+        await sess.submit("first")
+        for _ in range(100):
+            await asyncio.sleep(0.001)
+            if sess.status == "waiting":
+                break
+        assert sess.status == "waiting"
+        await sess.submit("second")
+        await asyncio.wait_for(sess._queue.join(), timeout=2)
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert [turn.text for turn in backend.sent] == ["first", "first", "second"]
+    replies = [out.text for out in post.out if out.text.startswith("done:")]
+    assert replies == ["done: first", "done: second"]
 
 
 def test_alive_reflects_worker_and_status(tmp_path):

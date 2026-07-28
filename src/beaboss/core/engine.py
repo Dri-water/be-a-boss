@@ -1244,7 +1244,7 @@ class Engine:
         if self._is_orchestrator_thread(thread_id):
             thread_id = self.main_thread
         session = self.sessions.get(thread_id)
-        if session is None or session.status != "busy":
+        if session is None or session.status not in ("busy", "waiting"):
             return False  # honest: there was nothing running to stop
         await session.interrupt()
         return True

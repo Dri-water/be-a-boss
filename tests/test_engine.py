@@ -662,6 +662,8 @@ def test_interrupt_is_honest_about_idle_sessions(tmp_path):
     assert asyncio.run(engine.interrupt("dm:42")) is False   # idle → nothing to stop
     fake.status = "busy"
     assert asyncio.run(engine.interrupt("dm:42")) is True    # busy → interrupted
+    fake.status = "waiting"
+    assert asyncio.run(engine.interrupt("dm:42")) is True    # retry sleep → interrupted
 
 
 def test_spawn_repo_cannot_escape_projects_root(tmp_path):

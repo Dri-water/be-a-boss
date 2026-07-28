@@ -151,7 +151,7 @@ class CoreSession:
         self._worker: asyncio.Task | None = None
         self._reply_to = thread_id   # current turn's reply target (see _do_turn)
         self._interrupted = False    # a human /stop is in flight for this turn
-        self.status = "new"  # new | idle | busy | error | stopped
+        self.status = "new"  # new | idle | busy | waiting | error | stopped
         self.turns = 0
         self.on_turn_done: Callable[["CoreSession", ResultMessage], Awaitable[None]] | None = None
         # Fires when a turn CRASHES (no ResultMessage) — so a supervisor can follow up
@@ -309,6 +309,10 @@ class CoreSession:
             log.warning("disconnect failed thread=%s: %s", self.thread_id, e)
 
     async def interrupt(self) -> None:
+        if self.status == "waiting" and self._retry_task is not None:
+            self._interrupted = True
+            self._retry_task.cancel()
+            return
         if self.status == "busy":
             self._interrupted = True
             try:
@@ -376,42 +380,56 @@ class CoreSession:
             turn = await self._queue.get()
             self.status = "busy"
             try:
-                await self._do_turn(turn)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                log.exception("turn failed thread=%s", self.thread_id)
-                await self._try_reconnect()
-                if (self.status != "error" and self._is_recoverable(e)
-                        and self._retries < self.MAX_RETRIES):
-                    # A transient limit (rate limit, overload, out of credits) clears on
-                    # its own, so auto-retry the SAME turn with backoff — the boss never
-                    # has to say "continue". The session_id resumes the context.
-                    self._retries += 1
-                    delay = min(self.RETRY_BASE * 2 ** (self._retries - 1), self.RETRY_MAX)
-                    reason = (
-                        "agent turn stalled"
-                        if self._is_watchdog_stall(e)
-                        else "transient backend limit/error"
-                    )
-                    await self._safe_emit(
-                        f"⏳ {reason} — I reconnected and will retry on my "
-                        f"own in ~{int(delay)}s (attempt {self._retries}/{self.MAX_RETRIES}); "
-                        "you don't need to do anything.")
-                    self._retry_task = asyncio.create_task(self._retry_after(turn, delay))
-                else:
-                    # Non-recoverable, or retries exhausted: a crashed turn has no
-                    # ResultMessage, so on_turn_done never fires — surface it and wake the
-                    # supervisor so a worker that truly died isn't left silently stalled.
-                    await self._safe_emit(f"⚠️ session error: {e}")
-                    self._retries = 0
-                    if self.on_turn_error is not None:
-                        try:
-                            await self.on_turn_error(self, e)
-                        except Exception:  # noqa: BLE001
-                            log.exception("on_turn_error hook failed thread=%s", self.thread_id)
-            else:
-                self._retries = 0   # a clean turn resets the backoff
+                while True:
+                    try:
+                        await self._do_turn(turn)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:  # noqa: BLE001
+                        log.exception("turn failed thread=%s", self.thread_id)
+                        await self._try_reconnect()
+                        retry_limit = self._retry_limit(e)
+                        if (self.status != "error" and retry_limit
+                                and self._retries < retry_limit):
+                            # Wait inline so this turn remains at the head of the
+                            # session and later inbound messages retain FIFO order.
+                            self._retries += 1
+                            delay = self._retry_delay(self._retries)
+                            self.status = "waiting"
+                            self._retry_task = asyncio.create_task(asyncio.sleep(delay))
+                            await self._safe_emit(
+                                f"⏳ {self._retry_reason(e)} — I reconnected and will "
+                                f"retry on my own in ~{int(delay)}s "
+                                f"(attempt {self._retries}/{retry_limit}); "
+                                "you don't need to do anything.")
+                            try:
+                                await self._retry_task
+                            except asyncio.CancelledError:
+                                if self.status == "stopped":
+                                    raise
+                                self._interrupted = False
+                                self._retries = 0
+                                await self._safe_emit("⏹ stopped.")
+                                break
+                            finally:
+                                self._retry_task = None
+                            self.status = "busy"
+                            continue
+
+                        # Non-recoverable, or retries exhausted: a crashed turn has no
+                        # ResultMessage, so wake its supervisor rather than leave it stuck.
+                        await self._safe_emit(f"⚠️ session error: {e}")
+                        self._retries = 0
+                        if self.on_turn_error is not None:
+                            try:
+                                await self.on_turn_error(self, e)
+                            except Exception:  # noqa: BLE001
+                                log.exception(
+                                    "on_turn_error hook failed thread=%s", self.thread_id)
+                        break
+                    else:
+                        self._retries = 0
+                        break
             finally:
                 # Don't clobber a terminal "error" (a failed reconnect) back to idle,
                 # or a dead session masquerades as healthy and keeps being reused.
@@ -419,15 +437,19 @@ class CoreSession:
                     self.status = "idle"
                 self._queue.task_done()
 
-    # Backoff for auto-retrying a transient failure (rate/credit/overload). Class attrs
-    # so a test can shrink RETRY_BASE; ~30s→10min over 10 tries ≈ an hour of patience.
-    MAX_RETRIES = 10
+    # General transient failures get about an hour. Usage/credit limits get just over
+    # six hours so a five-hour Claude usage window can reset without a human nudge.
+    TRANSIENT_MAX_RETRIES = 10
+    USAGE_MAX_RETRIES = 40
     RETRY_BASE = 30.0
     RETRY_MAX = 600.0
     _RECOVERABLE = ("rate limit", "rate_limit", "overloaded", "credit balance",
                     "insufficient", "quota", "usage limit", "too many requests",
                     "429", "529", "timed out", "timeout", "temporarily", "try again",
-                    "connection", "unavailable", "turn wedged")
+                    "connection", "unavailable", "turn wedged", "limit reached",
+                    "hit your limit")
+    _USAGE_LIMITS = ("credit balance", "insufficient", "quota", "usage limit",
+                     "limit reached", "hit your limit")
 
     @staticmethod
     def _is_watchdog_stall(e: BaseException) -> bool:
@@ -441,15 +463,23 @@ class CoreSession:
             return False
         return any(k in msg for k in self._RECOVERABLE)
 
-    async def _retry_after(self, turn: Turn, delay: float) -> None:
-        """Re-run a turn after a backoff — how the session picks itself back up when a
-        transient limit (like exhausted credits) clears, with no nudge from the boss."""
-        try:
-            await asyncio.sleep(delay)
-            if self.status != "stopped":
-                await self._queue.put(turn)   # same turn; session_id resumes the context
-        except asyncio.CancelledError:
-            pass
+    def _retry_limit(self, e: BaseException) -> int:
+        if not self._is_recoverable(e):
+            return 0
+        msg = str(e).lower()
+        if any(k in msg for k in self._USAGE_LIMITS):
+            return self.USAGE_MAX_RETRIES
+        return self.TRANSIENT_MAX_RETRIES
+
+    def _retry_delay(self, attempt: int) -> float:
+        return min(self.RETRY_BASE * 2 ** (attempt - 1), self.RETRY_MAX)
+
+    def _retry_reason(self, e: BaseException) -> str:
+        if self._is_watchdog_stall(e):
+            return "agent turn stalled"
+        if self._retry_limit(e) == self.USAGE_MAX_RETRIES:
+            return "backend usage limit"
+        return "transient backend limit/error"
 
     async def _keep_busy(self) -> None:
         """Telegram's typing indicator dies after ~5s; keep it alive for the whole
@@ -529,6 +559,14 @@ class CoreSession:
             elif isinstance(message, ResultMessage):
                 if message.session_id:
                     self._capture_session_id(message.session_id)
+                error = RuntimeError(
+                    (message.result or message.subtype or "agent turn failed").strip())
+                if (message.is_error or (
+                        message.subtype and message.subtype != "success")
+                        ) and self._is_recoverable(error):
+                    # Claude Code can return limits as an error ResultMessage instead
+                    # of raising. Feed both forms through the same retry policy.
+                    raise error
                 self.turns += 1
                 result = message
                 await self._flush_tools()
