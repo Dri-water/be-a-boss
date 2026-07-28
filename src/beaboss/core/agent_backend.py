@@ -128,12 +128,14 @@ class CodexBackend:
     """
 
     def __init__(self, cwd: Path, system_prompt: str = "", resume_id: str | None = None,
-                 model: str | None = None, cli_path: str | None = None):
+                 model: str | None = None, cli_path: str | None = None,
+                 worker_thread_id: str | None = None):
         self._cwd = cwd
         self._system_prompt = system_prompt
         self._thread_id = resume_id  # resume the same Codex thread across restarts
         self._model = model          # honors AGENT_MODEL / CODEX_MODEL
         self._cli_path = cli_path    # honors AGENT_CLI_PATH / CODEX_CLI_PATH
+        self._worker_thread_id = worker_thread_id
         self._proc: asyncio.subprocess.Process | None = None
         self._final_text = ""  # last agent_message of the in-flight turn
         self._stderr: list[str] = []
@@ -168,10 +170,13 @@ class CodexBackend:
         else:
             argv = [codex, "exec", "resume", self._thread_id, *flags, prompt]
 
+        env = scrubbed_env()
+        if self._worker_thread_id:
+            env["BEABOSS_WORKER_THREAD_ID"] = self._worker_thread_id
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(self._cwd),
-            env=scrubbed_env(),  # don't hand the bot's secrets to the agent
+            env=env,  # bot secrets removed; worker marker retained by descendants
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

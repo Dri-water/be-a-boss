@@ -13,6 +13,7 @@ _KEYS = [
     "AGENT_MODEL_FAST", "AGENT_MODEL_BALANCED", "AGENT_MODEL_DEEP",
     "CLAUDE_MODEL_FAST", "CLAUDE_MODEL_BALANCED", "CLAUDE_MODEL_DEEP",
     "CODEX_MODEL_FAST", "CODEX_MODEL_BALANCED", "CODEX_MODEL_DEEP", "DEPLOY_BRAVENESS",
+    "WORKER_NAMES",
 ]
 
 
@@ -62,6 +63,8 @@ def test_defaults_and_allowlist_parsing(clean_env, monkeypatch):
     assert s.session_system_append is None
     assert s.chat_id is None
     assert s.max_turns is None
+    assert len(s.worker_names) == 16
+    assert s.worker_names[0] == "Nova"
 
 
 def test_blank_token_normalizes_to_none(clean_env, monkeypatch):
@@ -121,6 +124,15 @@ def test_overrides(clean_env, monkeypatch):
     assert s.chat_id == -100123
     assert s.max_turns == 12
     assert s.session_system_append == ""
+
+
+def test_worker_names_override_is_trimmed_and_deduplicated(clean_env, monkeypatch):
+    monkeypatch.setenv(
+        "WORKER_NAMES",
+        "  Alice Smith, Bob Jones, alice smith,  Charlie   Lee ,,",
+    )
+    s = Settings.from_env(clean_env)
+    assert s.worker_names == ("Alice Smith", "Bob Jones", "Charlie Lee")
 
 
 def test_agent_neutral_tuning(clean_env, monkeypatch):

@@ -171,6 +171,11 @@ class CoreSession:
 
     def _build_options(self) -> ClaudeAgentOptions:
         append = self._resolve_append()
+        env = scrubbed_env()
+        if self.speaker.role == "worker":
+            # Descendants inherit this marker, including detached dev servers. The
+            # dismiss/reset paths use it to terminate everything the worker launched.
+            env["BEABOSS_WORKER_THREAD_ID"] = self.thread_id
         system_prompt = (
             {"type": "preset", "preset": "claude_code", "append": append}
             if append
@@ -180,7 +185,7 @@ class CoreSession:
         mcp.update(self._extra_mcp)
         return ClaudeAgentOptions(
             cwd=str(self.cwd),
-            env=scrubbed_env(),  # don't hand the bot's secrets to the agent CLI
+            env=env,  # bot secrets removed; worker marker retained by descendants
             permission_mode=self.settings.permission_mode,
             include_partial_messages=False,
             resume=self.session_id,
@@ -293,6 +298,9 @@ class CoreSession:
 
     async def stop(self) -> None:
         self.status = "stopped"
+        if self._retry_task is not None:
+            self._retry_task.cancel()
+            self._retry_task = None
         if self._worker:
             self._worker.cancel()
         try:
@@ -381,8 +389,13 @@ class CoreSession:
                     # has to say "continue". The session_id resumes the context.
                     self._retries += 1
                     delay = min(self.RETRY_BASE * 2 ** (self._retries - 1), self.RETRY_MAX)
+                    reason = (
+                        "agent turn stalled"
+                        if self._is_watchdog_stall(e)
+                        else "transient backend limit/error"
+                    )
                     await self._safe_emit(
-                        f"⏳ transient limit hit (likely rate/credit) — I'll retry on my "
+                        f"⏳ {reason} — I reconnected and will retry on my "
                         f"own in ~{int(delay)}s (attempt {self._retries}/{self.MAX_RETRIES}); "
                         "you don't need to do anything.")
                     self._retry_task = asyncio.create_task(self._retry_after(turn, delay))
@@ -414,7 +427,11 @@ class CoreSession:
     _RECOVERABLE = ("rate limit", "rate_limit", "overloaded", "credit balance",
                     "insufficient", "quota", "usage limit", "too many requests",
                     "429", "529", "timed out", "timeout", "temporarily", "try again",
-                    "connection", "unavailable")
+                    "connection", "unavailable", "turn wedged")
+
+    @staticmethod
+    def _is_watchdog_stall(e: BaseException) -> bool:
+        return "turn wedged" in str(e).lower()
 
     def _is_recoverable(self, e: BaseException) -> bool:
         """A failure that clears on its own if we just wait and retry — vs. one where

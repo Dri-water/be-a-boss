@@ -55,6 +55,11 @@ def test_build_options_scrubs_secrets(tmp_path, monkeypatch):
     assert "GH_TOKEN" not in (opts.env or {})
 
 
+def test_worker_processes_receive_an_ownership_marker(tmp_path):
+    opts = _session(tmp_path)._build_options()
+    assert (opts.env or {})["BEABOSS_WORKER_THREAD_ID"] == "t1"
+
+
 def test_build_options_has_chat_mcp_and_env_prompt(tmp_path):
     opts = _session(tmp_path)._build_options()
     assert "chat" in opts.mcp_servers
@@ -225,30 +230,94 @@ class HangingBackend(FakeBackend):
         return gen()
 
 
-def test_turn_idle_timeout_recovers_a_wedged_backend(tmp_path):
+def test_turn_idle_timeout_reconnects_and_schedules_retry(tmp_path):
     """A backend that hangs mid-turn must not pin the session in 'busy' forever:
-    the idle timeout interrupts, reports it, and reconnects."""
+    the idle timeout interrupts, reconnects, and retains the turn for retry."""
     post = SinkPost()
     backend = HangingBackend([])
+    gave_up: list[BaseException] = []
     sess = CoreSession(
         thread_id="t1", cwd=tmp_path,
         speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
         settings=_settings(tmp_path), post=post, busy=_noop_busy,
         on_session_id=lambda _s: None, backend=backend,
     )
+
+    async def on_error(_s, error):
+        gave_up.append(error)
+
+    sess.on_turn_error = on_error
     sess.TURN_IDLE_TIMEOUT = 0.05  # trip fast
+    sess.RETRY_BASE = 60           # inspect the scheduled retry before it runs
 
     async def drive():
         await sess.start()
         await sess.submit("do something")
-        await sess._queue.join()  # resolves via timeout, does NOT hang
+        await sess._queue.join()
+        retry_scheduled = sess._retry_task is not None
         await sess.stop()
+        return retry_scheduled
 
-    asyncio.run(asyncio.wait_for(drive(), timeout=5))
+    retry_scheduled = asyncio.run(asyncio.wait_for(drive(), timeout=5))
     assert backend.interrupted >= 1                   # the wedged turn was interrupted
-    assert any("wedged" in o.text for o in post.out)  # legible
+    assert any("turn stalled" in o.text for o in post.out)
     assert backend.started >= 2                        # reconnected after the timeout
     assert sess.status != "busy"                        # not stuck busy
+    assert retry_scheduled is True                      # the original turn was retained
+    assert gave_up == []                                # not misclassified as terminal
+
+
+class StallsOnceBackend(FakeBackend):
+    def __init__(self, scripted):
+        super().__init__(scripted)
+        self._stalled = False
+
+    def receive(self):
+        if not self._stalled:
+            self._stalled = True
+
+            async def hang():
+                await asyncio.Event().wait()
+                yield
+
+            return hang()
+        return super().receive()
+
+
+def test_watchdog_stall_retries_the_original_turn(tmp_path):
+    backend = StallsOnceBackend([
+        ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=1, session_id="s", total_cost_usd=0.0,
+            result="recovered the supervision turn",
+        ),
+    ])
+    post = SinkPost()
+    sess = CoreSession(
+        thread_id="general", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+    sess.TURN_IDLE_TIMEOUT = 0.01
+    sess.RETRY_BASE = 0.01
+
+    async def drive():
+        await sess.start()
+        await sess.submit("[fleet inbox]\n- Vega finished")
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if any("recovered the supervision turn" in o.text for o in post.out):
+                break
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert [turn.text for turn in backend.sent] == [
+        "[fleet inbox]\n- Vega finished",
+        "[fleet inbox]\n- Vega finished",
+    ]
+    assert any("agent turn stalled" in o.text for o in post.out)
+    assert any("recovered the supervision turn" in o.text for o in post.out)
 
 
 def test_alive_reflects_worker_and_status(tmp_path):

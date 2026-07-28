@@ -32,6 +32,7 @@ def _settings(tmp: Path) -> Settings:
         permission_mode="bypassPermissions", projects_root=tmp / "projects",
         cli_path=None, model=None, max_turns=None, state_dir=tmp / "state",
         bot_name="Lim Wei Jie", session_system_append=None,
+        worker_names=("Nova", "Kite", "Juno"),
     )
 
 
@@ -238,6 +239,28 @@ def test_rehydrate_resurfaces_pending_workers(tmp_path):
     assert len(engine._inbox) == 1
     note = engine._inbox[0]
     assert "Nova" in note and "Kite" in note and "Ada" not in note
+
+
+def test_rehydrate_keeps_legacy_identity_with_new_name_pool(tmp_path):
+    """Name-pool changes only affect new hires; old session/branch identity survives."""
+    store = CoreStore(tmp_path / "state")
+    store.put("9", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova",
+        cwd="/data/worktrees/nova", session_id="session-before-name-change",
+        worker_status="blocked",
+    ))
+
+    settings = _settings(tmp_path)
+    settings.worker_names = ("Alice Smith", "Bob Jones")
+    restarted = Engine(settings, CoreStore(tmp_path / "state"))
+    restarted.rehydrate()
+
+    rec = restarted.store.get("9")
+    assert rec is not None
+    assert (rec.name, rec.worker_id) == ("Nova", "nova")
+    assert rec.cwd == "/data/worktrees/nova"
+    assert rec.session_id == "session-before-name-change"
+    assert "Nova (blocked)" in restarted._inbox[0]
 
 
 def test_dm_message_routes_to_one_orchestrator_replying_in_the_dm(tmp_path):
@@ -860,6 +883,27 @@ def test_spawn_uses_fresh_identity_when_old_worker_branch_survives(tmp_path, mon
     rec = next(iter(engine.store.workers().values()))
     assert rec.worker_id == "kite"
     assert Path(rec.cwd).name == "kite"
+
+
+def test_spawn_uses_configured_full_display_name_and_safe_id(tmp_path, monkeypatch):
+    engine, transport = _engine(tmp_path)
+    engine.settings.worker_names = ("Alice Smith", "Bob Jones")
+    (tmp_path / "projects" / "notes").mkdir(parents=True)
+
+    class FS:
+        async def submit(self, *args, **kwargs):
+            pass
+
+    async def fake_ensure(thread_id, rec):
+        return FS()
+
+    monkeypatch.setattr(engine, "_ensure_session", fake_ensure)
+    result = asyncio.run(engine._spawn_worker("notes", "organize the notes"))
+
+    assert result.get("is_error") is not True
+    rec = next(iter(engine.store.workers().values()))
+    assert (rec.name, rec.worker_id) == ("Alice Smith", "alice-smith")
+    assert transport.threads == ["⚙️ Alice Smith · notes"]
 
 
 def test_spawn_worker_rejects_bogus_tier(tmp_path):

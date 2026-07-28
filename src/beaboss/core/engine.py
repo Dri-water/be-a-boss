@@ -24,7 +24,7 @@ from typing import Any
 from claude_agent_sdk import ResultMessage, create_sdk_mcp_server, tool
 
 from .agent_backend import CodexBackend
-from .names import pick_name
+from .names import pick_name, worker_id_for
 from .prompts import (DELIVERY_BALANCED, DELIVERY_CONSERVATIVE,
                       ORCHESTRATOR_APPEND, WORKER_APPEND_EXTRA)
 from .ports import InboundMessage, MediaIn, Outbound, Speaker, SYSTEM, Transport
@@ -415,7 +415,8 @@ class Engine:
             )
             backend = CodexBackend(
                 cwd, system_prompt=worker_append, resume_id=rec.session_id,
-                model=model or self.settings.model, cli_path=self.settings.cli_path)
+                model=model or self.settings.model, cli_path=self.settings.cli_path,
+                worker_thread_id=thread_id)
         else:
             backend = None  # None => CoreSession builds the default ClaudeAgentBackend
         session = CoreSession(
@@ -849,8 +850,8 @@ class Engine:
 
         taken = {r.worker_id for r in self.store.workers().values()}
         taken |= {r.name.lower() for r in self.store.workers().values()}
-        name = pick_name(taken)
-        worker_id = name.lower()
+        name = pick_name(taken, self.settings.worker_names)
+        worker_id = worker_id_for(name)
 
         # Workers fork the repository's default branch, not whichever branch happens
         # to be checked out when the tool call arrives.
@@ -868,8 +869,8 @@ class Engine:
                     # A reset deliberately preserves old branches. Give new work a
                     # fresh identity instead of attaching it to an earlier task.
                     taken.add(worker_id)
-                    name = pick_name(taken)
-                    worker_id = name.lower()
+                    name = pick_name(taken, self.settings.worker_names)
+                    worker_id = worker_id_for(name)
                 wt = await worktrees.create_worktree(
                     repo, worktrees_dir, worker_id, base_branch=base_branch)
                 cwd, isolated = wt, True
@@ -959,7 +960,8 @@ class Engine:
 
         detail = ""
         if has_worktree:
-            removed, detail = await worktrees.remove_worktree(Path(rec.repo), wt)
+            removed, detail = await worktrees.remove_worktree(
+                Path(rec.repo), wt, worker_thread_id=thread_id)
             if not removed:
                 return err(f"couldn't dismiss {rec.name}: {detail}")
 
@@ -1255,7 +1257,10 @@ class Engine:
         if rec is None:
             return session is not None
         if rec.role == "worker" and rec.repo and rec.cwd != rec.repo:
-            await worktrees.remove_worktree(Path(rec.repo), Path(rec.cwd))
+            await worktrees.terminate_worker_processes(
+                Path(rec.cwd), worker_thread_id=thread_id)
+            await worktrees.remove_worktree(
+                Path(rec.repo), Path(rec.cwd), worker_thread_id=thread_id)
         if rec.role == "orchestrator":
             self.store.set_orchestrator_thread(None)
         self.store.delete(thread_id)
@@ -1309,7 +1314,8 @@ class Engine:
         for tid, rec in list(self.store.all().items()):
             if rec.role == "worker" and rec.repo and rec.cwd and rec.cwd != rec.repo:
                 try:  # factory reset discards work in progress, dirty or not
-                    await worktrees.force_remove_worktree(Path(rec.repo), Path(rec.cwd))
+                    await worktrees.force_remove_worktree(
+                        Path(rec.repo), Path(rec.cwd), worker_thread_id=tid)
                 except Exception:  # noqa: BLE001
                     pass
             # Keep the orchestrator's office(s) so you land on a fresh, empty

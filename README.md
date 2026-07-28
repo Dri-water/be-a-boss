@@ -259,6 +259,7 @@ runs locally, gated by who can run a process on the host.
 | `HOST_DOCUMENTS` | ✅ (Docker) | Host path to your projects, mounted as `/workspace` |
 | `HOST_CLAUDE_DIR` | ✅ (Docker) | Host path to your `~/.claude`, mounted for auth |
 | `BOT_NAME` | – | Display persona (default `Orchestrator`) |
+| `WORKER_NAMES` | – | Comma-separated worker display-name pool (default: built-in neutral names) |
 | `TELEGRAM_CHAT_ID` | – | Pin the bot to one group (logged on first run) |
 | `DEPLOY_BRAVENESS` | – | How work lands: `balanced` (default; orchestrator merges on your say-so) or `conservative` (explicit `/approve` only) |
 | `AGENT_MODEL`, `AGENT_MAX_TURNS` | – | Backend-neutral session tuning (override per backend with `CLAUDE_*` / `CODEX_*`) |

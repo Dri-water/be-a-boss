@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 from pathlib import Path
 
 log = logging.getLogger("beaboss.core.worktrees")
 
 GIT_TIMEOUT = 60  # seconds per git command
+PROCESS_STOP_GRACE = 3.0
 
 
 class WorktreeError(RuntimeError):
@@ -96,9 +99,152 @@ async def is_clean(worktree: Path, untracked: bool = True) -> bool:
     return code == 0 and not out
 
 
-async def remove_worktree(repo: Path, worktree: Path) -> tuple[bool, str]:
+def _process_targets(
+    snapshot: dict[int, tuple[int, Path | None, str | None]],
+    worktree: Path,
+    worker_thread_id: str | None,
+    protected: set[int],
+) -> set[int]:
+    """Select marked/worktree-rooted processes and every descendant."""
+    root = worktree.resolve()
+
+    def owned(info: tuple[int, Path | None, str | None]) -> bool:
+        _ppid, cwd, marker = info
+        if worker_thread_id and marker == worker_thread_id:
+            return True
+        if cwd is None:
+            return False
+        try:
+            cwd.resolve().relative_to(root)
+            return True
+        except (OSError, ValueError):
+            return False
+
+    targets = {pid for pid, info in snapshot.items() if owned(info)}
+    while True:
+        descendants = {
+            pid for pid, (ppid, _cwd, _marker) in snapshot.items()
+            if ppid in targets
+        }
+        expanded = targets | descendants
+        if expanded == targets:
+            break
+        targets = expanded
+    return targets - protected
+
+
+def _proc_snapshot() -> dict[int, tuple[int, Path | None, str | None]]:
+    """Best-effort Linux process ownership snapshot; empty elsewhere."""
+    proc = Path("/proc")
+    if os.name != "posix" or not proc.is_dir():
+        return {}
+    snapshot: dict[int, tuple[int, Path | None, str | None]] = {}
+    marker_prefix = b"BEABOSS_WORKER_THREAD_ID="
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            status = (entry / "status").read_text(
+                encoding="utf-8", errors="replace")
+            ppid = int(next(
+                line.split(":", 1)[1].strip()
+                for line in status.splitlines()
+                if line.startswith("PPid:")
+            ))
+        except (OSError, StopIteration, ValueError):
+            continue
+        try:
+            raw_cwd = os.readlink(entry / "cwd")
+            cwd = Path(raw_cwd.removesuffix(" (deleted)"))
+        except OSError:
+            cwd = None
+        marker = None
+        try:
+            for item in (entry / "environ").read_bytes().split(b"\0"):
+                if item.startswith(marker_prefix):
+                    marker = item[len(marker_prefix):].decode("utf-8", "replace")
+                    break
+        except OSError:
+            pass
+        snapshot[pid] = (ppid, cwd, marker)
+    return snapshot
+
+
+def _proc_identity(pid: int) -> tuple[str, str] | None:
+    """Linux (start tick, state), guarding PID reuse and ignoring zombies."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(
+            encoding="utf-8", errors="replace")
+        fields = raw[raw.rfind(")") + 2:].split()
+        # fields starts at process state (field 3); start time is field 22.
+        return fields[19], fields[0]
+    except (OSError, IndexError):
+        return None
+
+
+async def terminate_worker_processes(
+    worktree: Path,
+    worker_thread_id: str | None = None,
+    grace: float = PROCESS_STOP_GRACE,
+) -> int:
+    """Terminate processes owned by a worker before its worktree disappears."""
+    snapshot = _proc_snapshot()
+    if not snapshot:
+        return 0
+
+    protected = {os.getpid()}
+    pid = os.getpid()
+    while pid in snapshot:
+        pid = snapshot[pid][0]
+        if pid <= 0 or pid in protected:
+            break
+        protected.add(pid)
+    targets = _process_targets(
+        snapshot, worktree, worker_thread_id, protected)
+    if not targets:
+        return 0
+
+    identities = {pid: _proc_identity(pid) for pid in targets}
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    await asyncio.sleep(grace)
+    forced = 0
+    for pid in targets:
+        current = _proc_identity(pid)
+        if (
+            identities[pid] is None
+            or current is None
+            or current[0] != identities[pid][0]
+            or current[1] == "Z"
+        ):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            forced += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+    log.info(
+        "terminated %d worker process(es) for %s%s%s",
+        len(targets), worktree,
+        f" (forced {forced})" if forced else "",
+        f" thread={worker_thread_id}" if worker_thread_id else "",
+    )
+    return len(targets)
+
+
+async def remove_worktree(
+    repo: Path,
+    worktree: Path,
+    worker_thread_id: str | None = None,
+) -> tuple[bool, str]:
     """Remove if clean. Returns (removed, detail). Dirty → left in place."""
     if not worktree.exists():
+        await terminate_worker_processes(
+            worktree, worker_thread_id=worker_thread_id)
         return True, "already gone"
     if not await is_clean(worktree):
         return False, (
@@ -106,6 +252,8 @@ async def remove_worktree(repo: Path, worktree: Path) -> tuple[bool, str]:
             f"commit or stash the work there first, then dismiss again; or to "
             f"discard it, force removal with `git worktree remove --force {worktree}`"
         )
+    await terminate_worker_processes(
+        worktree, worker_thread_id=worker_thread_id)
     code, out = await _git(repo, "worktree", "remove", str(worktree))
     if code != 0:
         return False, (
@@ -293,9 +441,15 @@ async def open_pr(repo: Path, branch: str, base_branch: str) -> tuple[bool, str]
     return True, (text.splitlines()[-1] if text else "pull request opened")
 
 
-async def force_remove_worktree(repo: Path, worktree: Path) -> None:
+async def force_remove_worktree(
+    repo: Path,
+    worktree: Path,
+    worker_thread_id: str | None = None,
+) -> None:
     """Factory-reset teardown: remove a worktree even if dirty. Deliberately
     destructive — only reachable from an explicit human `/reset confirm`."""
+    await terminate_worker_processes(
+        worktree, worker_thread_id=worker_thread_id)
     if worktree.exists():
         await _git(repo, "worktree", "remove", "--force", str(worktree))
     await _git(repo, "worktree", "prune")

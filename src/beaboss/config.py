@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from . import DEFAULT_BOT_NAME
+from .core.names import DEFAULT_WORKER_NAMES, parse_worker_names
 
 
 def _parse_ids(raw: str) -> set[int]:
@@ -97,6 +98,9 @@ class Settings:
     # Per-worker model tiers (fast/balanced/deep) -> concrete model ids; the orchestrator
     # picks a tier at spawn. Empty for a tier => fall back to `model` (AGENT_MODEL/default).
     model_tiers: dict[str, str] = field(default_factory=dict)
+    # Display-name pool for newly spawned workers. Existing workers retain the name
+    # and worker_id persisted in their ThreadRecord across config changes/restarts.
+    worker_names: tuple[str, ...] = DEFAULT_WORKER_NAMES
 
     def resolve_worker_model(self, tier: str | None) -> str | None:
         """A worker's model from its tier, with a safe fallback chain:
@@ -154,4 +158,5 @@ class Settings:
                 if os.getenv("DEPLOY_BRAVENESS", "").strip().lower() == "conservative"
                 else "balanced"),
             model_tiers=_agent_model_tiers(backend),
+            worker_names=parse_worker_names(os.getenv("WORKER_NAMES")),
         )

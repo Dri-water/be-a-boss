@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,6 +35,49 @@ def test_not_a_git_repo_is_friendly(tmp_path):
     msg = str(exc.value)
     assert "not a git repository" in msg
     assert "git init" in msg  # tells the user how to resolve it
+
+
+def test_process_targets_include_marker_cwd_and_descendants(tmp_path):
+    worktree = tmp_path / "worktrees" / "nova"
+    snapshot = {
+        1: (0, Path("/"), None),
+        10: (1, worktree, None),                  # legacy process: cwd ownership
+        11: (10, Path("/tmp"), None),             # child changed directory
+        12: (1, Path("/tmp"), "topic-55"),        # detached marked process
+        13: (12, None, None),                     # marked process's child
+        14: (1, tmp_path / "another-worker", None),
+        15: (1, worktree / "web", "topic-55"),
+    }
+
+    targets = worktrees._process_targets(
+        snapshot, worktree, "topic-55", protected={1})
+
+    assert targets == {10, 11, 12, 13, 15}
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/proc").is_dir(),
+    reason="Linux /proc process ownership integration",
+)
+def test_terminate_worker_processes_cleans_legacy_and_marked_processes(tmp_path):
+    worktree = tmp_path / "worktrees" / "nova"
+    elsewhere = tmp_path / "elsewhere"
+    worktree.mkdir(parents=True)
+    elsewhere.mkdir()
+    legacy = subprocess.Popen(["sleep", "60"], cwd=worktree)
+    marked_env = dict(os.environ, BEABOSS_WORKER_THREAD_ID="topic-55")
+    marked = subprocess.Popen(["sleep", "60"], cwd=elsewhere, env=marked_env)
+    try:
+        count = asyncio.run(worktrees.terminate_worker_processes(
+            worktree, worker_thread_id="topic-55", grace=0.05))
+        legacy.wait(timeout=2)
+        marked.wait(timeout=2)
+    finally:
+        for proc in (legacy, marked):
+            if proc.poll() is None:
+                proc.kill()
+
+    assert count >= 2
 
 
 def test_worktree_add_failure_is_digestible(tmp_path):
