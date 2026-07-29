@@ -233,6 +233,7 @@ async def run(json_mode: bool) -> None:
         await engine._refresh_dashboard()
     except Exception:  # noqa: BLE001
         pass
+    await engine.startup_recovery()
 
     if not json_mode:
         print(f"{_BOLD}{settings.bot_name}{_RESET} — {HELP}\n", flush=True)
@@ -267,6 +268,7 @@ async def _build_engine(emit):
         await engine._refresh_dashboard()
     except Exception:  # noqa: BLE001
         pass
+    await engine.startup_recovery()
     return engine, transport, State()
 
 

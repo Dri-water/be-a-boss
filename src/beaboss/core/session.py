@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -94,6 +96,42 @@ _QUIET_SENTINELS = {"nothing", "noreply", "noupdate"}
 
 def _is_quiet_reply(text: str) -> bool:
     return "".join(c for c in text.lower() if c.isalpha()) in _QUIET_SENTINELS
+
+
+_UTC_RESET_TIME = re.compile(
+    r"\bresets\s+(?P<time>\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\s*"
+    r"\(UTC\)",
+    re.IGNORECASE,
+)
+
+
+def _add_utc_reset_date(text: str, now: datetime | None = None) -> str:
+    """Add the inferred calendar date to Claude's time-only UTC reset message."""
+    match = _UTC_RESET_TIME.search(text)
+    if match is None:
+        return text
+
+    clock = re.sub(r"[\s.]", "", match.group("time")).upper()
+    fmt = "%I:%M%p" if ":" in clock else "%I%p"
+    try:
+        parsed = datetime.strptime(clock, fmt)
+    except ValueError:
+        return text
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    reset = current.replace(
+        hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
+    # The provider names the next reset. Around the exact minute, tolerate clock
+    # skew/rounding rather than incorrectly rolling the displayed date forward.
+    if reset < current - timedelta(minutes=1):
+        reset += timedelta(days=1)
+
+    dated = f"resets {reset.day} {reset:%b %Y} at {match.group('time')} (UTC)"
+    return text[:match.start()] + dated + text[match.end():]
 
 
 class CoreSession:
@@ -418,7 +456,8 @@ class CoreSession:
 
                         # Non-recoverable, or retries exhausted: a crashed turn has no
                         # ResultMessage, so wake its supervisor rather than leave it stuck.
-                        await self._safe_emit(f"⚠️ session error: {e}")
+                        await self._safe_emit(
+                            f"⚠️ session error: {_add_utc_reset_date(str(e))}")
                         self._retries = 0
                         if self.on_turn_error is not None:
                             try:
@@ -447,9 +486,9 @@ class CoreSession:
                     "insufficient", "quota", "usage limit", "too many requests",
                     "429", "529", "timed out", "timeout", "temporarily", "try again",
                     "connection", "unavailable", "turn wedged", "limit reached",
-                    "hit your limit")
+                    "hit your limit", "session limit")
     _USAGE_LIMITS = ("credit balance", "insufficient", "quota", "usage limit",
-                     "limit reached", "hit your limit")
+                     "limit reached", "hit your limit", "session limit")
 
     @staticmethod
     def _is_watchdog_stall(e: BaseException) -> bool:
@@ -478,7 +517,8 @@ class CoreSession:
         if self._is_watchdog_stall(e):
             return "agent turn stalled"
         if self._retry_limit(e) == self.USAGE_MAX_RETRIES:
-            return "backend usage limit"
+            detail = _add_utc_reset_date(str(e))
+            return detail if "reset" in detail.lower() else "backend usage limit"
         return "transient backend limit/error"
 
     async def _keep_busy(self) -> None:

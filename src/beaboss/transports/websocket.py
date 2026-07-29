@@ -436,6 +436,7 @@ async def serve_forever(engine, transport: WebSocketTransport,
         await engine._refresh_dashboard()
     except Exception:  # noqa: BLE001
         pass
+    await engine.startup_recovery()
     async with serve(make_handler(engine, transport), host, port,
                      process_request=_gatekeeper(token, allowed, assets),
                      max_size=_WS_MAX_SIZE):  # base64 media exceeds the 1 MB default

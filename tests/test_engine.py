@@ -235,10 +235,31 @@ def test_rehydrate_resurfaces_pending_workers(tmp_path):
                                         worker_status="done"))
     engine.store.put("11", ThreadRecord(role="worker", name="Ada", worker_id="ada",
                                         worker_status="dismissed"))
+    engine.store.put("12", ThreadRecord(role="worker", name="Ryan", worker_id="ryan",
+                                        worker_status="working"))
     engine.rehydrate()
     assert len(engine._inbox) == 1
     note = engine._inbox[0]
-    assert "Nova" in note and "Kite" in note and "Ada" not in note
+    assert all(name in note for name in ("Nova", "Kite", "Ryan"))
+    assert "Ada" not in note
+    assert "resume/re-brief" in note
+
+
+def test_startup_recovery_immediately_wakes_orchestrator(tmp_path):
+    engine, t = _engine(tmp_path)
+    engine.store.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))
+    engine.store.set_orchestrator_thread("general")
+    engine.store.put("12", ThreadRecord(role="worker", name="Ryan", worker_id="ryan",
+                                        worker_status="working"))
+    orchestrator = FakeSession()
+    engine.sessions["general"] = orchestrator
+
+    engine.rehydrate()
+    asyncio.run(engine.startup_recovery())
+
+    assert len(orchestrator.submitted) == 1
+    assert "Ryan (working)" in orchestrator.submitted[0]
+    assert engine._inbox == []
 
 
 def test_rehydrate_keeps_legacy_identity_with_new_name_pool(tmp_path):

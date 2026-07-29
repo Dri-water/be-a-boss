@@ -685,6 +685,7 @@ async def _post_init(app: Application) -> None:
         await app.bot_data["engine"]._refresh_dashboard()
     except Exception:  # noqa: BLE001
         pass
+    await app.bot_data["engine"].startup_recovery()
 
 
 async def _post_shutdown(app: Application) -> None:

@@ -1277,20 +1277,24 @@ class Engine:
         return rows
 
     def rehydrate(self) -> None:
-        """After a restart, re-surface workers still awaiting the orchestrator.
+        """After a restart, re-surface every non-terminal worker.
 
-        The supervision inbox is in-memory and does not survive a restart, so an
-        unfinished worker (finished-but-not-landed, or blocked) could otherwise be
-        silently forgotten. Re-enqueue a reminder; it's delivered on the
-        orchestrator's next wake (a live worker event). If every worker is dormant,
-        the note waits — but the [fleet right now: …] snapshot on the next boss
-        message surfaces the same state, so nothing is actually lost.
+        The supervision inbox and queued turns are in-memory, so a restart interrupts
+        a working worker as surely as it can strand a finished or blocked one.
+        Re-enqueue all of them for startup_recovery() to deliver to the orchestrator.
         """
         pending = [rec for rec in self.store.workers().values()
-                   if rec.worker_status in ("blocked", "done")]
+                   if rec.worker_status in ("working", "blocked", "done")]
         if pending:
             names = ", ".join(f"{r.name} ({r.worker_status})" for r in pending)
-            self._note(f"[after restart] workers still awaiting you: {names}")
+            self._note(
+                f"[after restart] non-terminal workers need recovery: {names}. "
+                "Working workers lost their in-memory turn: resume/re-brief them now. "
+                "Review done workers and resolve blocked workers as usual.")
+
+    async def startup_recovery(self) -> None:
+        """Act on rehydrated fleet notes once the transport is ready."""
+        await self._wake_orchestrator()
 
     async def factory_reset(self) -> str:
         """Wipe everything the bot knows: live sessions, all conversation memory

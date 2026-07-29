@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,7 @@ from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 from beaboss.config import Settings
 from beaboss.core.ports import MediaIn, Outbound, Speaker
-from beaboss.core.session import CoreSession, Turn
+from beaboss.core.session import CoreSession, Turn, _add_utc_reset_date
 
 
 def _settings(tmp: Path) -> Settings:
@@ -331,12 +332,25 @@ def test_usage_limit_retry_budget_covers_six_hours(tmp_path):
     usage_error = RuntimeError("Claude usage limit reached")
 
     assert sess._retry_limit(usage_error) == 40
+    assert sess._retry_limit(
+        RuntimeError("You've hit your session limit · resets 5:10pm (UTC)")) == 40
     assert sess._retry_limit(RuntimeError("connection unavailable")) == 10
     total_delay = sum(
         sess._retry_delay(attempt)
         for attempt in range(1, sess._retry_limit(usage_error) + 1)
     )
     assert 6 * 60 * 60 <= total_delay < 6.25 * 60 * 60
+
+
+def test_session_limit_reset_message_includes_inferred_utc_date():
+    before_reset = datetime(2026, 7, 29, 15, 34, tzinfo=timezone.utc)
+    after_reset = datetime(2026, 7, 29, 18, 0, tzinfo=timezone.utc)
+    message = "You've hit your session limit · resets 5:10pm (UTC)"
+
+    assert _add_utc_reset_date(message, before_reset) == (
+        "You've hit your session limit · resets 29 Jul 2026 at 5:10pm (UTC)")
+    assert _add_utc_reset_date(message, after_reset) == (
+        "You've hit your session limit · resets 30 Jul 2026 at 5:10pm (UTC)")
 
 
 class UsageLimitOnceBackend(FakeBackend):
@@ -359,7 +373,7 @@ class UsageLimitOnceBackend(FakeBackend):
                     subtype="error_during_execution", duration_ms=1,
                     duration_api_ms=1, is_error=True, num_turns=0,
                     session_id="s", total_cost_usd=0.0,
-                    result="You've hit your limit · resets in five hours",
+                    result="You've hit your session limit · resets 5:10pm (UTC)",
                 )
                 return
             yield ResultMessage(
