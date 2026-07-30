@@ -27,7 +27,8 @@ from .agent_backend import CodexBackend
 from .names import pick_name, worker_id_for
 from .prompts import (DELIVERY_BALANCED, DELIVERY_CONSERVATIVE,
                       ORCHESTRATOR_APPEND, WORKER_APPEND_EXTRA)
-from .ports import InboundMessage, MediaIn, Outbound, Speaker, SYSTEM, Transport
+from .ports import (InboundMessage, MediaIn, Outbound, OutboundDeliveryError,
+                    Speaker, SYSTEM, Transport)
 from .session import CoreSession, DEFAULT_SESSION_APPEND
 from .store import CoreStore, ThreadRecord
 from . import worktrees
@@ -130,6 +131,9 @@ def _test_hint(repo: Path) -> str:
 
 
 class Engine:
+    DELIVERY_MAX_ATTEMPTS = 3
+    DELIVERY_RETRY_BASE = 0.5
+
     def __init__(self, settings, store: CoreStore):
         self.settings = settings
         self.store = store
@@ -177,7 +181,22 @@ class Engine:
                 if (mime or "").startswith("image/"):
                     self._pending_vision.append(str(out.media_path))
                     self._pending_vision = self._pending_vision[-6:]  # keep the recent few
-        await self.transport.post(out)
+        for attempt in range(1, self.DELIVERY_MAX_ATTEMPTS + 1):
+            try:
+                await self.transport.post(out)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                if attempt >= self.DELIVERY_MAX_ATTEMPTS:
+                    raise OutboundDeliveryError(
+                        f"could not deliver output to {out.thread_id} after "
+                        f"{attempt} attempts: {e}") from e
+                delay = self.DELIVERY_RETRY_BASE * 2 ** (attempt - 1)
+                log.warning(
+                    "output delivery failed thread=%s attempt=%d/%d; retrying in %.1fs: %s",
+                    out.thread_id, attempt, self.DELIVERY_MAX_ATTEMPTS, delay, e)
+                await asyncio.sleep(delay)
 
     def _vision_items(self, paths: list[str]) -> list[MediaIn]:
         """Turn recent worker screenshot paths into MediaIn for the orchestrator to see.
@@ -255,13 +274,16 @@ class Engine:
         # Talking to the orchestrator (#general or any DM) → the one orchestrator
         # session, replying back to wherever you spoke.
         if self._is_orchestrator_thread(msg.thread_id):
+            # Persist the conversation target before starting the backend. Even if
+            # session startup itself fails, later recovery still belongs where the
+            # boss actually spoke rather than falling back to an older surface.
+            self._last_boss_thread = msg.thread_id
+            self.store.set_last_boss_thread(msg.thread_id)
             await self._ensure_orchestrator(self.main_thread)
             session = await self._ensure_session(
                 self.main_thread, self.store.get(self.main_thread))
             if session is None:
                 return
-            self._last_boss_thread = msg.thread_id
-            self.store.set_last_boss_thread(msg.thread_id)
             # Ground every boss turn in reality: a code-generated snapshot of the
             # actual fleet rides along with the message, so the orchestrator can't
             # honestly claim "Nova is on it" when no one is.
@@ -533,6 +555,15 @@ class Engine:
         instead of leaving the worker silently stalled. This is the self-heal path."""
         rec = self.store.get(session.thread_id)
         if rec is None:
+            return
+        if isinstance(error, OutboundDeliveryError):
+            self._note(
+                f"worker {rec.worker_id} ({rec.name}) completed agent activity but its "
+                f"chat output could not be delivered: {error}. Inspect the worktree and "
+                "follow up without blindly repeating the turn; its side effects may "
+                "already be complete.")
+            await self._refresh_dashboard()
+            await self._wake_orchestrator()
             return
         detail = str(error) or error.__class__.__name__
         if len(detail) > 300:

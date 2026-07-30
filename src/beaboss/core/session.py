@@ -27,7 +27,7 @@ from claude_agent_sdk import (
 
 from .. import rendering
 from .agent_backend import AgentBackend, ClaudeAgentBackend, scrubbed_env
-from .ports import MediaIn, Outbound, Speaker
+from .ports import MediaIn, Outbound, OutboundDeliveryError, Speaker
 
 log = logging.getLogger("beaboss.core.session")
 
@@ -105,18 +105,18 @@ _UTC_RESET_TIME = re.compile(
 )
 
 
-def _add_utc_reset_date(text: str, now: datetime | None = None) -> str:
-    """Add the inferred calendar date to Claude's time-only UTC reset message."""
+def _utc_reset_at(text: str, now: datetime | None = None) -> datetime | None:
+    """Infer the next UTC reset datetime from Claude's time-only message."""
     match = _UTC_RESET_TIME.search(text)
     if match is None:
-        return text
+        return None
 
     clock = re.sub(r"[\s.]", "", match.group("time")).upper()
     fmt = "%I:%M%p" if ":" in clock else "%I%p"
     try:
         parsed = datetime.strptime(clock, fmt)
     except ValueError:
-        return text
+        return None
 
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -125,11 +125,19 @@ def _add_utc_reset_date(text: str, now: datetime | None = None) -> str:
         current = current.astimezone(timezone.utc)
     reset = current.replace(
         hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0)
-    # The provider names the next reset. Around the exact minute, tolerate clock
-    # skew/rounding rather than incorrectly rolling the displayed date forward.
-    if reset < current - timedelta(minutes=1):
+    # Around the reset, Claude may briefly repeat the now-past time. Treat ten
+    # minutes as propagation lag; only then infer that the time means tomorrow.
+    if reset < current - timedelta(minutes=10):
         reset += timedelta(days=1)
+    return reset
 
+
+def _add_utc_reset_date(text: str, now: datetime | None = None) -> str:
+    """Add the inferred calendar date to Claude's time-only UTC reset message."""
+    match = _UTC_RESET_TIME.search(text)
+    reset = _utc_reset_at(text, now)
+    if match is None or reset is None:
+        return text
     dated = f"resets {reset.day} {reset:%b %Y} at {match.group('time')} (UTC)"
     return text[:match.start()] + dated + text[match.end():]
 
@@ -424,15 +432,29 @@ class CoreSession:
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:  # noqa: BLE001
-                        log.exception("turn failed thread=%s", self.thread_id)
-                        await self._try_reconnect()
                         retry_limit = self._retry_limit(e)
+                        delivery_error = isinstance(e, OutboundDeliveryError)
+                        if retry_limit:
+                            # Expected operational state: keep it concise in the
+                            # server log too. A traceback every poll obscures real faults.
+                            log.warning(
+                                "recoverable turn failure thread=%s: %s",
+                                self.thread_id, e)
+                            await self._try_reconnect()
+                        elif delivery_error:
+                            # The agent turn may already have performed side effects.
+                            # Never replay it merely because chat delivery failed.
+                            log.error("turn output delivery failed thread=%s: %s",
+                                      self.thread_id, e)
+                        else:
+                            log.exception("turn failed thread=%s", self.thread_id)
+                            await self._try_reconnect()
                         if (self.status != "error" and retry_limit
                                 and self._retries < retry_limit):
                             # Wait inline so this turn remains at the head of the
                             # session and later inbound messages retain FIFO order.
                             self._retries += 1
-                            delay = self._retry_delay(self._retries)
+                            delay = self._retry_delay(self._retries, e)
                             self.status = "waiting"
                             self._retry_task = asyncio.create_task(asyncio.sleep(delay))
                             log.info(
@@ -442,7 +464,7 @@ class CoreSession:
                             # user once when the turn becomes paused; keep subsequent
                             # backoff cycles silent. The eventual real answer is the
                             # only recovery notification they need.
-                            if self._retries == 1:
+                            if self._retries == 1 and self.speaker.role != "worker":
                                 await self._safe_emit(self._retry_notice(e))
                             try:
                                 await self._retry_task
@@ -460,8 +482,9 @@ class CoreSession:
 
                         # Non-recoverable, or retries exhausted: a crashed turn has no
                         # ResultMessage, so wake its supervisor rather than leave it stuck.
-                        await self._safe_emit(
-                            f"⚠️ session error: {_add_utc_reset_date(str(e))}")
+                        if not delivery_error:
+                            await self._safe_emit(
+                                f"⚠️ session error: {_add_utc_reset_date(str(e))}")
                         self._retries = 0
                         if self.on_turn_error is not None:
                             try:
@@ -486,6 +509,8 @@ class CoreSession:
     USAGE_MAX_RETRIES = 40
     RETRY_BASE = 30.0
     RETRY_MAX = 600.0
+    RESET_RETRY_GRACE = 15.0
+    RESET_RETRY_MAX = 6 * 60 * 60.0
     _RECOVERABLE = ("rate limit", "rate_limit", "overloaded", "credit balance",
                     "insufficient", "quota", "usage limit", "too many requests",
                     "429", "529", "timed out", "timeout", "temporarily", "try again",
@@ -501,6 +526,8 @@ class CoreSession:
     def _is_recoverable(self, e: BaseException) -> bool:
         """A failure that clears on its own if we just wait and retry — vs. one where
         retrying would only hit the same wall (e.g. the oversized-message crash)."""
+        if isinstance(e, OutboundDeliveryError):
+            return False
         msg = str(e).lower()
         if "buffer" in msg:            # oversized message: waiting won't help
             return False
@@ -514,7 +541,24 @@ class CoreSession:
             return self.USAGE_MAX_RETRIES
         return self.TRANSIENT_MAX_RETRIES
 
-    def _retry_delay(self, attempt: int) -> float:
+    def _retry_delay(
+        self, attempt: int, e: BaseException | None = None,
+        now: datetime | None = None,
+    ) -> float:
+        if e is not None and self._retry_limit(e) == self.USAGE_MAX_RETRIES:
+            current = now or datetime.now(timezone.utc)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            else:
+                current = current.astimezone(timezone.utc)
+            reset = _utc_reset_at(str(e), current)
+            if reset is not None:
+                until_reset = (reset - current).total_seconds()
+                return max(
+                    self.RETRY_BASE,
+                    min(until_reset + self.RESET_RETRY_GRACE,
+                        self.RESET_RETRY_MAX),
+                )
         return min(self.RETRY_BASE * 2 ** (attempt - 1), self.RETRY_MAX)
 
     def _retry_notice(self, e: BaseException) -> str:

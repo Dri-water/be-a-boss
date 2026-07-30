@@ -37,6 +37,7 @@ def test_rate_limiter_is_wired(tmp_path):
     # on Telegram's 429, not dropped — so the app must carry a rate limiter.
     app = build_application(_settings(), CoreStore(tmp_path / "state"))
     assert isinstance(app.bot.rate_limiter, AIORateLimiter)
+    assert app.bot.rate_limiter._max_retries == 3
 
 
 def test_post_truncates_runaway_output():

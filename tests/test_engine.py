@@ -2,10 +2,12 @@ import asyncio
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from beaboss.config import Settings
 from beaboss.core import worktrees
 from beaboss.core.engine import Engine
-from beaboss.core.ports import InboundMessage, Outbound
+from beaboss.core.ports import InboundMessage, Outbound, OutboundDeliveryError, SYSTEM
 from beaboss.core.store import CoreStore, ThreadRecord
 
 
@@ -99,6 +101,45 @@ def test_unknown_thread_gets_system_hint(tmp_path):
     engine.store.set_orchestrator_thread("general")  # office exists elsewhere
     asyncio.run(engine.on_inbound(InboundMessage(thread_id="999", text="hi")))
     assert len(t.posts) == 1 and t.posts[0].speaker.role == "system"
+
+
+def test_output_delivery_retries_without_replaying_agent_work(tmp_path):
+    class FlakyTransport(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        async def post(self, out):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise RuntimeError("Telegram timed out")
+            await super().post(out)
+
+    engine, _ = _engine(tmp_path)
+    transport = FlakyTransport()
+    engine.attach_transport(transport)
+    engine.DELIVERY_RETRY_BASE = 0
+    out = Outbound(thread_id="general", speaker=SYSTEM, text="one response")
+
+    asyncio.run(engine._post(out))
+
+    assert transport.attempts == 3
+    assert transport.posts == [out]
+
+
+def test_exhausted_output_delivery_raises_distinct_error(tmp_path):
+    class DownTransport(FakeTransport):
+        async def post(self, out):
+            raise RuntimeError("Telegram unavailable")
+
+    engine, _ = _engine(tmp_path)
+    engine.attach_transport(DownTransport())
+    engine.DELIVERY_MAX_ATTEMPTS = 2
+    engine.DELIVERY_RETRY_BASE = 0
+
+    with pytest.raises(OutboundDeliveryError):
+        asyncio.run(engine._post(
+            Outbound(thread_id="general", speaker=SYSTEM, text="one response")))
 
 
 def test_first_message_only_bootstraps_office_in_main_thread(tmp_path):

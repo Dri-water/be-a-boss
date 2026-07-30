@@ -6,7 +6,7 @@ import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 from beaboss.config import Settings
-from beaboss.core.ports import MediaIn, Outbound, Speaker
+from beaboss.core.ports import MediaIn, Outbound, OutboundDeliveryError, Speaker
 from beaboss.core.session import CoreSession, Turn, _add_utc_reset_date
 
 
@@ -266,7 +266,7 @@ def test_turn_idle_timeout_reconnects_and_schedules_retry(tmp_path):
 
     retry_scheduled = asyncio.run(asyncio.wait_for(drive(), timeout=5))
     assert backend.interrupted >= 1                   # the wedged turn was interrupted
-    assert any("turn stalled" in o.text for o in post.out)
+    assert not any(o.text.startswith("⏳") for o in post.out)  # worker retries stay quiet
     assert backend.started >= 2                        # reconnected after the timeout
     assert sess.status == "stopped"
     assert retry_scheduled is True                      # the original turn was retained
@@ -353,6 +353,23 @@ def test_session_limit_reset_message_includes_inferred_utc_date():
         "You've hit your session limit · resets 30 Jul 2026 at 5:10pm (UTC)")
 
 
+def test_usage_limit_sleeps_until_the_stated_reset_instead_of_polling(tmp_path):
+    sess = _session(tmp_path)
+    error = RuntimeError(
+        "You've hit your session limit · resets 8:40am (UTC)")
+
+    delay = sess._retry_delay(
+        1, error, datetime(2026, 7, 30, 6, 21, tzinfo=timezone.utc))
+    assert delay == (2 * 60 + 19) * 60 + sess.RESET_RETRY_GRACE
+    assert delay > sess.RETRY_MAX
+
+    # A stale provider response immediately after reset gets one ordinary short
+    # retry, not an accidental 24-hour sleep.
+    near_reset = sess._retry_delay(
+        2, error, datetime(2026, 7, 30, 8, 41, tzinfo=timezone.utc))
+    assert near_reset == sess.RETRY_BASE
+
+
 class UsageLimitOnceBackend(FakeBackend):
     def __init__(self):
         super().__init__([])
@@ -395,6 +412,7 @@ def test_backlogged_messages_remain_fifo_during_usage_retry(tmp_path):
         on_session_id=lambda _s: None, backend=backend, final_only=True,
     )
     sess.RETRY_BASE = 0.02
+    sess.RESET_RETRY_MAX = 0.02
 
     async def drive():
         await sess.start()
@@ -814,6 +832,7 @@ def test_repeated_retries_only_notify_chat_once(tmp_path):
         on_session_id=lambda _s: None, backend=backend, final_only=True,
     )
     sess.RETRY_BASE = 0.001
+    sess.RESET_RETRY_MAX = 0.001
 
     async def drive():
         await sess.start()
@@ -827,6 +846,63 @@ def test_repeated_retries_only_notify_chat_once(tmp_path):
     assert "resets " in notices[0] and " at 5:10pm (UTC)" in notices[0]
     assert "attempt" not in notices[0] and "retry on my own in" not in notices[0]
     assert any("finished after quiet retries" in out.text for out in post.out)
+
+
+def test_worker_usage_retries_are_silent(tmp_path):
+    backend = RepeatedlyLimitedBackend(failures=2)
+    post = SinkPost()
+    sess = CoreSession(
+        thread_id="worker-topic", cwd=tmp_path,
+        speaker=Speaker(role="worker", name="Aaron", emoji="⚙️"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+    sess.RETRY_BASE = 0.001
+    sess.RESET_RETRY_MAX = 0.001
+
+    async def drive():
+        await sess.start()
+        await sess.submit("go")
+        await asyncio.wait_for(sess._queue.join(), timeout=2)
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert not any(out.text.startswith("⏳") for out in post.out)
+    assert any("finished after quiet retries" in out.text for out in post.out)
+
+
+def test_delivery_failure_never_replays_completed_agent_turn(tmp_path):
+    backend = FakeBackend([
+        ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1,
+                      is_error=False, num_turns=1, session_id="s",
+                      total_cost_usd=0.0, result="work completed"),
+    ])
+    seen: list[BaseException] = []
+
+    async def failed_delivery(_out):
+        raise OutboundDeliveryError("Telegram unavailable after bounded retries")
+
+    async def on_error(_session, error):
+        seen.append(error)
+
+    sess = CoreSession(
+        thread_id="worker-topic", cwd=tmp_path,
+        speaker=Speaker(role="worker", name="Aaron", emoji="⚙️"),
+        settings=_settings(tmp_path), post=failed_delivery, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+    sess.on_turn_error = on_error
+
+    async def drive():
+        await sess.start()
+        await sess.submit("perform side effects once")
+        await asyncio.wait_for(sess._queue.join(), timeout=2)
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert len(backend.sent) == 1
+    assert backend.started == 1
+    assert len(seen) == 1 and isinstance(seen[0], OutboundDeliveryError)
 
 
 def test_recoverable_error_auto_retries_without_a_nudge(tmp_path):

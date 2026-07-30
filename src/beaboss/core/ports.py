@@ -63,6 +63,10 @@ class Outbound:
     caption: str | None = None
 
 
+class OutboundDeliveryError(RuntimeError):
+    """A transport could not deliver output after its bounded retries."""
+
+
 @runtime_checkable
 class Transport(Protocol):
     """What the core needs from a chat platform."""

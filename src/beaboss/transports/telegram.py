@@ -717,7 +717,10 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
         .token(settings.bot_token)
         # Throttle + auto-retry on Telegram's 429 flood control, so a burst of
         # messages (a chunked diff, a chatty worker) is paced, never dropped.
-        .rate_limiter(AIORateLimiter())
+        # PTB defaults max_retries to zero, which contradicts the purpose of
+        # wiring a limiter: a Telegram 429 would still escape and could make the
+        # session replay an already-completed agent turn. Keep retries bounded.
+        .rate_limiter(AIORateLimiter(max_retries=3))
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()
