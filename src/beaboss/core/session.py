@@ -435,11 +435,15 @@ class CoreSession:
                             delay = self._retry_delay(self._retries)
                             self.status = "waiting"
                             self._retry_task = asyncio.create_task(asyncio.sleep(delay))
-                            await self._safe_emit(
-                                f"⏳ {self._retry_reason(e)} — I reconnected and will "
-                                f"retry on my own in ~{int(delay)}s "
-                                f"(attempt {self._retries}/{retry_limit}); "
-                                "you don't need to do anything.")
+                            log.info(
+                                "retry scheduled thread=%s attempt=%d/%d delay=%.1fs: %s",
+                                self.thread_id, self._retries, retry_limit, delay, e)
+                            # Retry attempts are telemetry, not conversation. Tell the
+                            # user once when the turn becomes paused; keep subsequent
+                            # backoff cycles silent. The eventual real answer is the
+                            # only recovery notification they need.
+                            if self._retries == 1:
+                                await self._safe_emit(self._retry_notice(e))
                             try:
                                 await self._retry_task
                             except asyncio.CancelledError:
@@ -513,13 +517,21 @@ class CoreSession:
     def _retry_delay(self, attempt: int) -> float:
         return min(self.RETRY_BASE * 2 ** (attempt - 1), self.RETRY_MAX)
 
-    def _retry_reason(self, e: BaseException) -> str:
+    def _retry_notice(self, e: BaseException) -> str:
         if self._is_watchdog_stall(e):
-            return "agent turn stalled"
+            return (
+                "⏳ The agent turn stalled. I reconnected it and will retry "
+                "automatically.")
         if self._retry_limit(e) == self.USAGE_MAX_RETRIES:
             detail = _add_utc_reset_date(str(e))
-            return detail if "reset" in detail.lower() else "backend usage limit"
-        return "transient backend limit/error"
+            if "reset" in detail.lower():
+                return f"⏳ {detail}. I’ll resume automatically when it clears."
+            return (
+                "⏳ The backend usage limit is temporarily exhausted. "
+                "I’ll resume automatically when it clears.")
+        return (
+            "⏳ A temporary backend issue paused this turn. I reconnected and will "
+            "retry automatically.")
 
     async def _keep_busy(self) -> None:
         """Telegram's typing indicator dies after ~5s; keep it alive for the whole

@@ -147,7 +147,7 @@ class Engine:
         # Where the boss last spoke to the orchestrator (#general or a DM). Digest
         # replies and approval prompts follow the boss there instead of stranding
         # the conversation in #general while their DM goes silent.
-        self._last_boss_thread = "general"
+        self._last_boss_thread = store.last_boss_thread or "general"
         # Fleet actions taken during the current orchestrator turn — drained into a
         # code-generated footer on its reply, so the boss can SEE what actually
         # happened (a claim with no matching ⚙ line is visibly false).
@@ -261,6 +261,7 @@ class Engine:
             if session is None:
                 return
             self._last_boss_thread = msg.thread_id
+            self.store.set_last_boss_thread(msg.thread_id)
             # Ground every boss turn in reality: a code-generated snapshot of the
             # actual fleet rides along with the message, so the orchestrator can't
             # honestly claim "Nova is on it" when no one is.

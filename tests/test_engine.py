@@ -351,6 +351,27 @@ def test_digest_replies_follow_the_boss(tmp_path):
     assert fake.reply_tos[-1] == "dm:42"      # digest replies land in the DM
 
 
+def test_digest_replies_follow_the_boss_after_restart(tmp_path):
+    """The last boss-facing conversation is persisted; a restart must not make an
+    asynchronous worker update jump from the DM back to #general."""
+    engine, t = _engine(tmp_path)
+    engine.store.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))
+    engine.store.set_orchestrator_thread("general")
+    engine.sessions["general"] = FakeSession()
+    asyncio.run(engine.on_inbound(InboundMessage(thread_id="dm:42", text="build it")))
+
+    restarted = Engine(_settings(tmp_path), CoreStore(tmp_path / "state"))
+    restarted.WAKE_COALESCE_SECS = 0
+    restarted.attach_transport(t)
+    fake = FakeSession()
+    restarted.sessions["general"] = fake
+    restarted._note("worker nova finished: STATUS: done")
+    asyncio.run(restarted._wake_orchestrator())
+
+    assert restarted._last_boss_thread == "dm:42"
+    assert fake.reply_tos == ["dm:42"]
+
+
 def test_factory_reset_wipes_everything(tmp_path):
     """/reset confirm → blank slate: sessions stopped, records gone, dirty
     worktrees force-removed, pending approvals cleared."""

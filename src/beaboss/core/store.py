@@ -53,6 +53,10 @@ class CoreStore:
         self.path = self.state_dir / "core.json"
         self._threads: dict[str, ThreadRecord] = {}
         self.orchestrator_thread: str | None = None
+        # Where the boss last spoke to the orchestrator (#general or a DM), so
+        # asynchronous supervision replies continue in the same conversation after
+        # a restart instead of unexpectedly jumping back to #general.
+        self.last_boss_thread: str | None = None
         self.dashboard_msg_id: int | None = None   # the pinned #general status board
         # worker_id -> {method, sha, base_sha}, awaiting a revision-bound /approve.
         # Legacy state may still contain a plain method string and is refused safely.
@@ -82,6 +86,7 @@ class CoreStore:
                 f"refusing to load it with older code")
             return
         self.orchestrator_thread = raw.get("orchestrator_thread")
+        self.last_boss_thread = raw.get("last_boss_thread")
         self.dashboard_msg_id = raw.get("dashboard_msg_id")
         self.pending_delivery = dict(raw.get("pending_delivery") or {})
         self.office_message_ids = {
@@ -115,6 +120,7 @@ class CoreStore:
         payload = {
             "version": SCHEMA_VERSION,
             "orchestrator_thread": self.orchestrator_thread,
+            "last_boss_thread": self.last_boss_thread,
             "dashboard_msg_id": self.dashboard_msg_id,
             "pending_delivery": self.pending_delivery,
             "office_message_ids": self.office_message_ids,
@@ -163,6 +169,11 @@ class CoreStore:
             self.orchestrator_thread = thread_id
             self._flush()
 
+    def set_last_boss_thread(self, thread_id: str | None) -> None:
+        if self.last_boss_thread != thread_id:
+            self.last_boss_thread = thread_id
+            self._flush()
+
     def set_dashboard_msg_id(self, mid: int | None) -> None:
         if self.dashboard_msg_id != mid:
             self.dashboard_msg_id = mid
@@ -194,6 +205,7 @@ class CoreStore:
         """Factory reset: forget every thread, the office, and the dashboard."""
         self._threads.clear()
         self.orchestrator_thread = None
+        self.last_boss_thread = None
         self.dashboard_msg_id = None
         self.pending_delivery = {}
         self.office_message_ids = {}

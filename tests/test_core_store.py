@@ -25,6 +25,12 @@ def test_orchestrator_thread_persists(tmp_path):
     assert reloaded.get("general").role == "orchestrator"
 
 
+def test_last_boss_thread_persists(tmp_path):
+    s = CoreStore(tmp_path / "state")
+    s.set_last_boss_thread("dm:42")
+    assert CoreStore(tmp_path / "state").last_boss_thread == "dm:42"
+
+
 def test_workers_filter_and_fields(tmp_path):
     s = CoreStore(tmp_path / "state")
     s.put("1", ThreadRecord(role="direct", name="d", cwd="/r"))
@@ -80,11 +86,13 @@ def test_wipe_clears_everything_and_persists(tmp_path):
     s = CoreStore(tmp_path / "state")
     s.put("1", ThreadRecord(role="direct", name="d"))
     s.set_orchestrator_thread("1")
+    s.set_last_boss_thread("dm:42")
     s.set_dashboard_msg_id(42)
     s.wipe()
     reloaded = CoreStore(tmp_path / "state")
     assert reloaded.all() == {}
     assert reloaded.orchestrator_thread is None
+    assert reloaded.last_boss_thread is None
     assert reloaded.dashboard_msg_id is None
 
 

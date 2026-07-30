@@ -784,6 +784,51 @@ class FlakyBackend(FakeBackend):
         return super().receive()
 
 
+class RepeatedlyLimitedBackend(FakeBackend):
+    def __init__(self, failures: int):
+        super().__init__([])
+        self.failures = failures
+
+    def receive(self):
+        async def gen():
+            if self.failures:
+                self.failures -= 1
+                raise RuntimeError(
+                    "You've hit your session limit · resets 5:10pm (UTC)")
+            yield ResultMessage(
+                subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+                num_turns=1, session_id="s", total_cost_usd=0.0,
+                result="finished after quiet retries",
+            )
+
+        return gen()
+
+
+def test_repeated_retries_only_notify_chat_once(tmp_path):
+    backend = RepeatedlyLimitedBackend(failures=3)
+    post = SinkPost()
+    sess = CoreSession(
+        thread_id="general", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=post, busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+    sess.RETRY_BASE = 0.001
+
+    async def drive():
+        await sess.start()
+        await sess.submit("go")
+        await asyncio.wait_for(sess._queue.join(), timeout=2)
+        await sess.stop()
+
+    asyncio.run(drive())
+    notices = [out.text for out in post.out if out.text.startswith("⏳")]
+    assert len(notices) == 1
+    assert "resets " in notices[0] and " at 5:10pm (UTC)" in notices[0]
+    assert "attempt" not in notices[0] and "retry on my own in" not in notices[0]
+    assert any("finished after quiet retries" in out.text for out in post.out)
+
+
 def test_recoverable_error_auto_retries_without_a_nudge(tmp_path):
     """A transient rate/credit error resumes on its OWN when it clears — the boss does
     not have to say 'continue', and on_turn_error is not fired (it self-healed)."""
