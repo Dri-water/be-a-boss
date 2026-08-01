@@ -24,8 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV CHROME_BIN=/usr/bin/chromium \
     CHROMIUM_FLAGS="--headless=new --no-sandbox --disable-gpu"
 
-# The SDK drives the standalone Claude Code CLI.
-RUN npm install -g @anthropic-ai/claude-code
+# Provider adapters drive the standalone Claude Code and Codex CLIs. Both ship in
+# every image so changing BEABOSS_BACKEND never requires a different build target.
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
 # GitHub CLI — enables the orchestrator's PR delivery route. Opt-in: auth via a
 # GH_TOKEN in .env (or a mounted gh config). Without auth, delivery falls back to
@@ -63,8 +64,10 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir .
+COPY docker-entrypoint.sh /usr/local/bin/beaboss-entrypoint
+RUN chmod 755 /usr/local/bin/beaboss-entrypoint
 ENV PATH="/opt/venv/bin:${PATH}"
 
 # tini reaps zombies + forwards SIGTERM so the bot shuts sessions down cleanly.
-ENTRYPOINT ["tini", "--"]
+ENTRYPOINT ["tini", "--", "/usr/local/bin/beaboss-entrypoint"]
 CMD ["boss"]

@@ -21,15 +21,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import ResultMessage, create_sdk_mcp_server, tool
-
-from .agent_backend import CodexBackend
+from .agent_backend import AgentResult, AgentTool, ToolNamespace
 from .names import pick_name, worker_id_for
 from .prompts import (DELIVERY_BALANCED, DELIVERY_CONSERVATIVE,
                       ORCHESTRATOR_APPEND, WORKER_APPEND_EXTRA)
 from .ports import (InboundMessage, MediaIn, Outbound, OutboundDeliveryError,
                     Speaker, SYSTEM, Transport)
 from .session import CoreSession, DEFAULT_SESSION_APPEND
+from .recovery import infer_legacy_backend, recovery_append
 from .store import CoreStore, ThreadRecord
 from . import worktrees
 
@@ -384,72 +383,105 @@ class Engine:
             return session
 
     def _sid_saver(self, thread_id: str):
+        backend = self.settings.agent_backend
+
         def save(sid: str) -> None:
-            self.store.update(thread_id, session_id=sid)
+            rec = self.store.get(thread_id)
+            ids = dict(rec.session_ids) if rec else {}
+            ids[backend] = sid
+            self.store.update(
+                thread_id, backend=backend, session_id=sid, session_ids=ids)
         return save
 
+    def _session_material(
+        self, thread_id: str, rec: ThreadRecord,
+    ) -> tuple[str | None, str | None, str]:
+        """Resolve provider-native resume/model data and any lossy hand-off text."""
+        desired = self.settings.agent_backend
+        ids = dict(rec.session_ids)
+        models = dict(rec.models)
+        source = rec.backend
+        if rec.session_id:
+            if not source:
+                source = infer_legacy_backend(rec.session_id)
+            ids.setdefault(source, rec.session_id)
+        if rec.model:
+            # A pre-provider-tag record with no native session yet was necessarily
+            # created for the then-active backend; treat the configured backend as
+            # its owner. Records with a session are inferred above.
+            models.setdefault(source or desired, rec.model)
+
+        resume_id = ids.get(desired) or None
+        model = models.get(desired) or self.settings.model
+        handoff = ""
+        source_with_session = (
+            source if source and source != desired and ids.get(source) else
+            (next((name for name, sid in ids.items()
+                   if name != desired and sid), "") if not resume_id else "")
+        )
+        if source_with_session:
+            handoff = recovery_append(
+                source_with_session, ids[source_with_session],
+                role=rec.role, task=rec.task)
+
+        self.store.update(
+            thread_id,
+            backend=desired,
+            session_id=resume_id,
+            session_ids=ids,
+            model=model or "",
+            models=models,
+        )
+        return resume_id, model, handoff
+
     def _make_direct_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
+        resume_id, model, handoff = self._session_material(thread_id, rec)
         return CoreSession(
             thread_id=thread_id, cwd=Path(rec.cwd),
             speaker=Speaker(role="direct", name=self.settings.bot_name),
             settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
-            on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
+            on_session_id=self._sid_saver(thread_id), session_id=resume_id,
+            system_append=DEFAULT_SESSION_APPEND + handoff,
+            model_override=model,
         )
 
     def _make_orchestrator_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
+        resume_id, model, handoff = self._session_material(thread_id, rec)
         home = self.settings.state_dir / "orchestrator-home"
         home.mkdir(parents=True, exist_ok=True)
         base = (self.settings.session_system_append
                 if self.settings.session_system_append is not None else "")
         mode = (DELIVERY_CONSERVATIVE
                 if self.settings.deploy_braveness == "conservative" else DELIVERY_BALANCED)
-        append = (base + "\n\n" if base else "") + ORCHESTRATOR_APPEND + mode
+        append = ((base + "\n\n" if base else "")
+                  + ORCHESTRATOR_APPEND + mode + handoff)
         return CoreSession(
             thread_id=thread_id, cwd=home,
             speaker=self.orchestrator_speaker(),
             settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
-            on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
+            on_session_id=self._sid_saver(thread_id), session_id=resume_id,
             system_append=append,
-            extra_mcp_servers={"fleet": self._build_fleet_server()},
+            extra_tool_namespaces=(self._build_fleet_tools(),),
             final_only=True,  # text the boss one clean reply, don't narrate
             footer_fn=self._drain_turn_actions,  # …plus a truthful ⚙ action line
+            model_override=model,
         )
 
     def _make_worker_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
+        resume_id, model, handoff = self._session_material(thread_id, rec)
         cwd = Path(rec.cwd)
         # The worker's full system prompt = the base env note + the worker role note.
         base = (self.settings.session_system_append
                 if self.settings.session_system_append is not None
                 else DEFAULT_SESSION_APPEND)
-        worker_append = base + WORKER_APPEND_EXTRA
-        # The model this worker was hired with (its dispatched tier), resolved at spawn
-        # and persisted, so a restart reuses it. "" => the global settings.model.
-        model = rec.model or None
-        # A worker may run on Codex instead of Claude; the choice lives here (the
-        # single worker-construction point). Codex needs the prompt handed in (it has
-        # no system-prompt channel) and the persisted id to resume across restarts.
-        if self.settings.agent_backend == "codex":
-            # Honesty: Codex has no mcp__chat__* tools and no vision — say so, or
-            # the worker will claim to send screenshots it cannot send.
-            worker_append += (
-                "\n\nRUNTIME NOTE: the chat/media tools (mcp__chat__send_photo etc.) "
-                "are NOT available in this runtime, and images sent to you are not "
-                "visible. Put file PATHS in your reply instead of sending media."
-            )
-            backend = CodexBackend(
-                cwd, system_prompt=worker_append, resume_id=rec.session_id,
-                model=model or self.settings.model, cli_path=self.settings.cli_path,
-                worker_thread_id=thread_id)
-        else:
-            backend = None  # None => CoreSession builds the default ClaudeAgentBackend
+        worker_append = base + WORKER_APPEND_EXTRA + handoff
         session = CoreSession(
             thread_id=thread_id, cwd=cwd,
             speaker=self.worker_speaker(rec.name),
             settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
-            on_session_id=self._sid_saver(thread_id), session_id=rec.session_id,
+            on_session_id=self._sid_saver(thread_id), session_id=resume_id,
             system_append=worker_append,
-            backend=backend,
-            model_override=model,  # ignored on the codex path (codex uses its own model=)
+            model_override=model,
         )
         session.on_turn_done = self._on_worker_turn_done
         session.on_turn_error = self._on_worker_turn_error
@@ -458,7 +490,8 @@ class Engine:
     async def _ensure_orchestrator(self, thread_id: str) -> None:
         if self.store.get(thread_id) is None:
             self.store.put(thread_id, ThreadRecord(
-                role="orchestrator", name="orchestrator"))
+                role="orchestrator", name="orchestrator",
+                backend=self.settings.agent_backend))
         self.store.set_orchestrator_thread(thread_id)
 
     # ---- supervision inbox ----------------------------------------------
@@ -533,7 +566,7 @@ class Engine:
         except Exception:  # noqa: BLE001
             log.exception("dashboard refresh failed")
 
-    async def _on_worker_turn_done(self, session: CoreSession, result: ResultMessage) -> None:
+    async def _on_worker_turn_done(self, session: CoreSession, result: AgentResult) -> None:
         rec = self.store.get(session.thread_id)
         if rec is None:
             return
@@ -549,7 +582,7 @@ class Engine:
         await self._wake_orchestrator()
 
     async def _on_worker_turn_error(self, session: CoreSession, error: BaseException) -> None:
-        """A worker's turn CRASHED (no ResultMessage — e.g. the SDK hit a fatal read
+        """A worker's turn CRASHED (no agent result — e.g. the SDK hit a fatal read
         error on an oversized message). The session already tried to reconnect itself;
         wake the orchestrator so it FOLLOWS UP — retries, re-briefs, or tells the boss —
         instead of leaving the worker silently stalled. This is the self-heal path."""
@@ -624,7 +657,7 @@ class Engine:
                         "— clipping, cut-off edges, artifacts, wrong perspective, muddy or "
                         "ugly work — not just what's right; a visible flaw you approve that "
                         "the boss then catches is a failure. If you report this to the boss, "
-                        "SHOW it: mcp__chat__send_photo('.beaboss-inbox/<filename>') so they "
+                        "SHOW it with chat.send_photo('.beaboss-inbox/<filename>') so they "
                         "SEE it, don't just describe it.]",
                         items, reply_to=self._last_boss_thread, quiet_ok=True)
                 else:
@@ -635,8 +668,15 @@ class Engine:
 
     # ---- fleet tools (the orchestrator's powers) -------------------------
 
-    def _build_fleet_server(self):
+    def _build_fleet_tools(self) -> ToolNamespace:
         engine = self
+        specs: list[AgentTool] = []
+
+        def fleet_tool(name: str, description: str, input_schema: dict[str, Any]):
+            def decorate(handler):
+                specs.append(AgentTool(name, description, input_schema, handler))
+                return handler
+            return decorate
 
         def ok(text: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": text}]}
@@ -644,7 +684,7 @@ class Engine:
         def err(text: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": text}], "is_error": True}
 
-        @tool(
+        @fleet_tool(
             "list_repos",
             "List the repositories available under the projects root, with their "
             "path and a one-line description. inspect_repo one before you brief.",
@@ -666,7 +706,7 @@ class Engine:
             except OSError as e:
                 return err(f"could not list {root}: {e}")
 
-        @tool(
+        @fleet_tool(
             "inspect_repo",
             "Look inside a repo BEFORE you brief a worker or judge their work: its "
             "guide docs (AGENTS.md / CLAUDE.md / README), top-level layout, and the "
@@ -682,7 +722,7 @@ class Engine:
         async def inspect_repo(args: dict[str, Any]) -> dict[str, Any]:
             return await engine._inspect_repo(str(args.get("repo", "")))
 
-        @tool(
+        @fleet_tool(
             "spawn_worker",
             "Hire a worker for one task. Creates a visible thread and an isolated "
             "git worktree of the repo, briefs the worker, and they start working. "
@@ -707,7 +747,7 @@ class Engine:
                 str(args.get("repo", "")), str(args.get("task", "")),
                 tier=str(args.get("tier", "")).strip().lower() or None)
 
-        @tool(
+        @fleet_tool(
             "message_worker",
             "Say something to a worker. Your message is posted in their thread "
             "(visible to the boss) and becomes the worker's next input.",
@@ -722,7 +762,7 @@ class Engine:
             return await engine._message_worker(str(args.get("worker_id", "")),
                                                str(args.get("text", "")))
 
-        @tool(
+        @fleet_tool(
             "worker_status",
             "Current fleet state. Pass worker_id for one worker, omit for all.",
             {"type": "object",
@@ -741,7 +781,7 @@ class Engine:
                             f"status={rec.worker_status or 'working'} task={rec.task[:100]}")
             return ok("\n".join(rows) or "(no workers)")
 
-        @tool(
+        @fleet_tool(
             "dismiss_worker",
             "End a worker's engagement and remove its clean worktree. Refuses a "
             "dirty worktree so uncommitted work remains active and visible.",
@@ -752,7 +792,7 @@ class Engine:
         async def dismiss_worker(args: dict[str, Any]) -> dict[str, Any]:
             return await engine._dismiss_worker(str(args.get("worker_id", "")))
 
-        @tool(
+        @fleet_tool(
             "review_worker",
             "Inspect a worker's committed work before delivery: returns the diff of "
             "their branch vs your checkout, whether everything is committed, and which "
@@ -765,7 +805,7 @@ class Engine:
         async def review_worker(args: dict[str, Any]) -> dict[str, Any]:
             return await engine._review_worker(str(args.get("worker_id", "")))
 
-        @tool(
+        @fleet_tool(
             "run_checks",
             "Run a check command (tests / build / lint) INSIDE a worker's worktree "
             "and get back the REAL exit code + output — the way to VERIFY work "
@@ -790,7 +830,7 @@ class Engine:
             else "lands immediately; call it only after the boss has clearly approved"
         )
 
-        @tool(
+        @fleet_tool(
             "deliver_worker",
             "Deliver a worker's finished work after review. In this deployment it "
             f"{delivery_behavior}. method='merge' merges into the repository's "
@@ -807,11 +847,10 @@ class Engine:
             return await engine._deliver_worker(str(args.get("worker_id", "")),
                                                 str(args.get("method", "")))
 
-        return create_sdk_mcp_server(
-            "fleet",
-            tools=[list_repos, inspect_repo, spawn_worker, message_worker,
-                   worker_status, review_worker, run_checks, deliver_worker,
-                   dismiss_worker],
+        return ToolNamespace(
+            name="fleet",
+            description="Manage repositories, workers, verification, and delivery.",
+            tools=tuple(specs),
         )
 
     # ---- fleet operations ------------------------------------------------
@@ -919,6 +958,8 @@ class Engine:
             role="worker", name=name, cwd=str(cwd), worker_id=worker_id,
             repo=str(repo), base_branch=base_branch,
             task=task.strip(), worker_status="working", model=model or "",
+            backend=self.settings.agent_backend,
+            models=({self.settings.agent_backend: model} if model else {}),
         )
         self.store.put(thread_id, rec)
 
@@ -1263,7 +1304,9 @@ class Engine:
         title = name or p.name
         assert self.transport is not None
         thread_id = await self.transport.create_thread(title)
-        rec = ThreadRecord(role="direct", name=title, cwd=str(p))
+        rec = ThreadRecord(
+            role="direct", name=title, cwd=str(p),
+            backend=self.settings.agent_backend)
         self.store.put(thread_id, rec)
         session = await self._ensure_session(thread_id, rec)
         if session is None:
@@ -1321,11 +1364,34 @@ class Engine:
             names = ", ".join(f"{r.name} ({r.worker_status})" for r in pending)
             self._note(
                 f"[after restart] non-terminal workers need recovery: {names}. "
-                "Working workers lost their in-memory turn: resume/re-brief them now. "
+                "Working workers lost their in-memory turn and are being resumed "
+                "automatically; do not duplicate their brief unless follow-up is needed. "
                 "Review done workers and resolve blocked workers as usual.")
 
     async def startup_recovery(self) -> None:
-        """Act on rehydrated fleet notes once the transport is ready."""
+        """Resume interrupted workers, then wake the orchestrator with ground truth."""
+        for thread_id, rec in self.store.workers().items():
+            if rec.worker_status != "working":
+                continue
+            session = await self._ensure_session(thread_id, rec)
+            if session is None:
+                self._note(
+                    f"automatic restart recovery could not start {rec.name}; "
+                    "inspect and re-brief them")
+                continue
+            await self._post(Outbound(
+                thread_id=thread_id, speaker=SYSTEM,
+                text="♻️ Resuming interrupted work after service restart."))
+            await session.submit(
+                "[AUTOMATIC RESTART RECOVERY]\n"
+                "Your previous in-memory turn was interrupted by a service restart. "
+                "Continue the original task from the persisted workspace. Before acting, "
+                "inspect git status/log and existing artifacts; preserve completed work "
+                "and do not blindly replay external side effects. Re-establish the latest "
+                "safe checkpoint, finish or report the real blocker, and end with your "
+                "normal STATUS line.\n\n"
+                f"Persisted original brief:\n{rec.task}")
+            log.info("automatically resumed worker %s after restart", rec.worker_id)
         await self._wake_orchestrator()
 
     async def factory_reset(self) -> str:

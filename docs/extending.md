@@ -29,18 +29,21 @@ holds session state. A new surface is a new adapter and **zero core changes**.
 
 ## Seam 2 — the agent backend
 
-**Intent:** let a worker run on whatever coding agent you prefer, without the org
+**Intent:** let every session role run on whatever coding agent you prefer, without the org
 logic caring which.
 
-A backend is *what a worker actually is*: something you can start in a working
+A backend is *what a session actually is*: something you can start in a working
 directory, send a turn to, stream results back from, interrupt, and stop — plus a
 way to resume it later. Claude Code is one such backend; Codex is another. The
 orchestrator, supervision, and isolation don't change when you swap it — a worker is
 a worker.
 
-- **Supported:** Claude Code (default) and **Codex** (`BEABOSS_BACKEND=codex`).
-  Codex runs via its `codex exec` CLI, translated into the same event vocabulary —
-  the orchestrator, supervision, and isolation don't change.
+- **Supported:** Claude Code (compatibility default) and **Codex**
+  (`BEABOSS_BACKEND=codex`). Codex uses its persistent app-server protocol; both
+  adapters expose the same neutral events, dynamic tool namespaces, vision inputs,
+  interruption, and native resume IDs to `CoreSession`.
+- Session IDs stay provider-scoped. On a provider change, visible history is handed
+  off lossily while workspace, git, task, and fleet records remain authoritative.
 
 ## The rule that keeps this honest
 

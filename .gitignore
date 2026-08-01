@@ -12,6 +12,10 @@ dist/
 !.env.example
 state/
 *.log
+.auth/
+.migration-backups/
+.test-tmp/
+.uv-cache/
 
 # Generated / runtime
 .beaboss-inbox/

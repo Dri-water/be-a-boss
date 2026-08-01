@@ -34,6 +34,10 @@ class ThreadRecord:
     name: str
     cwd: str = ""            # repo (direct) or worktree (worker); "" = none yet
     session_id: str | None = None
+    # Native sessions are not portable across harnesses. Keep one id per provider;
+    # session_id remains the active/legacy compatibility field.
+    backend: str = ""
+    session_ids: dict[str, str] = field(default_factory=dict)
     created_at: float = 0.0
     # worker-only:
     worker_id: str = ""       # short id, e.g. "nova"
@@ -44,6 +48,7 @@ class ThreadRecord:
     task: str = ""           # the brief, verbatim
     worker_status: str = ""   # working | done | blocked | dismissed | delivered
     model: str = ""          # resolved model id for this worker ("" = global default)
+    models: dict[str, str] = field(default_factory=dict)
 
 
 class CoreStore:

@@ -1,122 +1,173 @@
-"""Unit tests for the Codex translation — no `codex` binary, no subprocess.
-
-We feed the backend a fake process whose stdout replays the exact JSONL lines
-`codex exec --json` emits, and assert the seam produces the SDK message objects
-CoreSession already speaks.
-"""
+"""Codex app-server translation tests — no binary, subprocess, or network."""
 
 import asyncio
+from pathlib import Path
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
-
-from beaboss.core.agent_backend import CodexBackend
-
-
-class _FakeStdout:
-    """An async-iterable of pre-baked byte lines, like a real process stdout."""
-
-    def __init__(self, lines: list[bytes]):
-        self._lines = lines
-
-    def __aiter__(self):
-        async def gen():
-            for line in self._lines:
-                yield line
-        return gen()
+from beaboss.core.agent_backend import (
+    AgentInit,
+    AgentOutput,
+    AgentResult,
+    AgentTool,
+    CodexBackend,
+    ToolNamespace,
+)
+from beaboss.core.session import Turn
 
 
-class _FakeProc:
-    def __init__(self, lines: list[bytes]):
-        self.stdout = _FakeStdout(lines)
-        self.returncode = 0
-
-
-# The example stream from `codex exec --json`, verbatim from the CLI docs.
-EXAMPLE_LINES = [
-    b'{"type":"thread.started","thread_id":"019-abc"}\n',
-    b'{"type":"turn.started"}\n',
-    b'\n',  # blank line — must be tolerated
-    b'not json at all\n',  # noise — must be ignored
-    b'{"type":"item.completed","item":{"type":"reasoning","text":"thinking"}}\n',
-    b'{"type":"item.completed","item":{"type":"agent_message","text":"PONG"}}\n',
-    b'{"type":"turn.completed","usage":{"input_tokens":1}}\n',
-]
-
-
-def _drain(backend: CodexBackend) -> list:
+def _drain(backend: CodexBackend, events: list[dict]) -> list:
     async def go():
-        return [m async for m in backend.receive()]
+        for event in events:
+            await backend._events.put(event)
+        return [message async for message in backend.receive()]
     return asyncio.run(go())
 
 
-def test_translation_yields_sdk_objects():
-    backend = CodexBackend(cwd=None)
-    backend._proc = _FakeProc(EXAMPLE_LINES)
+def test_translation_yields_neutral_events():
+    backend = CodexBackend(Path("."), resume_id="019-abc")
+    backend._emit_init = True
+    messages = _drain(backend, [
+        {"method": "item/completed", "params": {"item": {
+            "type": "reasoning", "text": "thinking"}}},
+        {"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "phase": "final_answer", "text": "PONG"}}},
+        {"method": "turn/completed", "params": {"turn": {
+            "status": "completed", "id": "turn-1"}}},
+    ])
 
-    messages = _drain(backend)
-
-    # init -> assistant -> result (reasoning item and noise dropped)
-    assert len(messages) == 3
-
-    init, assistant, result = messages
-
-    assert isinstance(init, SystemMessage)
-    assert init.subtype == "init"
-    assert init.data["session_id"] == "019-abc"
-
-    assert isinstance(assistant, AssistantMessage)
-    assert len(assistant.content) == 1
-    assert isinstance(assistant.content[0], TextBlock)
-    assert assistant.content[0].text == "PONG"
-
-    assert isinstance(result, ResultMessage)
-    assert result.subtype == "success"
-    assert result.is_error is False
-    assert result.session_id == "019-abc"
-    assert result.result == "PONG"
+    assert [type(message) for message in messages] == [
+        AgentInit, AgentOutput, AgentResult]
+    assert messages[0].session_id == "019-abc"
+    assert messages[1].text == "PONG"
+    assert messages[2].is_error is False
+    assert messages[2].result == "PONG"
 
 
-def test_thread_id_captured_for_resume():
-    backend = CodexBackend(cwd=None)
-    backend._proc = _FakeProc(EXAMPLE_LINES)
-    _drain(backend)
-    # The thread_id is retained so the next turn resumes the same conversation.
-    assert backend._thread_id == "019-abc"
-
-
-def test_receive_surfaces_a_silent_failure():
-    """If codex exits without turn.completed (crash / auth error), receive must
-    yield an error ResultMessage — not a silent empty stream that the orchestrator
-    never hears about."""
-
-    class _DyingProc:
-        def __init__(self):
-            self.stdout = _FakeStdout([
-                b'{"type":"thread.started","thread_id":"t"}\n',
-                # ...then the process dies with no turn.completed
-            ])
-            self.stderr = None
-            self.returncode = 1
-
-        async def wait(self):
-            return 1
-
-    backend = CodexBackend(cwd=None)
-    backend._proc = _DyingProc()
-    messages = _drain(backend)
-    assert isinstance(messages[0], SystemMessage)
-    assert isinstance(messages[-1], ResultMessage)
-    assert messages[-1].is_error is True
-    assert "without completing" in messages[-1].result
+def test_receive_surfaces_app_server_exit():
+    backend = CodexBackend(Path("."), resume_id="thread-1")
+    messages = _drain(backend, [{
+        "method": "backend/eof", "params": {"error": "authentication failed"}}])
+    assert len(messages) == 1
+    assert isinstance(messages[0], AgentResult)
+    assert messages[0].is_error is True
+    assert "authentication failed" in (messages[0].result or "")
 
 
 def test_receive_stops_at_turn_completed():
-    """Anything after turn.completed must not be yielded — the turn is over."""
-    backend = CodexBackend(cwd=None)
-    backend._proc = _FakeProc([
-        b'{"type":"thread.started","thread_id":"t"}\n',
-        b'{"type":"turn.completed"}\n',
-        b'{"type":"item.completed","item":{"type":"agent_message","text":"leaked"}}\n',
+    backend = CodexBackend(Path("."), resume_id="thread-1")
+    messages = _drain(backend, [
+        {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        {"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "text": "leaked"}}},
     ])
-    messages = _drain(backend)
-    assert [type(m).__name__ for m in messages] == ["SystemMessage", "ResultMessage"]
+    assert [type(message) for message in messages] == [AgentResult]
+
+
+def test_dynamic_tools_are_namespaced_and_dispatched():
+    called: list[dict] = []
+
+    async def echo(args):
+        called.append(args)
+        return {"content": [{"type": "text", "text": f"echo:{args['value']}"}]}
+
+    namespace = ToolNamespace(
+        "fleet", "fleet operations",
+        (AgentTool("echo", "echo input", {
+            "type": "object", "properties": {"value": {"type": "string"}},
+            "required": ["value"]}, echo),))
+    backend = CodexBackend(Path("."), tool_namespaces=(namespace,))
+    writes: list[dict] = []
+
+    async def capture(payload):
+        writes.append(payload)
+
+    backend._write = capture
+    asyncio.run(backend._handle_tool_request({
+        "id": 7,
+        "params": {"namespace": "fleet", "tool": "echo",
+                   "arguments": {"value": "ok"}},
+    }))
+
+    assert backend._dynamic_tools()[0]["name"] == "fleet"
+    assert called == [{"value": "ok"}]
+    assert writes == [{"id": 7, "result": {
+        "contentItems": [{"type": "inputText", "text": "echo:ok"}],
+        "success": True}}]
+
+    # Installed app-server accepts definitions on start and restores them from the
+    # rollout on resume; ThreadResumeParams does not accept a dynamicTools override.
+    fresh = CodexBackend(Path("."), tool_namespaces=(namespace,))
+    resumed = CodexBackend(Path("."), resume_id="thread-1",
+                           tool_namespaces=(namespace,))
+    assert fresh._thread_options(
+        include_dynamic_tools=True)["dynamicTools"][0]["name"] == "fleet"
+    assert "dynamicTools" not in resumed._thread_options(
+        include_dynamic_tools=False)
+
+
+def test_steer_uses_active_turn_precondition():
+    backend = CodexBackend(Path("."), resume_id="thread-1")
+    backend._proc = object()  # only liveness is consulted; no subprocess I/O here
+    backend._active_turn_id = "turn-7"
+    requests: list[tuple[str, dict]] = []
+
+    async def request(method, params):
+        requests.append((method, params))
+        return {"turnId": "turn-7"}
+
+    backend._request = request
+    accepted = asyncio.run(backend.steer(Turn("change direction")))
+
+    assert accepted is True
+    assert requests == [("turn/steer", {
+        "threadId": "thread-1",
+        "input": [{"type": "text", "text": "change direction"}],
+        "expectedTurnId": "turn-7",
+    })]
+
+
+def test_steer_race_falls_back_without_losing_input():
+    backend = CodexBackend(Path("."), resume_id="thread-1")
+    backend._proc = object()
+    backend._active_turn_id = "turn-old"
+
+    async def request(_method, _params):
+        raise RuntimeError("expectedTurnId does not match active turn")
+
+    backend._request = request
+    assert asyncio.run(backend.steer(Turn("do not lose me"))) is False
+
+
+def test_structured_codex_error_kind_reaches_retry_layer():
+    backend = CodexBackend(Path("."), resume_id="thread-1")
+    messages = _drain(backend, [
+        {"method": "error", "params": {"error": {
+            "message": "Please try later",
+            "codexErrorInfo": {"type": "UsageLimitExceeded"},
+        }}},
+        {"method": "turn/completed", "params": {"turn": {
+            "status": "failed", "error": None,
+        }}},
+    ])
+    result = messages[-1]
+    assert isinstance(result, AgentResult) and result.is_error
+    assert "UsageLimitExceeded" in (result.result or "")
+
+
+def test_unknown_server_request_is_rejected_instead_of_hanging():
+    backend = CodexBackend(Path("."), resume_id="thread-1")
+    writes: list[dict] = []
+
+    async def capture(payload):
+        writes.append(payload)
+
+    backend._write = capture
+    asyncio.run(backend._reject_unsupported_request({
+        "id": 9, "method": "item/tool/requestUserInput", "params": {}}))
+    assert writes[0]["id"] == 9
+    assert writes[0]["error"]["code"] == -32601
+
+
+def test_approval_policy_uses_current_app_server_wire_values():
+    assert CodexBackend(Path("."), permission_mode="bypassPermissions")._approval_policy() == "never"
+    assert CodexBackend(Path("."), permission_mode="acceptEdits")._approval_policy() == "on-request"
+    assert CodexBackend(Path("."), permission_mode="default")._approval_policy() == "untrusted"

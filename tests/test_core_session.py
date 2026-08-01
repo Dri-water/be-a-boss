@@ -3,11 +3,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
 from beaboss.config import Settings
+from beaboss.core.agent_backend import AgentOutput, AgentResult, AgentTool, ToolNamespace
 from beaboss.core.ports import MediaIn, Outbound, OutboundDeliveryError, Speaker
 from beaboss.core.session import CoreSession, Turn, _add_utc_reset_date
+
+ResultMessage = AgentResult
 
 
 def _settings(tmp: Path) -> Settings:
@@ -68,9 +70,13 @@ def test_build_options_has_chat_mcp_and_env_prompt(tmp_path):
     assert "send_photo" in opts.system_prompt["append"]
 
 
-def test_extra_mcp_servers_merge(tmp_path):
+def test_extra_tool_namespaces_merge(tmp_path):
     s = _session(tmp_path)
-    s._extra_mcp = {"fleet": object()}
+    async def noop(_args):
+        return {"content": [{"type": "text", "text": "ok"}]}
+    s._extra_tools = (ToolNamespace(
+        "fleet", "fleet", (AgentTool(
+            "noop", "noop", {"type": "object", "properties": {}}, noop),)),)
     opts = s._build_options()
     assert set(opts.mcp_servers.keys()) == {"chat", "fleet"}
 
@@ -148,13 +154,121 @@ class FakeBackend:
         self.stopped += 1
 
 
+class SteerableBackend(FakeBackend):
+    def __init__(self, accept_steer: bool = True):
+        super().__init__([])
+        self.accept_steer = accept_steer
+        self.turn_started = asyncio.Event()
+        self.release_turn = asyncio.Event()
+        self.steered: list[Turn] = []
+
+    async def send(self, turn: Turn):
+        await super().send(turn)
+        self.turn_started.set()
+
+    async def steer(self, turn: Turn) -> bool:
+        if not self.accept_steer:
+            return False
+        self.steered.append(turn)
+        return True
+
+    def receive(self):
+        async def gen():
+            await self.release_turn.wait()
+            self.turn_started.clear()
+            self.release_turn.clear()
+            yield AgentResult(
+                subtype="success", duration_ms=1, duration_api_ms=1,
+                is_error=False, num_turns=1, session_id="native-1",
+                result="finished",
+            )
+        return gen()
+
+
+def test_busy_session_steers_same_conversation_instead_of_queueing(tmp_path):
+    backend = SteerableBackend()
+    sess = CoreSession(
+        thread_id="general", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=SinkPost(), busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+
+    async def drive():
+        await sess.start()
+        await sess.submit("first", reply_to="dm:1", quiet_ok=True)
+        await asyncio.wait_for(backend.turn_started.wait(), timeout=1)
+        await sess.submit("change direction", reply_to="dm:1")
+        assert sess.pending == 0
+        assert sess._active_turn is not None
+        assert sess._active_turn.quiet_ok is False
+        backend.release_turn.set()
+        await asyncio.wait_for(sess._queue.join(), timeout=1)
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert [turn.text for turn in backend.sent] == ["first"]
+    assert [turn.text for turn in backend.steered] == ["change direction"]
+
+
+def test_busy_session_queues_cross_surface_or_failed_steer(tmp_path):
+    backend = SteerableBackend(accept_steer=False)
+    sess = CoreSession(
+        thread_id="general", cwd=tmp_path,
+        speaker=Speaker(role="orchestrator", name="Lim", emoji="🧭"),
+        settings=_settings(tmp_path), post=SinkPost(), busy=_noop_busy,
+        on_session_id=lambda _s: None, backend=backend, final_only=True,
+    )
+
+    async def drive():
+        await sess.start()
+        await sess.submit("first", reply_to="dm:1")
+        await asyncio.wait_for(backend.turn_started.wait(), timeout=1)
+        await sess.submit("second", reply_to="dm:1")   # native steer declined
+        await sess.submit("third", reply_to="dm:2")    # never cross reply targets
+        assert sess.pending == 2
+        backend.release_turn.set()
+        for expected_sends in (2, 3):
+            for _ in range(100):
+                if len(backend.sent) >= expected_sends:
+                    break
+                await asyncio.sleep(0.005)
+            assert len(backend.sent) >= expected_sends
+            backend.release_turn.set()
+        await asyncio.wait_for(sess._queue.join(), timeout=1)
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert [turn.text for turn in backend.sent] == ["first", "second", "third"]
+
+
+def test_start_persists_backend_native_id_before_first_turn(tmp_path):
+    backend = FakeBackend([])
+    backend.session_id = "codex-thread-created-at-start"
+    captured: list[str] = []
+    sess = CoreSession(
+        thread_id="t1", cwd=tmp_path,
+        speaker=Speaker(role="worker", name="Nova", emoji="⚙️"),
+        settings=_settings(tmp_path), post=SinkPost(), busy=_noop_busy,
+        on_session_id=captured.append, backend=backend,
+    )
+
+    async def drive():
+        await sess.start()
+        await sess.stop()
+
+    asyncio.run(drive())
+    assert sess.session_id == "codex-thread-created-at-start"
+    assert captured == ["codex-thread-created-at-start"]
+
+
 def test_fake_backend_drives_a_turn(tmp_path):
     """Proves the seam: a session runs a full turn against a swapped-in backend,
     rendering its events and firing the done hook — with no Claude involved."""
     post = SinkPost()
     backend = FakeBackend([
-        AssistantMessage(content=[TextBlock(text="hello from fake")], model="fake"),
-        ResultMessage(
+        AgentOutput("hello from fake"),
+        AgentResult(
             subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
             num_turns=2, session_id="sess-xyz", total_cost_usd=0.01,
         ),
@@ -166,7 +280,7 @@ def test_fake_backend_drives_a_turn(tmp_path):
         settings=_settings(tmp_path), post=post, busy=_noop_busy,
         on_session_id=captured_sids.append, backend=backend,
     )
-    done: list[ResultMessage] = []
+    done: list[AgentResult] = []
 
     async def on_done(_s, result):
         done.append(result)
@@ -196,9 +310,9 @@ def test_final_only_session_posts_one_clean_reply(tmp_path):
     reply — no streamed narration, no tool lines, no cost footer."""
     post = SinkPost()
     backend = FakeBackend([
-        AssistantMessage(content=[TextBlock(text="let me check the fleet…")], model="fake"),
-        AssistantMessage(content=[TextBlock(text="spawning now")], model="fake"),
-        ResultMessage(
+        AgentOutput("let me check the fleet…"),
+        AgentOutput("spawning now"),
+        AgentResult(
             subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
             num_turns=3, session_id="s1", total_cost_usd=0.02,
             result="Nova is hired and working on it.",
@@ -499,15 +613,13 @@ def test_final_only_appends_action_footer(tmp_path):
 def test_streaming_session_batches_tool_lines(tmp_path):
     """A many-tool worker turn must not be a message per tool call — consecutive 🔧
     lines are flushed as one message."""
-    from claude_agent_sdk import ToolUseBlock
+    from beaboss import rendering
     post = SinkPost()
     backend = FakeBackend([
-        AssistantMessage(content=[
-            ToolUseBlock(id="1", name="Bash", input={"command": "ls"}),
-            ToolUseBlock(id="2", name="Read", input={"file_path": "a.py"}),
-            ToolUseBlock(id="3", name="Bash", input={"command": "pytest"}),
-        ], model="fake"),
-        AssistantMessage(content=[TextBlock(text="all tests pass")], model="fake"),
+        AgentOutput(rendering.tool_line("Bash", {"command": "ls"})),
+        AgentOutput(rendering.tool_line("Read", {"file_path": "a.py"})),
+        AgentOutput(rendering.tool_line("Bash", {"command": "pytest"})),
+        AgentOutput("all tests pass"),
         ResultMessage(
             subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
             num_turns=2, session_id="s1", total_cost_usd=0.01,
@@ -632,7 +744,7 @@ def test_stale_interrupt_flag_does_not_eat_the_next_reply(tmp_path):
     post = SinkPost()
     backend = FakeBackend([
         # turn 1: streams a block then ends with NO ResultMessage (racy interrupt)
-        AssistantMessage(content=[TextBlock(text="partial…")], model="fake"),
+        AgentOutput("partial…"),
         # turn 2: a normal successful reply
         ResultMessage(
             subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,

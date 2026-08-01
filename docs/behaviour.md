@@ -5,7 +5,10 @@ you can rely on; the code is where the mechanics live.
 
 ## You send a message
 
-- **In the main thread** → it goes to the orchestrator as its next turn. The first
+- **In the main thread** → it goes to the orchestrator. When the selected backend
+  exposes an unambiguous native steer operation (currently Codex app-server), a
+  message sent while it is working joins that in-flight turn; a completion race or
+  a backend without native steering retains it as the next FIFO turn. The first
   message here brings the orchestrator to life. (Only the main thread does this — a
   stray message in some other thread never accidentally becomes the office.)
 - **In a worker thread** → see [interjection](#you-interject-in-a-worker-thread).
@@ -34,7 +37,9 @@ half-created — you get one clear, actionable message instead.
 Your message is delivered to the worker as input **and** recorded for the
 orchestrator. Both see it. The worker treats your word as authoritative; the
 orchestrator stays aware of what you told them. You don't have to go through the
-manager to steer someone — but the manager still knows what happened.
+manager to steer someone — but the manager still knows what happened. Codex receives
+the input through `turn/steer` when its turn is still active; otherwise it is safely
+queued, so a race with turn completion never drops the message.
 
 ## Supervision — how the orchestrator stays in the loop
 

@@ -16,17 +16,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ResultMessage,
-    SystemMessage,
-    create_sdk_mcp_server,
-    tool,
-)
+from claude_agent_sdk import ClaudeAgentOptions
 
 from .. import rendering
-from .agent_backend import AgentBackend, ClaudeAgentBackend, scrubbed_env
+from .agent_backend import (
+    AgentBackend,
+    AgentInit,
+    AgentOutput,
+    AgentResult,
+    AgentTool,
+    ClaudeAgentBackend,
+    CodexBackend,
+    ToolNamespace,
+    claude_mcp_server,
+    scrubbed_env,
+)
 from .ports import MediaIn, Outbound, OutboundDeliveryError, Speaker
 
 log = logging.getLogger("beaboss.core.session")
@@ -59,9 +63,9 @@ DEFAULT_SESSION_APPEND = (
     "- Only paths under your workspace are shared with the host; nothing outside it "
     "is visible. Keep your work within the workspace.\n"
     "- Your normal text replies are delivered into this thread. To send MEDIA, use "
-    "the chat tools: mcp__chat__send_photo (renders inline — screenshots, charts), "
-    "mcp__chat__send_video, mcp__chat__send_file (any document), and "
-    "mcp__chat__send_message (extra plain text). Paths must be inside your "
+    "the chat tool namespace: send_photo (renders inline — screenshots, charts), "
+    "send_video, send_file (any document), and send_message (extra plain text). "
+    "Claude may display these as mcp__chat__* and Codex as chat.*. Paths must be inside your "
     "workspace.\n"
     f"- Files the user sends you are saved under ./{INBOX_DIRNAME}/ and referenced "
     "in their message; images are also attached so you can see them directly."
@@ -70,7 +74,7 @@ DEFAULT_SESSION_APPEND = (
 
 @dataclass
 class Turn:
-    """One queued user turn: text plus optional inline images (base64)."""
+    """One user input: queued normally or attached to an active native turn."""
 
     text: str
     images: list[dict] = field(default_factory=list)  # {media_type, data}
@@ -163,7 +167,7 @@ class CoreSession:
         idle: BusyFn | None = None,
         session_id: str | None = None,
         system_append: str | None = None,
-        extra_mcp_servers: dict[str, Any] | None = None,
+        extra_tool_namespaces: tuple[ToolNamespace, ...] = (),
         backend: AgentBackend | None = None,
         final_only: bool = False,
         footer_fn: Callable[[], str | None] | None = None,
@@ -179,7 +183,7 @@ class CoreSession:
         self._on_session_id = on_session_id
         self.session_id = session_id
         self._system_append = system_append
-        self._extra_mcp = extra_mcp_servers or {}
+        self._extra_tools = extra_tool_namespaces
         # final_only: post ONE message per turn — the final reply — instead of
         # streaming every text block, tool line, and cost footer. Used for the
         # orchestrator, who should text the boss like a person, not narrate.
@@ -191,16 +195,34 @@ class CoreSession:
         # A per-session model (a worker's dispatched tier); None => the global settings.model.
         self._model_override = model_override
         self._tool_buf: list[str] = []   # batched 🔧 lines (streaming sessions)
-        # The agent runtime is a swappable seam; default to the Claude Code SDK.
-        self._backend = backend or ClaudeAgentBackend(self._build_options)
+        # Both providers receive the same prompt, tools, resume id, model, and cwd.
+        # The adapter below is the only provider-specific choice in a session.
+        tool_namespaces = (self._build_chat_tools(), *self._extra_tools)
+        if backend is not None:
+            self._backend = backend
+        elif self.settings.agent_backend == "codex":
+            self._backend = CodexBackend(
+                cwd=self.cwd,
+                system_prompt=self._resolve_append(),
+                resume_id=self.session_id,
+                model=self._model_override or self.settings.model,
+                cli_path=self.settings.cli_path,
+                worker_thread_id=(self.thread_id
+                                  if self.speaker.role == "worker" else None),
+                tool_namespaces=tool_namespaces,
+                permission_mode=self.settings.permission_mode,
+            )
+        else:
+            self._backend = ClaudeAgentBackend(self._build_options)
         self._queue: asyncio.Queue[Turn] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
+        self._active_turn: Turn | None = None
         self._reply_to = thread_id   # current turn's reply target (see _do_turn)
         self._interrupted = False    # a human /stop is in flight for this turn
         self.status = "new"  # new | idle | busy | waiting | error | stopped
         self.turns = 0
-        self.on_turn_done: Callable[["CoreSession", ResultMessage], Awaitable[None]] | None = None
-        # Fires when a turn CRASHES (no ResultMessage) — so a supervisor can follow up
+        self.on_turn_done: Callable[["CoreSession", AgentResult], Awaitable[None]] | None = None
+        # Fires when a turn CRASHES (no AgentResult) — so a supervisor can follow up
         # on a worker that died mid-turn instead of leaving it silently stalled.
         self.on_turn_error: Callable[["CoreSession", BaseException], Awaitable[None]] | None = None
         self._retries = 0                 # consecutive recoverable failures (resets on success)
@@ -227,8 +249,10 @@ class CoreSession:
             if append
             else None
         )
-        mcp = {"chat": self._build_chat_server()}
-        mcp.update(self._extra_mcp)
+        mcp = {
+            namespace.name: claude_mcp_server(namespace)
+            for namespace in (self._build_chat_tools(), *self._extra_tools)
+        }
         return ClaudeAgentOptions(
             cwd=str(self.cwd),
             env=env,  # bot secrets removed; worker marker retained by descendants
@@ -245,64 +269,64 @@ class CoreSession:
             max_buffer_size=_MAX_MESSAGE_BYTES,
         )
 
-    def _build_chat_server(self):
+    def _build_chat_tools(self) -> ToolNamespace:
         session = self
 
-        @tool(
-            "send_photo",
-            "Send an image into this thread so it renders inline — screenshots, charts, "
-            "renders, PROOF of visual work. Whenever you report on anything visual, SHOW "
-            "it with this instead of only describing it; a picture the reader can see "
-            "beats any words. Path must be inside your workspace.",
-            {"type": "object",
-             "properties": {"path": {"type": "string"}, "caption": {"type": "string"}},
-             "required": ["path"]},
-        )
         async def send_photo(args: dict[str, Any]) -> dict[str, Any]:
             return await session._tool_send(args, "photo")
 
-        @tool(
-            "send_video",
-            "Send a video file into this thread. Path must be inside the workspace.",
-            {"type": "object",
-             "properties": {"path": {"type": "string"}, "caption": {"type": "string"}},
-             "required": ["path"]},
-        )
         async def send_video(args: dict[str, Any]) -> dict[str, Any]:
             return await session._tool_send(args, "video")
 
-        @tool(
-            "send_file",
-            "Send any file into this thread as a document. Path must be inside "
-            "the workspace.",
-            {"type": "object",
-             "properties": {"path": {"type": "string"}, "caption": {"type": "string"}},
-             "required": ["path"]},
-        )
         async def send_file(args: dict[str, Any]) -> dict[str, Any]:
             return await session._tool_send(args, "document")
 
-        @tool(
-            "send_message",
-            "Send an extra plain-text message into this thread (separate from your "
-            "normal reply). If you're reporting VISUAL work, don't lean on words alone — "
-            "send_photo the actual screenshot so the reader SEES it, don't just describe it.",
-            {"type": "object",
-             "properties": {"text": {"type": "string"}},
-             "required": ["text"]},
-        )
         async def send_message(args: dict[str, Any]) -> dict[str, Any]:
             text = str(args.get("text", "")).strip()
             if text:
                 await session._emit_text(text)
             return {"content": [{"type": "text", "text": "sent"}]}
 
-        tools = [send_photo, send_video, send_file]
+        path_schema = {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "caption": {"type": "string"},
+            },
+            "required": ["path"],
+        }
+        tools = [
+            AgentTool(
+                "send_photo",
+                "Send an image into this thread so it renders inline — screenshots, "
+                "charts, renders, or other visual proof. Path must be inside your workspace.",
+                path_schema, send_photo),
+            AgentTool(
+                "send_video",
+                "Send a video file into this thread. Path must be inside the workspace.",
+                path_schema, send_video),
+            AgentTool(
+                "send_file",
+                "Send any file into this thread as a document. Path must be inside "
+                "the workspace.",
+                path_schema, send_file),
+        ]
         if not self._final_only:
             # send_message would let a final_only session narrate around its
             # one-reply-per-turn contract — don't mount it there.
-            tools.append(send_message)
-        return create_sdk_mcp_server("chat", tools=tools)
+            tools.append(AgentTool(
+                "send_message",
+                "Send an extra plain-text message into this thread, separate from "
+                "your normal reply.",
+                {"type": "object",
+                 "properties": {"text": {"type": "string"}},
+                 "required": ["text"]},
+                send_message))
+        return ToolNamespace(
+            name="chat",
+            description="Send messages and media to the current conversation thread.",
+            tools=tuple(tools),
+        )
 
     async def _tool_send(self, args: dict[str, Any], kind: str) -> dict[str, Any]:
         def err(msg: str) -> dict[str, Any]:
@@ -334,7 +358,22 @@ class CoreSession:
         return {"content": [{"type": "text", "text": f"sent {p.name} into the thread"}]}
 
     async def start(self) -> None:
-        await self._backend.start()
+        try:
+            await self._backend.start()
+        except Exception:
+            # A provider can fail after launching its native process (bad resume,
+            # auth, protocol mismatch). Never leak that half-started process.
+            try:
+                await self._backend.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+        # Codex allocates its native thread during backend.start(), before the first
+        # turn. Persist it immediately so a crash in the small start->submit window
+        # cannot orphan the only resumable id. Claude still reports its id via init.
+        native_id = getattr(self._backend, "session_id", None)
+        if native_id:
+            self._capture_session_id(str(native_id))
         self.status = "idle"
         self._worker = asyncio.create_task(
             self._run(), name=f"session-{self.thread_id}"
@@ -378,7 +417,8 @@ class CoreSession:
 
     async def submit(self, text: str, reply_to: str | None = None,
                      quiet_ok: bool = False) -> None:
-        await self._queue.put(Turn(text=text, reply_to=reply_to, quiet_ok=quiet_ok))
+        await self._submit_turn(
+            Turn(text=text, reply_to=reply_to, quiet_ok=quiet_ok))
 
     async def submit_media(self, caption: str, items: list[MediaIn],
                            reply_to: str | None = None,
@@ -402,6 +442,7 @@ class CoreSession:
                 images.append({
                     "media_type": it.mime,
                     "data": base64.b64encode(it.data).decode("ascii"),
+                    "path": str(dest),
                 })
 
         lines: list[str] = []
@@ -414,8 +455,37 @@ class CoreSession:
             for dest, mime in saved:
                 lines.append(f"- {dest.relative_to(self.cwd)} ({mime or 'unknown type'})")
         text = "\n".join(lines) if lines else "(the user sent media with no caption)"
-        await self._queue.put(
+        await self._submit_turn(
             Turn(text=text, images=images, reply_to=reply_to, quiet_ok=quiet_ok))
+
+    async def _submit_turn(self, turn: Turn) -> None:
+        """Steer an active native turn when possible; otherwise retain FIFO order.
+
+        A single orchestrator can answer both #general and DMs. Never steer input
+        across reply targets, because the active turn's eventual answer belongs to
+        the surface that started it. Provider adapters without an unambiguous native
+        steer operation simply return False and keep the historical queue behavior.
+        """
+        active = self._active_turn
+        same_target = (
+            active is not None
+            and (active.reply_to or self.thread_id) == (turn.reply_to or self.thread_id)
+        )
+        steer = getattr(self._backend, "steer", None)
+        if self.status == "busy" and same_target and steer is not None:
+            try:
+                accepted = await steer(turn)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("steer failed thread=%s; preserving as queued turn: %s",
+                            self.thread_id, exc)
+                accepted = False
+            if accepted:
+                # If a boss message steers a quiet supervision digest, the combined
+                # turn must now answer. The _do_turn_inner caller holds this same Turn
+                # object, so the final-only decision observes the updated flag.
+                active.quiet_ok = active.quiet_ok and turn.quiet_ok
+                return
+        await self._queue.put(turn)
 
     @property
     def pending(self) -> int:
@@ -424,6 +494,7 @@ class CoreSession:
     async def _run(self) -> None:
         while True:
             turn = await self._queue.get()
+            self._active_turn = turn
             self.status = "busy"
             try:
                 while True:
@@ -501,6 +572,7 @@ class CoreSession:
                 # or a dead session masquerades as healthy and keeps being reused.
                 if self.status not in ("stopped", "error"):
                     self.status = "idle"
+                self._active_turn = None
                 self._queue.task_done()
 
     # General transient failures get about an hour. Usage/credit limits get just over
@@ -515,7 +587,10 @@ class CoreSession:
                     "insufficient", "quota", "usage limit", "too many requests",
                     "429", "529", "timed out", "timeout", "temporarily", "try again",
                     "connection", "unavailable", "turn wedged", "limit reached",
-                    "hit your limit", "session limit")
+                    "hit your limit", "session limit", "usagelimitexceeded",
+                    "httpconnectionfailed", "responsestreamconnectionfailed",
+                    "responsestreamdisconnected", "responsetoomanyfailedattempts",
+                    "server overloaded")
     _USAGE_LIMITS = ("credit balance", "insufficient", "quota", "usage limit",
                      "limit reached", "hit your limit", "session limit")
 
@@ -620,7 +695,7 @@ class CoreSession:
     async def _do_turn_inner(self, turn: Turn) -> None:
         await self._backend.send(turn)
 
-        result: ResultMessage | None = None
+        result: AgentResult | None = None
         stream = self._backend.receive().__aiter__()
         while True:
             try:
@@ -638,21 +713,19 @@ class CoreSession:
                 raise RuntimeError(
                     f"no response from the agent for {self.TURN_IDLE_TIMEOUT}s "
                     f"(turn wedged) — reconnecting")
-            if isinstance(message, SystemMessage) and message.subtype == "init":
-                sid = message.data.get("session_id")
-                if sid:
-                    self._capture_session_id(sid)
-            elif isinstance(message, AssistantMessage):
+            if isinstance(message, AgentInit):
+                self._capture_session_id(message.session_id)
+            elif isinstance(message, AgentOutput):
                 if not self._final_only:
-                    for piece in rendering.render_assistant(message):
-                        # Batch consecutive 🔧 one-liners into a single message —
-                        # a 40-tool worker turn must not be 40 notifications.
-                        if piece.startswith("🔧"):
-                            self._tool_buf.append(piece)
-                        else:
-                            await self._flush_tools()
-                            await self._emit_text(piece)
-            elif isinstance(message, ResultMessage):
+                    piece = message.text
+                    # Batch consecutive 🔧 one-liners into a single message — a
+                    # 40-tool worker turn must not be 40 notifications.
+                    if piece.startswith("🔧"):
+                        self._tool_buf.append(piece)
+                    else:
+                        await self._flush_tools()
+                        await self._emit_text(piece)
+            elif isinstance(message, AgentResult):
                 if message.session_id:
                     self._capture_session_id(message.session_id)
                 error = RuntimeError(
@@ -660,7 +733,7 @@ class CoreSession:
                 if (message.is_error or (
                         message.subtype and message.subtype != "success")
                         ) and self._is_recoverable(error):
-                    # Claude Code can return limits as an error ResultMessage instead
+                    # A backend can return limits as an error result instead
                     # of raising. Feed both forms through the same retry policy.
                     raise error
                 self.turns += 1

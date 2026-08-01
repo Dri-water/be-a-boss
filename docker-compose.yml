@@ -22,9 +22,13 @@ services:
       # Your repos, shared with the host. On Windows this is a bind mount over the
       # WSL2 boundary — fine for edit/commit/run; hot-reload file-watching can lag.
       - "${HOST_DOCUMENTS:?set HOST_DOCUMENTS in .env — host path to your projects}:/workspace"
-      # Claude auth + session store (so sessions resume across restarts).
-      # Quick-start: reuse the host login. See README for the setup-token upgrade.
-      - "${HOST_CLAUDE_DIR:?set HOST_CLAUDE_DIR in .env — host path to your ~/.claude}:/root/.claude"
+      # Provider auth sources. Either inactive provider may use the ignored local
+      # fallback, so a Claude-only or Codex-only install needs only the matching path.
+      - "${HOST_CLAUDE_DIR:-./.auth/claude}:/root/.claude"
+      - "${HOST_CODEX_DIR:-./.auth/codex}:/host-agent-auth/codex:ro"
+      # Keep Codex's SQLite state on a native Linux filesystem; the entrypoint
+      # seeds auth/config from the read-only host directory on first use.
+      - codex_state:/root/.codex
       # Bot's own state (topic <-> session map).
       - bot_state:/data
 
@@ -33,3 +37,7 @@ volumes:
     # Explicit name → decoupled from the project/folder. This is the line that makes
     # a rename or move safe: the state always lives in `be-a-boss_bot_state`.
     name: be-a-boss_bot_state
+  codex_state:
+    # Provider-native Codex threads + SQLite state, restart-proof and safe on
+    # Docker Desktop hosts where SQLite cannot lock a Windows/macOS bind mount.
+    name: be-a-boss_codex_state

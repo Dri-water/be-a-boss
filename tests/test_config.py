@@ -214,3 +214,9 @@ def test_resolve_worker_model_fallback(clean_env, monkeypatch):
     assert s.resolve_worker_model("balanced") == "global-default"  # "" tier -> global
     assert s.resolve_worker_model(None) == "global-default"        # no tier -> global
     assert s.resolve_worker_model("bogus") == "global-default"     # unknown -> global
+
+
+def test_unknown_backend_is_rejected(clean_env, monkeypatch):
+    monkeypatch.setenv("BEABOSS_BACKEND", "mystery")
+    with pytest.raises(SystemExit, match="claude.*codex"):
+        Settings.from_env(clean_env)

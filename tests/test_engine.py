@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from beaboss.config import Settings
+from beaboss.core.agent_backend import CodexBackend
 from beaboss.core import worktrees
 from beaboss.core.engine import Engine
 from beaboss.core.ports import InboundMessage, Outbound, OutboundDeliveryError, SYSTEM
@@ -283,7 +284,7 @@ def test_rehydrate_resurfaces_pending_workers(tmp_path):
     note = engine._inbox[0]
     assert all(name in note for name in ("Nova", "Kite", "Ryan"))
     assert "Ada" not in note
-    assert "resume/re-brief" in note
+    assert "resumed automatically" in note
 
 
 def test_startup_recovery_immediately_wakes_orchestrator(tmp_path):
@@ -293,13 +294,17 @@ def test_startup_recovery_immediately_wakes_orchestrator(tmp_path):
     engine.store.put("12", ThreadRecord(role="worker", name="Ryan", worker_id="ryan",
                                         worker_status="working"))
     orchestrator = FakeSession()
+    worker = FakeSession()
     engine.sessions["general"] = orchestrator
+    engine.sessions["12"] = worker
 
     engine.rehydrate()
     asyncio.run(engine.startup_recovery())
 
     assert len(orchestrator.submitted) == 1
     assert "Ryan (working)" in orchestrator.submitted[0]
+    assert len(worker.submitted) == 1
+    assert "AUTOMATIC RESTART RECOVERY" in worker.submitted[0]
     assert engine._inbox == []
 
 
@@ -1008,6 +1013,57 @@ def test_make_worker_session_uses_dispatched_model(tmp_path):
                        cwd=str(tmp_path), repo=str(tmp_path), model="haiku")
     sess = engine._make_worker_session("55", rec)
     assert sess._model_override == "haiku"
+
+
+def test_codex_backend_applies_equally_to_every_session_role(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.settings.agent_backend = "codex"
+    direct = ThreadRecord(role="direct", name="direct", cwd=str(tmp_path),
+                          backend="codex")
+    worker = ThreadRecord(role="worker", name="Nova", worker_id="nova",
+                          cwd=str(tmp_path), repo=str(tmp_path), backend="codex")
+    orchestrator = ThreadRecord(role="orchestrator", name="orchestrator",
+                                backend="codex")
+    engine.store.put("direct", direct)
+    engine.store.put("worker", worker)
+    engine.store.put("general", orchestrator)
+
+    sessions = [
+        engine._make_direct_session("direct", direct),
+        engine._make_worker_session("worker", worker),
+        engine._make_orchestrator_session("general", orchestrator),
+    ]
+    assert all(isinstance(session._backend, CodexBackend) for session in sessions)
+    namespaces = [
+        {namespace["name"] for namespace in session._backend._dynamic_tools()}
+        for session in sessions
+    ]
+    assert namespaces == [{"chat"}, {"chat"}, {"chat", "fleet"}]
+
+
+def test_legacy_claude_worker_migrates_without_cross_resuming_or_reusing_model(
+        tmp_path, monkeypatch):
+    engine, _ = _engine(tmp_path)
+    engine.settings.agent_backend = "codex"
+    monkeypatch.setattr("beaboss.core.engine.infer_legacy_backend", lambda _sid: "claude")
+    monkeypatch.setattr(
+        "beaboss.core.engine.recovery_append",
+        lambda source, sid, **_kwargs: f"\nRECOVERED {source}:{sid}")
+    rec = ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", cwd=str(tmp_path),
+        repo=str(tmp_path), task="finish it", session_id="claude-native-id",
+        model="opus")
+    engine.store.put("55", rec)
+
+    session = engine._make_worker_session("55", rec)
+    persisted = engine.store.get("55")
+    assert isinstance(session._backend, CodexBackend)
+    assert session._backend._thread_id is None
+    assert "RECOVERED claude:claude-native-id" in session._system_append
+    assert session._model_override is None
+    assert persisted.session_ids == {"claude": "claude-native-id"}
+    assert persisted.models == {"claude": "opus"}
+    assert persisted.backend == "codex"
 
 
 def test_worker_screenshots_are_captured_for_orchestrator_vision(tmp_path):

@@ -16,6 +16,19 @@ def test_roundtrip_and_reload(tmp_path):
     assert set(reloaded.all().keys()) == {"100"}
 
 
+def test_provider_native_sessions_and_models_roundtrip(tmp_path):
+    s = CoreStore(tmp_path / "state")
+    s.put("100", ThreadRecord(
+        role="worker", name="Nova", backend="codex", session_id="cx-2",
+        session_ids={"claude": "cl-1", "codex": "cx-2"},
+        model="gpt-current", models={"claude": "opus", "codex": "gpt-current"}))
+
+    rec = CoreStore(tmp_path / "state").get("100")
+    assert rec.backend == "codex"
+    assert rec.session_ids == {"claude": "cl-1", "codex": "cx-2"}
+    assert rec.models == {"claude": "opus", "codex": "gpt-current"}
+
+
 def test_orchestrator_thread_persists(tmp_path):
     s = CoreStore(tmp_path / "state")
     s.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))

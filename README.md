@@ -25,13 +25,13 @@ Self-hosted, on your box.
 
 be-a-boss is a **framework**, and deliberately modular: the org logic is a
 transport-agnostic, backend-agnostic core. The **surface** you drive it from and
-the **agent backend** your workers run on are both pluggable adapters — nothing in
+the **agent backend** all sessions run on are both pluggable adapters — nothing in
 the core knows which one it's talking to.
 
 | | Supported now | Next |
 |---|---|---|
 | **Surface** — how you drive it | Telegram · **Web** (`python -m beaboss.web`) · **CLI / TUI** (`boss-cli`) | Slack · your own UI over the shared protocol |
-| **Agent backend** — what workers run | Claude Code · **Codex** (`BEABOSS_BACKEND=codex`) | — |
+| **Agent backend** — what sessions run | Claude Code · **Codex** (`BEABOSS_BACKEND=codex`) | — |
 
 The quickstart below covers **all three** surfaces; the orchestrator + workers
 underneath are identical either way — swapping a surface or backend is an adapter,
@@ -143,9 +143,9 @@ sequenceDiagram
     O-->>You: reports outcome in General
 ```
 
-Worker sessions run on your chosen backend — by default the official
+Every session role runs on your chosen backend — by default the official
 [`claude-agent-sdk`](https://code.claude.com/docs/en/agent-sdk/overview) driving
-the standalone `claude` CLI, or the Codex CLI with `BEABOSS_BACKEND=codex`. See
+the standalone `claude` CLI, or Codex app-server with `BEABOSS_BACKEND=codex`. See
 **[docs/architecture.md](docs/architecture.md)** for the full design and
 [AGENTS.md](AGENTS.md) for internals.
 
@@ -153,8 +153,8 @@ the standalone `claude` CLI, or the Codex CLI with `BEABOSS_BACKEND=codex`. See
 
 - **Docker** (recommended) — or Python ≥ 3.11 + [uv](https://docs.astral.sh/uv/)
   for local runs.
-- A **Claude Code** login. The SDK drives the standalone CLI; in Docker the image
-  installs it, and auth is supplied by mounting your `~/.claude` (see
+- A login for the backend you select: **Claude Code** or **Codex**. Docker installs
+  both CLIs and mounts the selected backend's native auth/session directory (see
   [Auth](#auth)).
 
 ## Quickstart
@@ -170,8 +170,8 @@ the standalone `claude` CLI, or the Codex CLI with `BEABOSS_BACKEND=codex`. See
 
 ### Prerequisites (all surfaces)
 
-- **A [Claude Code](https://code.claude.com/docs/en/agent-sdk/overview) login** —
-  workers run real agent sessions as you. (Prefer Codex? Set `BEABOSS_BACKEND=codex`.)
+- **A Claude Code or Codex login** — sessions run as you. Set
+  `BEABOSS_BACKEND=codex` to use Codex; otherwise Claude is the compatibility default.
 - **Python ≥ 3.11 + [uv](https://docs.astral.sh/uv/)** for local runs, **or Docker**
   for the always-on Telegram bot.
 
@@ -333,15 +333,20 @@ Sends are confined to the session's workspace; uploads up to 50 MB.
 
 ## Auth
 
-Sessions authenticate as your Claude account. Two options:
+Sessions authenticate through the selected CLI:
 
-- **Quick-start (default):** mount your host `~/.claude` (compose does this). The
-  container reuses your existing login and persists session history for resume.
-  Trade-off: host and container share one credential.
-- **Cleaner for a server:** `claude setup-token` mints a long-lived, revocable
-  token — drop the `~/.claude` mount and pass the token to the container instead.
-  Recommended if the box is shared or exposed. This also limits blast radius if a
-  session is ever prompt-injected.
+- **Claude:** set `HOST_CLAUDE_DIR` to your host `~/.claude`. For a server,
+  `claude setup-token` can provide a dedicated revocable credential instead.
+- **Codex:** sign in with the host Codex CLI, then set `HOST_CODEX_DIR` to your
+  host `~/.codex`. Docker seeds the login from that read-only directory; native
+  resumable threads and SQLite state live in `be-a-boss_codex_state` so locking
+  remains reliable on Windows/macOS Docker Desktop too.
+
+Native session IDs are provider-specific. When `BEABOSS_BACKEND` changes, the
+original ID remains stored under its provider and be-a-boss starts/resumes the
+target provider with a bounded visible transcript hand-off plus the authoritative
+workspace, git, task, and fleet state. Hidden reasoning and in-flight tool state
+cannot be transferred, so cross-provider recovery is intentionally best-effort.
 
 ## Security
 

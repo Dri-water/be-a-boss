@@ -124,6 +124,9 @@ class Settings:
         # Agent tuning is backend-neutral (AGENT_*), with optional per-backend
         # overrides (CLAUDE_*/CODEX_*) that win only when that backend is active.
         backend = os.getenv("BEABOSS_BACKEND", "").strip().lower() or "claude"
+        if backend not in {"claude", "codex"}:
+            raise SystemExit(
+                f"BEABOSS_BACKEND must be 'claude' or 'codex', but got {backend!r}.")
         model, _ = _agent_setting("MODEL", backend)
         cli_path, _ = _agent_setting("CLI_PATH", backend)
         perm, _ = _agent_setting("PERMISSION_MODE", backend)

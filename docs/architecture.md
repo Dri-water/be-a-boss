@@ -123,9 +123,12 @@ reports dirty ones instead of deleting them.
 
 ## State (restart-proof)
 
-`state/` holds JSON: thread registry (thread ⇄ role ⇄ session_id ⇄ cwd/worktree),
-fleet records (worker id, name, task brief, status log), orchestrator session id.
-On restart: threads reattach lazily (`resume=` on next message). The supervision
+`state/` holds JSON: thread registry (thread ⇄ role ⇄ provider-native session IDs ⇄
+cwd/worktree), fleet records (worker id, name, task brief, status log), and the
+active backend. On restart, threads reattach lazily using the selected provider's
+native resume ID. A backend change retains both provider IDs and supplies a bounded
+visible-text hand-off; workspace/git/fleet state is the recovery ground truth because
+hidden model context and in-flight tool state are not portable. The supervision
 inbox itself is in-memory and does not survive a restart, so `Engine.rehydrate()`
 re-surfaces workers still awaiting the orchestrator (blocked, or finished-but-not-
 landed) — delivered on its next wake — rather than silently forgetting them.
