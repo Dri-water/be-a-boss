@@ -196,12 +196,15 @@ def test_busy_session_steers_same_conversation_instead_of_queueing(tmp_path):
 
     async def drive():
         await sess.start()
-        await sess.submit("first", reply_to="dm:1", quiet_ok=True)
+        await sess.submit("first", reply_to="dm:1", quiet_ok=True,
+                          delivery_ids=["first-id"])
         await asyncio.wait_for(backend.turn_started.wait(), timeout=1)
-        await sess.submit("change direction", reply_to="dm:1")
+        await sess.submit("change direction", reply_to="dm:1",
+                          delivery_ids=["second-id"])
         assert sess.pending == 0
         assert sess._active_turn is not None
         assert sess._active_turn.quiet_ok is False
+        assert sess.active_delivery_ids == ["first-id", "second-id"]
         backend.release_turn.set()
         await asyncio.wait_for(sess._queue.join(), timeout=1)
         await sess.stop()

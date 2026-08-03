@@ -123,3 +123,16 @@ def test_pending_delivery_persists(tmp_path):
     s.set_pending_delivery(pending)
     reloaded = CoreStore(tmp_path / "state")
     assert reloaded.pending_delivery == pending   # /approve survives restart
+
+
+def test_pending_boss_turns_persist_until_acknowledged(tmp_path):
+    s = CoreStore(tmp_path / "state")
+    first = s.enqueue_boss_turn("dm:42", "build it")
+    second = s.enqueue_boss_turn("general", "and test it")
+
+    reloaded = CoreStore(tmp_path / "state")
+    assert [v["id"] for v in reloaded.pending_boss_turns] == [first, second]
+    assert reloaded.pending_boss_turns[0]["text"] == "build it"
+
+    reloaded.acknowledge_boss_turns([first])
+    assert [v["id"] for v in CoreStore(tmp_path / "state").pending_boss_turns] == [second]

@@ -1,15 +1,21 @@
 #!/bin/sh
 set -eu
 
-# Codex stores SQLite state beside its credentials. SQLite locking is unreliable on
-# a Windows/macOS Docker bind mount, so /root/.codex is a native named volume and
-# the host login is copied in once as seed material.
-mkdir -p /root/.codex
-if [ ! -f /root/.codex/auth.json ] && [ -f /host-agent-auth/codex/auth.json ]; then
-    install -m 600 /host-agent-auth/codex/auth.json /root/.codex/auth.json
-fi
-if [ ! -f /root/.codex/config.toml ] && [ -f /host-agent-auth/codex/config.toml ]; then
-    install -m 600 /host-agent-auth/codex/config.toml /root/.codex/config.toml
+# CODEX_HOME is the host's live Codex directory, including its rotating OAuth
+# credential. SQLite alone lives on the native named volume via CODEX_SQLITE_HOME.
+# Before this split, the volume held both; merge its non-SQLite session artifacts
+# into the shared home once so existing bot conversations remain resumable.
+mkdir -p /root/.codex /root/.codex-sqlite
+marker=/root/.codex-sqlite/.beaboss-home-migrated
+if [ ! -f "$marker" ]; then
+    for directory in sessions archived_sessions shell_snapshots; do
+        source_dir="/root/.codex-sqlite/$directory"
+        if [ -d "$source_dir" ]; then
+            mkdir -p "/root/.codex/$directory"
+            cp -an "$source_dir/." "/root/.codex/$directory/"
+        fi
+    done
+    touch "$marker"
 fi
 
 exec "$@"

@@ -323,6 +323,7 @@ class Engine:
             # boss actually spoke rather than falling back to an older surface.
             self._last_boss_thread = msg.thread_id
             self.store.set_last_boss_thread(msg.thread_id)
+            delivery_id = self.store.enqueue_boss_turn(msg.thread_id, msg.text)
             await self._ensure_orchestrator(self.main_thread)
             session = await self._ensure_session(
                 self.main_thread, self.store.get(self.main_thread))
@@ -333,9 +334,12 @@ class Engine:
             # honestly claim "Nova is on it" when no one is.
             text = f"[fleet right now: {self._fleet_snapshot()}]\n{msg.text}"
             if msg.media:
-                await session.submit_media(text, msg.media, reply_to=msg.thread_id)
+                await session.submit_media(
+                    text, msg.media, reply_to=msg.thread_id,
+                    delivery_ids=[delivery_id])
             else:
-                await session.submit(text, reply_to=msg.thread_id)
+                await session.submit(
+                    text, reply_to=msg.thread_id, delivery_ids=[delivery_id])
             return
 
         rec = self.store.get(msg.thread_id)
@@ -513,7 +517,7 @@ class Engine:
               "or a worker reports a model/effort problem.\n")
         append = ((base + "\n\n" if base else "")
                   + ORCHESTRATOR_APPEND + mode + routing + handoff)
-        return CoreSession(
+        session = CoreSession(
             thread_id=thread_id, cwd=home,
             speaker=self.orchestrator_speaker(),
             settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
@@ -525,6 +529,9 @@ class Engine:
             model_override=model,
             reasoning_effort_override=effort,
         )
+        session.on_turn_done = self._on_orchestrator_turn_done
+        session.on_turn_error = self._on_orchestrator_turn_error
+        return session
 
     def _make_worker_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
         resume_id, model, effort, handoff = self._session_material(thread_id, rec)
@@ -625,6 +632,32 @@ class Engine:
             await fn(text)
         except Exception:  # noqa: BLE001
             log.exception("dashboard refresh failed")
+
+    async def _on_orchestrator_turn_done(
+        self, session: CoreSession, result: AgentResult,
+    ) -> None:
+        ids = session.active_delivery_ids
+        if not ids:
+            return
+        if result.is_error or (result.subtype and result.subtype != "success"):
+            log.warning("retaining %d failed boss turn(s) for restart recovery", len(ids))
+            return
+        self.store.acknowledge_boss_turns(ids)
+
+    async def _on_orchestrator_turn_error(
+        self, session: CoreSession, error: BaseException,
+    ) -> None:
+        ids = session.active_delivery_ids
+        if not ids:
+            return
+        if isinstance(error, OutboundDeliveryError):
+            # The backend finished; replaying could duplicate external side effects.
+            self.store.acknowledge_boss_turns(ids)
+            log.error("boss turn completed but output delivery failed; not replaying: %s",
+                      error)
+        else:
+            log.warning("retaining %d crashed boss turn(s) for restart recovery: %s",
+                        len(ids), error)
 
     async def _on_worker_turn_done(self, session: CoreSession, result: AgentResult) -> None:
         rec = self.store.get(session.thread_id)
@@ -1480,6 +1513,24 @@ class Engine:
                 "normal STATUS line.\n\n"
                 f"Persisted original brief:\n{rec.task}")
             log.info("automatically resumed worker %s after restart", rec.worker_id)
+        pending = list(self.store.pending_boss_turns)
+        if pending:
+            await self._ensure_orchestrator(self.main_thread)
+            rec = self.store.get(self.main_thread)
+            session = await self._ensure_session(self.main_thread, rec) if rec else None
+            if session is not None:
+                for turn in pending:
+                    self._last_boss_thread = turn["thread_id"]
+                    self.store.set_last_boss_thread(turn["thread_id"])
+                    text = (
+                        "[AUTOMATIC BOSS TURN RECOVERY after a service/backend "
+                        "failure; act on this request now. "
+                        f"Fleet right now: {self._fleet_snapshot()}]\n"
+                        + turn["text"])
+                    await session.submit(
+                        text, reply_to=turn["thread_id"],
+                        delivery_ids=[turn["id"]])
+                log.info("re-enqueued %d durable boss turn(s)", len(pending))
         await self._wake_orchestrator()
 
     async def factory_reset(self) -> str:

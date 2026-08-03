@@ -18,6 +18,9 @@ services:
       PROJECTS_ROOT: /workspace
       STATE_DIR: /data
       AGENT_PERMISSION_MODE: bypassPermissions
+      # Keep only SQLite on Docker's native filesystem. CODEX_HOME remains the
+      # shared host directory so rotating OAuth credentials never diverge.
+      CODEX_SQLITE_HOME: /root/.codex-sqlite
     volumes:
       # Your repos, shared with the host. On Windows this is a bind mount over the
       # WSL2 boundary — fine for edit/commit/run; hot-reload file-watching can lag.
@@ -25,10 +28,10 @@ services:
       # Provider auth sources. Either inactive provider may use the ignored local
       # fallback, so a Claude-only or Codex-only install needs only the matching path.
       - "${HOST_CLAUDE_DIR:-./.auth/claude}:/root/.claude"
-      - "${HOST_CODEX_DIR:-./.auth/codex}:/host-agent-auth/codex:ro"
-      # Keep Codex's SQLite state on a native Linux filesystem; the entrypoint
-      # seeds auth/config from the read-only host directory on first use.
-      - codex_state:/root/.codex
+      - "${HOST_CODEX_DIR:-./.auth/codex}:/root/.codex"
+      # Keep SQLite on a native Linux filesystem; bind-mounted Windows/macOS
+      # filesystems do not provide the locking guarantees Codex needs.
+      - codex_state:/root/.codex-sqlite
       # Bot's own state (topic <-> session map).
       - bot_state:/data
 
@@ -38,6 +41,6 @@ volumes:
     # a rename or move safe: the state always lives in `be-a-boss_bot_state`.
     name: be-a-boss_bot_state
   codex_state:
-    # Provider-native Codex threads + SQLite state, restart-proof and safe on
-    # Docker Desktop hosts where SQLite cannot lock a Windows/macOS bind mount.
+    # Codex SQLite state, restart-proof and safe on Docker Desktop hosts where
+    # SQLite cannot reliably lock a Windows/macOS bind mount.
     name: be-a-boss_codex_state

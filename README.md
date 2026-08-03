@@ -339,9 +339,15 @@ Sessions authenticate through the selected CLI:
 - **Claude:** set `HOST_CLAUDE_DIR` to your host `~/.claude`. For a server,
   `claude setup-token` can provide a dedicated revocable credential instead.
 - **Codex:** sign in with the host Codex CLI, then set `HOST_CODEX_DIR` to your
-  host `~/.codex`. Docker seeds the login from that read-only directory; native
-  resumable threads and SQLite state live in `be-a-boss_codex_state` so locking
-  remains reliable on Windows/macOS Docker Desktop too.
+  host `~/.codex`. Docker shares that live home read/write so Codex's rotating
+  OAuth credential cannot diverge between host and container. `CODEX_SQLITE_HOME`
+  redirects SQLite state to `be-a-boss_codex_state`, preserving reliable locking
+  on Windows/macOS Docker Desktop. Existing container sessions are merged into
+  the shared home automatically on the first upgraded start.
+
+Boss requests are also persisted before dispatch and acknowledged only after a
+successful orchestrator result. If authentication or the service fails mid-turn,
+the request is re-enqueued on restart rather than silently consumed.
 
 Native session IDs are provider-specific. When `BEABOSS_BACKEND` changes, the
 original ID remains stored under its provider and be-a-boss starts/resumes the

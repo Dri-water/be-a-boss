@@ -80,6 +80,7 @@ class Turn:
     images: list[dict] = field(default_factory=list)  # {media_type, data}
     reply_to: str | None = None  # where to post this turn's reply (default: own thread)
     quiet_ok: bool = False       # may end with no reply text (digest wakes) — no "✓ done"
+    delivery_ids: list[str] = field(default_factory=list)
 
 
 def _safe_name(name: str) -> str:
@@ -422,13 +423,16 @@ class CoreSession:
     # ---- messaging -------------------------------------------------------
 
     async def submit(self, text: str, reply_to: str | None = None,
-                     quiet_ok: bool = False) -> None:
+                     quiet_ok: bool = False,
+                     delivery_ids: list[str] | None = None) -> None:
         await self._submit_turn(
-            Turn(text=text, reply_to=reply_to, quiet_ok=quiet_ok))
+            Turn(text=text, reply_to=reply_to, quiet_ok=quiet_ok,
+                 delivery_ids=list(delivery_ids or ())))
 
     async def submit_media(self, caption: str, items: list[MediaIn],
                            reply_to: str | None = None,
-                           quiet_ok: bool = False) -> None:
+                           quiet_ok: bool = False,
+                           delivery_ids: list[str] | None = None) -> None:
         """Save incoming files under the workspace inbox and queue a turn."""
         inbox = self.cwd / INBOX_DIRNAME
         inbox.mkdir(parents=True, exist_ok=True)
@@ -462,7 +466,8 @@ class CoreSession:
                 lines.append(f"- {dest.relative_to(self.cwd)} ({mime or 'unknown type'})")
         text = "\n".join(lines) if lines else "(the user sent media with no caption)"
         await self._submit_turn(
-            Turn(text=text, images=images, reply_to=reply_to, quiet_ok=quiet_ok))
+            Turn(text=text, images=images, reply_to=reply_to, quiet_ok=quiet_ok,
+                 delivery_ids=list(delivery_ids or ())))
 
     async def _submit_turn(self, turn: Turn) -> None:
         """Steer an active native turn when possible; otherwise retain FIFO order.
@@ -490,12 +495,17 @@ class CoreSession:
                 # turn must now answer. The _do_turn_inner caller holds this same Turn
                 # object, so the final-only decision observes the updated flag.
                 active.quiet_ok = active.quiet_ok and turn.quiet_ok
+                active.delivery_ids.extend(turn.delivery_ids)
                 return
         await self._queue.put(turn)
 
     @property
     def pending(self) -> int:
         return self._queue.qsize()
+
+    @property
+    def active_delivery_ids(self) -> list[str]:
+        return list(self._active_turn.delivery_ids) if self._active_turn else []
 
     async def _run(self) -> None:
         while True:

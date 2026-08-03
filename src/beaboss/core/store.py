@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import asdict, dataclass, field, fields as dataclass_fields
 from pathlib import Path
 
@@ -24,6 +25,7 @@ SCHEMA_VERSION = 1
 # Per-office cap on tracked message ids: a factory reset deletes these, and this keeps
 # the state file bounded on a long-lived, chatty deployment. ~10k ids ≈ tens of KB.
 OFFICE_MSG_CAP = 10_000
+BOSS_INBOX_CAP = 100
 
 
 @dataclass
@@ -73,6 +75,10 @@ class CoreStore:
         # Worker topics are deleted wholesale on reset; these have no topic to drop, so
         # a factory reset deletes them by id. Bounded so it can't grow without limit.
         self.office_message_ids: dict[str, list[int]] = {}
+        # Boss turns remain here until the orchestrator backend succeeds. This
+        # closes the gap where a restart or expired credential consumed the chat
+        # update but lost the request from the in-memory session queue.
+        self.pending_boss_turns: list[dict[str, str]] = []
         self._load()
 
     # ---- persistence -----------------------------------------------------
@@ -101,6 +107,13 @@ class CoreStore:
             str(k): [int(i) for i in v]
             for k, v in (raw.get("office_message_ids") or {}).items()
             if isinstance(v, list)}
+        self.pending_boss_turns = [
+            {"id": str(v["id"]), "thread_id": str(v["thread_id"]),
+             "text": str(v["text"])}
+            for v in (raw.get("pending_boss_turns") or [])
+            if isinstance(v, dict)
+            and all(k in v for k in ("id", "thread_id", "text"))
+        ][-BOSS_INBOX_CAP:]
         # Restore every field the current schema knows about (ignoring any it no
         # longer has). Enumerating by hand here silently dropped base_branch/base_sha
         # on restart once — deriving from the dataclass means new fields persist for
@@ -132,6 +145,7 @@ class CoreStore:
             "dashboard_msg_id": self.dashboard_msg_id,
             "pending_delivery": self.pending_delivery,
             "office_message_ids": self.office_message_ids,
+            "pending_boss_turns": self.pending_boss_turns,
             "threads": {k: asdict(v) for k, v in self._threads.items()},
         }
         try:
@@ -209,6 +223,27 @@ class CoreStore:
             self.office_message_ids = {}
             self._flush()
 
+    def enqueue_boss_turn(self, thread_id: str, text: str) -> str:
+        turn_id = uuid.uuid4().hex
+        self.pending_boss_turns.append({
+            "id": turn_id, "thread_id": thread_id, "text": text})
+        if len(self.pending_boss_turns) > BOSS_INBOX_CAP:
+            dropped = len(self.pending_boss_turns) - BOSS_INBOX_CAP
+            del self.pending_boss_turns[:dropped]
+            log.error("boss inbox exceeded %d turns; dropped %d oldest",
+                      BOSS_INBOX_CAP, dropped)
+        self._flush()
+        return turn_id
+
+    def acknowledge_boss_turns(self, turn_ids: list[str]) -> None:
+        ids = set(turn_ids)
+        if not ids:
+            return
+        kept = [turn for turn in self.pending_boss_turns if turn["id"] not in ids]
+        if len(kept) != len(self.pending_boss_turns):
+            self.pending_boss_turns = kept
+            self._flush()
+
     def wipe(self) -> None:
         """Factory reset: forget every thread, the office, and the dashboard."""
         self._threads.clear()
@@ -217,6 +252,7 @@ class CoreStore:
         self.dashboard_msg_id = None
         self.pending_delivery = {}
         self.office_message_ids = {}
+        self.pending_boss_turns = []
         self._flush()
 
     def workers(self) -> dict[str, ThreadRecord]:

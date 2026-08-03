@@ -72,14 +72,18 @@ class FakeSession:
         self.status = "idle"
         self.pending = 0
         self.alive = True
+        self.delivery_ids: list[list[str]] = []
 
-    async def submit(self, text, reply_to=None, quiet_ok=False):
+    async def submit(self, text, reply_to=None, quiet_ok=False, delivery_ids=None):
         self.submitted.append(text)
         self.reply_tos.append(reply_to)
+        self.delivery_ids.append(list(delivery_ids or ()))
 
-    async def submit_media(self, caption, items, reply_to=None):
+    async def submit_media(self, caption, items, reply_to=None, quiet_ok=False,
+                           delivery_ids=None):
         self.media.append((caption, len(items)))
         self.reply_tos.append(reply_to)
+        self.delivery_ids.append(list(delivery_ids or ()))
 
     async def stop(self):
         self.status = "stopped"
@@ -347,6 +351,39 @@ def test_dm_message_routes_to_one_orchestrator_replying_in_the_dm(tmp_path):
     assert "[fleet right now:" in fake.submitted[0]
     assert fake.submitted[0].endswith("change the button")
     assert fake.reply_tos == ["dm:42"]
+    assert len(engine.store.pending_boss_turns) == 1
+    assert fake.delivery_ids == [[engine.store.pending_boss_turns[0]["id"]]]
+
+
+def test_successful_orchestrator_turn_acks_durable_input(tmp_path):
+    engine, _ = _engine(tmp_path)
+    turn_id = engine.store.enqueue_boss_turn("dm:42", "build it")
+
+    class Session:
+        active_delivery_ids = [turn_id]
+
+    class Result:
+        is_error = False
+        subtype = "success"
+
+    asyncio.run(engine._on_orchestrator_turn_done(Session(), Result()))
+    assert CoreStore(tmp_path / "state").pending_boss_turns == []
+
+
+def test_failed_orchestrator_turn_is_replayed_after_restart(tmp_path):
+    engine, _ = _engine(tmp_path)
+    turn_id = engine.store.enqueue_boss_turn("dm:42", "make it beautiful")
+    engine.store.put("general", ThreadRecord(role="orchestrator", name="orchestrator"))
+    engine.store.set_orchestrator_thread("general")
+    fake = FakeSession()
+    engine.sessions["general"] = fake
+
+    asyncio.run(engine.startup_recovery())
+
+    assert "AUTOMATIC BOSS TURN RECOVERY" in fake.submitted[0]
+    assert fake.submitted[0].endswith("make it beautiful")
+    assert fake.reply_tos == ["dm:42"]
+    assert fake.delivery_ids == [[turn_id]]
 
 
 def test_status_parsed_from_full_reply_not_truncated_digest(tmp_path):
