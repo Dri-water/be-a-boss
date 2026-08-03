@@ -56,12 +56,22 @@ def _agent_setting(knob: str, backend: str) -> tuple[str, str]:
 
 # Model tiers the orchestrator picks per worker (fast/routine vs deep/hard) so it stops
 # burning the top model on a rename. The tier NAME is the allowlist — the LLM can only
-# pass one of these three, never a raw (bogus) model id. "" for a tier means "fall
-# through to the global AGENT_MODEL / CLI default", so an unset tier == today's behavior.
+# pass one of these three, never a raw model id. Empty entries fall through to the global
+# AGENT_MODEL / CLI default; Codex has explicit cost-aware defaults for all three tiers.
 _DEFAULT_TIERS = {
     # claude aliases resolve to the current concrete model in the CLI, so they don't rot.
     "claude": {"fast": "haiku", "balanced": "", "deep": "opus"},
-    "codex": {"fast": "", "balanced": "", "deep": ""},  # operator sets CODEX_MODEL_* ids
+    "codex": {
+        "fast": "gpt-5.6-luna",
+        "balanced": "gpt-5.6-terra",
+        "deep": "gpt-5.6-sol",
+    },
+}
+
+_DEFAULT_REASONING_EFFORT_TIERS = {
+    # Claude's model aliases own their provider-specific thinking behavior.
+    "claude": {"fast": "", "balanced": "", "deep": ""},
+    "codex": {"fast": "low", "balanced": "medium", "deep": "high"},
 }
 
 
@@ -71,6 +81,16 @@ def _agent_model_tiers(backend: str) -> dict[str, str]:
     tiers = dict(_DEFAULT_TIERS.get(backend, {}))
     for tier in ("fast", "balanced", "deep"):
         val, _ = _agent_setting(f"MODEL_{tier.upper()}", backend)
+        if val:
+            tiers[tier] = val
+    return tiers
+
+
+def _agent_reasoning_effort_tiers(backend: str) -> dict[str, str]:
+    """Per-tier effort with the same AGENT_/backend-specific override precedence."""
+    tiers = dict(_DEFAULT_REASONING_EFFORT_TIERS.get(backend, {}))
+    for tier in ("fast", "balanced", "deep"):
+        val, _ = _agent_setting(f"REASONING_EFFORT_{tier.upper()}", backend)
         if val:
             tiers[tier] = val
     return tiers
@@ -90,6 +110,7 @@ class Settings:
     bot_name: str
     session_system_append: str | None
     agent_backend: str = "claude"  # "claude" (default) | "codex"
+    reasoning_effort: str | None = None
     # How work lands. "balanced" (default): the orchestrator may merge/PR directly
     # once the boss has clearly told it to ("merge it", "ship it") — a soft,
     # conversational gate, right for greenfield/solo. "conservative": nothing lands
@@ -98,6 +119,7 @@ class Settings:
     # Per-worker model tiers (fast/balanced/deep) -> concrete model ids; the orchestrator
     # picks a tier at spawn. Empty for a tier => fall back to `model` (AGENT_MODEL/default).
     model_tiers: dict[str, str] = field(default_factory=dict)
+    reasoning_effort_tiers: dict[str, str] = field(default_factory=dict)
     # Display-name pool for newly spawned workers. Existing workers retain the name
     # and worker_id persisted in their ThreadRecord across config changes/restarts.
     worker_names: tuple[str, ...] = DEFAULT_WORKER_NAMES
@@ -105,7 +127,27 @@ class Settings:
     def resolve_worker_model(self, tier: str | None) -> str | None:
         """A worker's model from its tier, with a safe fallback chain:
         per-tier id -> global AGENT_MODEL (self.model) -> None (CLI default)."""
-        return self.model_tiers.get(tier or "", "") or self.model or None
+        return self.resolve_worker_profile(tier)[1]
+
+    def resolve_worker_profile(
+        self, tier: str | None,
+    ) -> tuple[str, str | None, str | None]:
+        """Return canonical tier plus its concrete model and reasoning effort."""
+        selected = tier or "balanced"
+        model = self.model_tiers.get(selected, "") or self.model or None
+        effort = (
+            self.reasoning_effort_tiers.get(selected, "")
+            or self.reasoning_effort
+            or None
+        )
+        return selected, model, effort
+
+    def worker_profiles(self) -> dict[str, tuple[str | None, str | None]]:
+        """Effective routing table for health checks and orchestrator context."""
+        return {
+            tier: self.resolve_worker_profile(tier)[1:]
+            for tier in ("fast", "balanced", "deep")
+        }
 
     @classmethod
     def from_env(cls, env_path: str | os.PathLike[str] | None = None) -> "Settings":
@@ -128,6 +170,7 @@ class Settings:
             raise SystemExit(
                 f"BEABOSS_BACKEND must be 'claude' or 'codex', but got {backend!r}.")
         model, _ = _agent_setting("MODEL", backend)
+        reasoning_effort, _ = _agent_setting("REASONING_EFFORT", backend)
         cli_path, _ = _agent_setting("CLI_PATH", backend)
         perm, _ = _agent_setting("PERMISSION_MODE", backend)
         max_turns_raw, max_turns_var = _agent_setting("MAX_TURNS", backend)
@@ -156,10 +199,12 @@ class Settings:
                 else None
             ),
             agent_backend=backend,
+            reasoning_effort=(reasoning_effort or None),
             deploy_braveness=(
                 "conservative"
                 if os.getenv("DEPLOY_BRAVENESS", "").strip().lower() == "conservative"
                 else "balanced"),
             model_tiers=_agent_model_tiers(backend),
+            reasoning_effort_tiers=_agent_reasoning_effort_tiers(backend),
             worker_names=parse_worker_names(os.getenv("WORKER_NAMES")),
         )

@@ -172,6 +172,7 @@ class CoreSession:
         final_only: bool = False,
         footer_fn: Callable[[], str | None] | None = None,
         model_override: str | None = None,
+        reasoning_effort_override: str | None = None,
     ):
         self.thread_id = thread_id
         self.cwd = cwd
@@ -194,6 +195,7 @@ class CoreSession:
         self._footer_fn = footer_fn
         # A per-session model (a worker's dispatched tier); None => the global settings.model.
         self._model_override = model_override
+        self._reasoning_effort_override = reasoning_effort_override
         self._tool_buf: list[str] = []   # batched 🔧 lines (streaming sessions)
         # Both providers receive the same prompt, tools, resume id, model, and cwd.
         # The adapter below is the only provider-specific choice in a session.
@@ -206,6 +208,10 @@ class CoreSession:
                 system_prompt=self._resolve_append(),
                 resume_id=self.session_id,
                 model=self._model_override or self.settings.model,
+                reasoning_effort=(
+                    self._reasoning_effort_override
+                    or self.settings.reasoning_effort
+                ),
                 cli_path=self.settings.cli_path,
                 worker_thread_id=(self.thread_id
                                   if self.speaker.role == "worker" else None),

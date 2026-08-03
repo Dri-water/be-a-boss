@@ -262,7 +262,8 @@ runs locally, gated by who can run a process on the host.
 | `WORKER_NAMES` | – | Comma-separated worker display-name pool (default: built-in neutral names) |
 | `TELEGRAM_CHAT_ID` | – | Pin the bot to one group (logged on first run) |
 | `DEPLOY_BRAVENESS` | – | How work lands: `balanced` (default; orchestrator merges on your say-so) or `conservative` (explicit `/approve` only) |
-| `AGENT_MODEL`, `AGENT_MAX_TURNS` | – | Backend-neutral session tuning (override per backend with `CLAUDE_*` / `CODEX_*`) |
+| `AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `AGENT_MAX_TURNS` | – | Backend-neutral session tuning (override per backend with `CLAUDE_*` / `CODEX_*`) |
+| `AGENT_MODEL_FAST/BALANCED/DEEP`, `AGENT_REASONING_EFFORT_FAST/BALANCED/DEEP` | – | Worker routing overrides. Codex defaults: Luna/low, Terra/medium, Sol/high; `CODEX_*` overrides just Codex. |
 
 Docker mounts `HOST_DOCUMENTS` → `/workspace` and sets `PROJECTS_ROOT=/workspace`,
 so `/new myapp` targets `/workspace/myapp`. Use forward slashes on all platforms

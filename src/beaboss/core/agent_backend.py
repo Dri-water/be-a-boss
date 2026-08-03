@@ -198,6 +198,7 @@ class CodexBackend:
         system_prompt: str = "",
         resume_id: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         cli_path: str | None = None,
         worker_thread_id: str | None = None,
         tool_namespaces: tuple[ToolNamespace, ...] = (),
@@ -207,6 +208,7 @@ class CodexBackend:
         self._system_prompt = system_prompt
         self._thread_id = resume_id
         self._model = model
+        self._reasoning_effort = reasoning_effort
         self._cli_path = cli_path
         self._worker_thread_id = worker_thread_id
         self._tool_namespaces = tool_namespaces
@@ -295,6 +297,9 @@ class CodexBackend:
         })
         await self._notify("initialized", {})
 
+        if self._model:
+            await self._validate_profile()
+
         common = self._thread_options(include_dynamic_tools=not bool(self._thread_id))
         if self._thread_id:
             response = await self._request(
@@ -309,17 +314,61 @@ class CodexBackend:
         self._thread_id = sid
         self._emit_init = True
 
+    async def _validate_profile(self) -> None:
+        """Fail loudly when routing points at an unavailable/incompatible profile.
+
+        A silent provider fallback can turn a cheap worker into the account's most
+        expensive default. App-server's model catalog is the runtime source of truth,
+        so validate before creating or resuming the thread.
+        """
+        result = await self._request(
+            "model/list", {"limit": 100, "includeHidden": True})
+        models = result.get("data") or []
+        selected = next((entry for entry in models if self._model in {
+            entry.get("id"), entry.get("model"), entry.get("slug")}), None)
+        if selected is None:
+            available = [str(entry.get("id") or entry.get("model") or "")
+                         for entry in models]
+            available = [name for name in available if name]
+            raise RuntimeError(
+                f"configured Codex model {self._model!r} is unavailable; "
+                f"model/list advertised: {', '.join(available) or '(none)'}")
+        if not self._reasoning_effort:
+            return
+        raw_efforts = (
+            selected.get("supportedReasoningEfforts")
+            or selected.get("supported_reasoning_efforts")
+            or selected.get("supportedReasoningLevels")
+            or selected.get("supported_reasoning_levels")
+            or []
+        )
+        supported = {
+            str(item.get("reasoningEffort") or item.get("effort") or item)
+            if isinstance(item, dict) else str(item)
+            for item in raw_efforts
+        }
+        if supported and self._reasoning_effort not in supported:
+            raise RuntimeError(
+                f"configured Codex effort {self._reasoning_effort!r} is not supported "
+                f"by {self._model}; supported: {', '.join(sorted(supported))}")
+
     async def send(self, turn: "Turn") -> None:
         if not self._thread_id:
             raise RuntimeError("Codex thread is not initialized")
         self._final_text = ""
         self._turn_error = ""
-        response = await self._request("turn/start", {
+        params: dict[str, Any] = {
             "threadId": self._thread_id,
             "input": self._turn_inputs(turn),
             "cwd": str(self._cwd),
             "approvalPolicy": self._approval_policy(),
-        })
+        }
+        # Installed app-server exposes effort as a sticky turn override (not a
+        # ThreadStartParams field). Sending it here also corrects resumed threads
+        # that were originally created under a different user-level default.
+        if self._reasoning_effort:
+            params["effort"] = self._reasoning_effort
+        response = await self._request("turn/start", params)
         turn_data = response.get("turn") or {}
         self._active_turn_id = str(turn_data.get("id") or "") or None
 

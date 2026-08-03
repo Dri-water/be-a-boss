@@ -96,7 +96,10 @@ flowchart LR
 
 The orchestrator is itself a coding-agent session — its "powers" are MCP tools exposed
 by the engine: `spawn_worker(repo, task)`, `message_worker(id, text)`,
-`worker_status(id?)`, `dismiss_worker(id)` — plus `inspect_repo`, `review_worker`, `run_checks`, `deliver_worker`. Its system prompt
+`worker_status(id?)`, `dismiss_worker(id)` — plus `routing_status`, `inspect_repo`,
+`review_worker`, `run_checks`, `deliver_worker`. `routing_status` exposes the effective
+fast/balanced/deep model-and-effort map and persisted worker profiles so the
+orchestrator can diagnose collapsed or unexpectedly expensive routing itself. Its system prompt
 teaches briefing etiquette: self-contained briefs, explicit report-back markers,
 escalate-don't-guess, and the code-quality bar it holds workers to.
 

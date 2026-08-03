@@ -3,6 +3,8 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from beaboss.core.agent_backend import (
     AgentInit,
     AgentOutput,
@@ -123,6 +125,48 @@ def test_steer_uses_active_turn_precondition():
         "input": [{"type": "text", "text": "change direction"}],
         "expectedTurnId": "turn-7",
     })]
+
+
+def test_reasoning_effort_is_applied_as_sticky_turn_override():
+    backend = CodexBackend(
+        Path("."), resume_id="thread-1", model="gpt-5.6-terra",
+        reasoning_effort="medium")
+    requests: list[tuple[str, dict]] = []
+
+    async def request(method, params):
+        requests.append((method, params))
+        return {"turn": {"id": "turn-1"}}
+
+    backend._request = request
+    asyncio.run(backend.send(Turn("do it")))
+
+    method, params = requests[0]
+    assert method == "turn/start"
+    assert params["effort"] == "medium"
+    assert "effort" not in backend._thread_options(include_dynamic_tools=True)
+
+
+def test_profile_validation_rejects_unavailable_or_unsupported_config():
+    backend = CodexBackend(
+        Path("."), model="gpt-good", reasoning_effort="high")
+
+    async def unavailable(_method, _params):
+        return {"data": [{"id": "gpt-other"}]}
+
+    backend._request = unavailable
+    with pytest.raises(RuntimeError, match="gpt-good.*unavailable"):
+        asyncio.run(backend._validate_profile())
+
+    async def unsupported(_method, _params):
+        return {"data": [{
+            "id": "gpt-good",
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "low"}, {"reasoningEffort": "medium"}],
+        }]}
+
+    backend._request = unsupported
+    with pytest.raises(RuntimeError, match="high.*not supported"):
+        asyncio.run(backend._validate_profile())
 
 
 def test_steer_race_falls_back_without_losing_input():

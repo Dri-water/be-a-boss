@@ -21,12 +21,18 @@ def test_provider_native_sessions_and_models_roundtrip(tmp_path):
     s.put("100", ThreadRecord(
         role="worker", name="Nova", backend="codex", session_id="cx-2",
         session_ids={"claude": "cl-1", "codex": "cx-2"},
-        model="gpt-current", models={"claude": "opus", "codex": "gpt-current"}))
+        tier="balanced", model="gpt-current",
+        models={"claude": "opus", "codex": "gpt-current"},
+        reasoning_effort="medium",
+        reasoning_efforts={"codex": "medium"}))
 
     rec = CoreStore(tmp_path / "state").get("100")
     assert rec.backend == "codex"
     assert rec.session_ids == {"claude": "cl-1", "codex": "cx-2"}
     assert rec.models == {"claude": "opus", "codex": "gpt-current"}
+    assert rec.tier == "balanced"
+    assert rec.reasoning_effort == "medium"
+    assert rec.reasoning_efforts == {"codex": "medium"}
 
 
 def test_orchestrator_thread_persists(tmp_path):

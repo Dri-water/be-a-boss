@@ -71,6 +71,25 @@ def test_pong_roundtrips_through_codex(tmp_path):
     print(f"\nE2E PROOF: PONG round-tripped through the seam. replies={replies}")
 
 
+def test_explicit_worker_profile_roundtrips_through_codex(tmp_path):
+    """Prove the balanced default is advertised and accepted by the real server."""
+    backend = CodexBackend(
+        tmp_path, model="gpt-5.6-terra", reasoning_effort="medium")
+
+    async def drive():
+        await backend.start()  # includes model/list compatibility validation
+        try:
+            await backend.send(Turn("Reply with exactly PROFILE_OK and nothing else."))
+            events = [event async for event in backend.receive()]
+            result = events[-1]
+            assert isinstance(result, AgentResult) and not result.is_error
+            assert (result.result or "").strip() == "PROFILE_OK"
+        finally:
+            await backend.stop()
+
+    asyncio.run(asyncio.wait_for(drive(), timeout=120))
+
+
 def test_dynamic_tool_survives_native_resume(tmp_path):
     calls: list[str] = []
 

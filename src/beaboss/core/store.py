@@ -47,8 +47,11 @@ class ThreadRecord:
     checks_sha: str = ""     # branch tip when checks last ran (to detect staleness)
     task: str = ""           # the brief, verbatim
     worker_status: str = ""   # working | done | blocked | dismissed | delivered
+    tier: str = ""            # requested routing tier: fast | balanced | deep
     model: str = ""          # resolved model id for this worker ("" = global default)
     models: dict[str, str] = field(default_factory=dict)
+    reasoning_effort: str = ""  # resolved effort for the active backend
+    reasoning_efforts: dict[str, str] = field(default_factory=dict)
 
 
 class CoreStore:

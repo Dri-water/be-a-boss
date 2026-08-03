@@ -52,6 +52,49 @@ class DeliveryPlan:
     checks_note: str
 
 
+_EFFORT_RANK = {
+    "none": 0, "minimal": 0, "low": 1, "medium": 2,
+    "high": 3, "xhigh": 4, "max": 5, "ultra": 6,
+}
+
+
+def _routing_warnings(settings) -> list[str]:
+    """Detect expensive or collapsed routing before it silently reaches workers."""
+    if settings.agent_backend != "codex":
+        return []
+    profiles = settings.worker_profiles()
+    warnings: list[str] = []
+    if len(set(profiles.values())) == 1:
+        warnings.append("all worker tiers resolve to the same model and effort")
+    for tier in ("fast", "balanced", "deep"):
+        model, effort = profiles[tier]
+        if not model or not effort:
+            warnings.append(
+                f"{tier} has no explicit model/effort and may inherit global defaults")
+    fast_effort = (profiles["fast"][1] or "").lower()
+    balanced_effort = (profiles["balanced"][1] or "").lower()
+    if _EFFORT_RANK.get(fast_effort, -1) >= _EFFORT_RANK["high"]:
+        warnings.append(f"fast uses expensive reasoning effort '{fast_effort}'")
+    if _EFFORT_RANK.get(balanced_effort, -1) > _EFFORT_RANK["high"]:
+        warnings.append(f"balanced uses unusually expensive effort '{balanced_effort}'")
+    ranks = [_EFFORT_RANK.get((profiles[t][1] or "").lower(), -1)
+             for t in ("fast", "balanced", "deep")]
+    if min(ranks) >= 0 and ranks != sorted(ranks):
+        warnings.append("reasoning effort decreases as task difficulty increases")
+    return warnings
+
+
+def _routing_report(settings) -> str:
+    lines = [f"backend: {settings.agent_backend}", "worker routing:"]
+    for tier, (model, effort) in settings.worker_profiles().items():
+        lines.append(
+            f"- {tier}: model={model or '(backend default)'}; "
+            f"effort={effort or '(backend default)'}")
+    warnings = _routing_warnings(settings)
+    lines.append("health: " + ("; ".join(warnings) if warnings else "healthy"))
+    return "\n".join(lines)
+
+
 
 # --- repo grounding (so the orchestrator manages from knowledge, not vibes) ----
 
@@ -158,6 +201,8 @@ class Engine:
         # The thread that is the orchestrator's "office". Transports may override;
         # the Telegram adapter's General topic maps to "general".
         self.main_thread = "general"
+        for warning in _routing_warnings(settings):
+            log.warning("agent routing configuration: %s", warning)
 
     # ---- wiring ----------------------------------------------------------
 
@@ -395,11 +440,12 @@ class Engine:
 
     def _session_material(
         self, thread_id: str, rec: ThreadRecord,
-    ) -> tuple[str | None, str | None, str]:
-        """Resolve provider-native resume/model data and any lossy hand-off text."""
+    ) -> tuple[str | None, str | None, str | None, str]:
+        """Resolve provider-native session/profile data and any lossy hand-off text."""
         desired = self.settings.agent_backend
         ids = dict(rec.session_ids)
         models = dict(rec.models)
+        efforts = dict(rec.reasoning_efforts)
         source = rec.backend
         if rec.session_id:
             if not source:
@@ -410,9 +456,12 @@ class Engine:
             # created for the then-active backend; treat the configured backend as
             # its owner. Records with a session are inferred above.
             models.setdefault(source or desired, rec.model)
+        if rec.reasoning_effort:
+            efforts.setdefault(source or desired, rec.reasoning_effort)
 
         resume_id = ids.get(desired) or None
         model = models.get(desired) or self.settings.model
+        effort = efforts.get(desired) or self.settings.reasoning_effort
         handoff = ""
         source_with_session = (
             source if source and source != desired and ids.get(source) else
@@ -431,11 +480,13 @@ class Engine:
             session_ids=ids,
             model=model or "",
             models=models,
+            reasoning_effort=effort or "",
+            reasoning_efforts=efforts,
         )
-        return resume_id, model, handoff
+        return resume_id, model, effort, handoff
 
     def _make_direct_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
-        resume_id, model, handoff = self._session_material(thread_id, rec)
+        resume_id, model, effort, handoff = self._session_material(thread_id, rec)
         return CoreSession(
             thread_id=thread_id, cwd=Path(rec.cwd),
             speaker=Speaker(role="direct", name=self.settings.bot_name),
@@ -443,18 +494,25 @@ class Engine:
             on_session_id=self._sid_saver(thread_id), session_id=resume_id,
             system_append=DEFAULT_SESSION_APPEND + handoff,
             model_override=model,
+            reasoning_effort_override=effort,
         )
 
     def _make_orchestrator_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
-        resume_id, model, handoff = self._session_material(thread_id, rec)
+        resume_id, model, effort, handoff = self._session_material(thread_id, rec)
         home = self.settings.state_dir / "orchestrator-home"
         home.mkdir(parents=True, exist_ok=True)
         base = (self.settings.session_system_append
                 if self.settings.session_system_append is not None else "")
         mode = (DELIVERY_CONSERVATIVE
                 if self.settings.deploy_braveness == "conservative" else DELIVERY_BALANCED)
+        routing = (
+            "\n\nRUNTIME AGENT ROUTING (code-generated ground truth):\n"
+            + _routing_report(self.settings)
+            + "\nChoose fast/balanced/deep deliberately when spawning. Use "
+              "routing_status whenever routing looks collapsed, unexpectedly costly, "
+              "or a worker reports a model/effort problem.\n")
         append = ((base + "\n\n" if base else "")
-                  + ORCHESTRATOR_APPEND + mode + handoff)
+                  + ORCHESTRATOR_APPEND + mode + routing + handoff)
         return CoreSession(
             thread_id=thread_id, cwd=home,
             speaker=self.orchestrator_speaker(),
@@ -465,10 +523,11 @@ class Engine:
             final_only=True,  # text the boss one clean reply, don't narrate
             footer_fn=self._drain_turn_actions,  # …plus a truthful ⚙ action line
             model_override=model,
+            reasoning_effort_override=effort,
         )
 
     def _make_worker_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
-        resume_id, model, handoff = self._session_material(thread_id, rec)
+        resume_id, model, effort, handoff = self._session_material(thread_id, rec)
         cwd = Path(rec.cwd)
         # The worker's full system prompt = the base env note + the worker role note.
         base = (self.settings.session_system_append
@@ -482,6 +541,7 @@ class Engine:
             on_session_id=self._sid_saver(thread_id), session_id=resume_id,
             system_append=worker_append,
             model_override=model,
+            reasoning_effort_override=effort,
         )
         session.on_turn_done = self._on_worker_turn_done
         session.on_turn_error = self._on_worker_turn_error
@@ -685,6 +745,26 @@ class Engine:
             return {"content": [{"type": "text", "text": text}], "is_error": True}
 
         @fleet_tool(
+            "routing_status",
+            "Inspect your own agent-routing configuration and health. Returns the "
+            "effective fast/balanced/deep model+effort map and the profiles persisted "
+            "for workers. Use this before diagnosing cost, latency, model, or tier issues.",
+            {"type": "object", "properties": {}},
+        )
+        async def routing_status(args: dict[str, Any]) -> dict[str, Any]:
+            lines = [_routing_report(engine.settings), "", "persisted workers:"]
+            workers = list(engine.store.workers().values())
+            if not workers:
+                lines.append("- (none)")
+            for rec in workers:
+                lines.append(
+                    f"- {rec.worker_id}: tier={rec.tier or '(legacy/unknown)'}; "
+                    f"model={rec.model or '(not recorded)'}; "
+                    f"effort={rec.reasoning_effort or '(not recorded)'}; "
+                    f"status={rec.worker_status or 'working'}")
+            return ok("\n".join(lines))
+
+        @fleet_tool(
             "list_repos",
             "List the repositories available under the projects root, with their "
             "path and a one-line description. inspect_repo one before you brief.",
@@ -777,8 +857,12 @@ class Engine:
                     continue
                 live = engine.sessions.get(tid)
                 state = live.status if live else "dormant"
+                profile = (
+                    f"{rec.tier or 'legacy'}:{rec.model or 'default'}/"
+                    f"{rec.reasoning_effort or 'default'}")
                 rows.append(f"- {cid} ({rec.name}) [{state}] repo={rec.repo} "
-                            f"status={rec.worker_status or 'working'} task={rec.task[:100]}")
+                            f"status={rec.worker_status or 'working'} profile={profile} "
+                            f"task={rec.task[:100]}")
             return ok("\n".join(rows) or "(no workers)")
 
         @fleet_tool(
@@ -917,7 +1001,7 @@ class Engine:
         repo = self._resolve_repo(repo_raw)
         if repo is None:
             return err(f"no such repo: {repo_raw}")
-        model = self.settings.resolve_worker_model(tier)  # allowlisted by construction
+        selected_tier, model, effort = self.settings.resolve_worker_profile(tier)
 
         taken = {r.worker_id for r in self.store.workers().values()}
         taken |= {r.name.lower() for r in self.store.workers().values()}
@@ -957,9 +1041,12 @@ class Engine:
         rec = ThreadRecord(
             role="worker", name=name, cwd=str(cwd), worker_id=worker_id,
             repo=str(repo), base_branch=base_branch,
-            task=task.strip(), worker_status="working", model=model or "",
+            task=task.strip(), worker_status="working", tier=selected_tier,
+            model=model or "", reasoning_effort=effort or "",
             backend=self.settings.agent_backend,
             models=({self.settings.agent_backend: model} if model else {}),
+            reasoning_efforts=(
+                {self.settings.agent_backend: effort} if effort else {}),
         )
         self.store.put(thread_id, rec)
 
@@ -981,11 +1068,12 @@ class Engine:
             f"[Brief from the orchestrator]\n{task.strip()}"
         )
         await self._refresh_dashboard()
-        self._action(f"spawn_worker → {name} · {repo.name}"
-                     + (f" [{tier}]" if tier else ""))
+        profile = f"{selected_tier} → {model or 'default'}/{effort or 'default'}"
+        self._action(f"spawn_worker → {name} · {repo.name} [{profile}]")
         return {"content": [{"type": "text", "text":
                 f"spawned worker {worker_id} ({name}) in {iso_note}; "
-                f"thread created. They will report back via the fleet inbox."}]}
+                f"profile {profile}; thread created. They will report back via "
+                f"the fleet inbox."}]}
 
     async def _message_worker(self, worker_id: str, text: str) -> dict[str, Any]:
         def err(t: str) -> dict[str, Any]:

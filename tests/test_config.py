@@ -13,6 +13,12 @@ _KEYS = [
     "AGENT_MODEL_FAST", "AGENT_MODEL_BALANCED", "AGENT_MODEL_DEEP",
     "CLAUDE_MODEL_FAST", "CLAUDE_MODEL_BALANCED", "CLAUDE_MODEL_DEEP",
     "CODEX_MODEL_FAST", "CODEX_MODEL_BALANCED", "CODEX_MODEL_DEEP", "DEPLOY_BRAVENESS",
+    "AGENT_REASONING_EFFORT", "CODEX_REASONING_EFFORT", "CLAUDE_REASONING_EFFORT",
+    "AGENT_REASONING_EFFORT_FAST", "AGENT_REASONING_EFFORT_BALANCED",
+    "AGENT_REASONING_EFFORT_DEEP", "CODEX_REASONING_EFFORT_FAST",
+    "CODEX_REASONING_EFFORT_BALANCED", "CODEX_REASONING_EFFORT_DEEP",
+    "CLAUDE_REASONING_EFFORT_FAST", "CLAUDE_REASONING_EFFORT_BALANCED",
+    "CLAUDE_REASONING_EFFORT_DEEP",
     "WORKER_NAMES",
 ]
 
@@ -204,6 +210,29 @@ def test_model_tier_env_override(clean_env, monkeypatch):
     s = Settings.from_env(clean_env)
     assert s.model_tiers["fast"] == "custom-fast"
     assert s.model_tiers["deep"] == "claude-deep"
+
+
+def test_codex_worker_profiles_have_safe_automatic_defaults(clean_env, monkeypatch):
+    monkeypatch.setenv("BEABOSS_BACKEND", "codex")
+    s = Settings.from_env(clean_env)
+    assert s.worker_profiles() == {
+        "fast": ("gpt-5.6-luna", "low"),
+        "balanced": ("gpt-5.6-terra", "medium"),
+        "deep": ("gpt-5.6-sol", "high"),
+    }
+    assert s.resolve_worker_profile(None) == (
+        "balanced", "gpt-5.6-terra", "medium")
+
+
+def test_codex_profile_env_overrides_model_and_effort(clean_env, monkeypatch):
+    monkeypatch.setenv("BEABOSS_BACKEND", "codex")
+    monkeypatch.setenv("AGENT_MODEL_FAST", "neutral-fast")
+    monkeypatch.setenv("CODEX_MODEL_FAST", "codex-fast")
+    monkeypatch.setenv("AGENT_REASONING_EFFORT_FAST", "minimal")
+    monkeypatch.setenv("CODEX_REASONING_EFFORT_DEEP", "xhigh")
+    s = Settings.from_env(clean_env)
+    assert s.resolve_worker_profile("fast") == ("fast", "codex-fast", "minimal")
+    assert s.resolve_worker_profile("deep") == ("deep", "gpt-5.6-sol", "xhigh")
 
 
 def test_resolve_worker_model_fallback(clean_env, monkeypatch):

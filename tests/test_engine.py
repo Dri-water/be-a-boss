@@ -933,6 +933,8 @@ def test_spawn_worker_records_dispatched_tier_model(tmp_path, monkeypatch):
     record so it's deterministic and survives a restart."""
     engine, t = _engine(tmp_path)
     engine.settings.model_tiers = {"fast": "haiku", "balanced": "", "deep": "opus"}
+    engine.settings.reasoning_effort_tiers = {
+        "fast": "low", "balanced": "medium", "deep": "high"}
     (tmp_path / "projects" / "myrepo").mkdir(parents=True)
 
     async def fake_is_git(path): return True
@@ -954,6 +956,10 @@ def test_spawn_worker_records_dispatched_tier_model(tmp_path, monkeypatch):
     assert res.get("is_error") is not True
     recs = list(engine.store.workers().values())
     assert len(recs) == 1 and recs[0].model == "opus"     # deep -> opus, persisted
+    assert recs[0].tier == "deep"
+    assert recs[0].reasoning_effort == "high"
+    assert recs[0].reasoning_efforts == {"claude": "high"}
+    assert "[deep → opus/high]" in (engine._drain_turn_actions() or "")
 
 
 def test_spawn_uses_fresh_identity_when_old_worker_branch_survives(tmp_path, monkeypatch):
@@ -1006,13 +1012,47 @@ def test_spawn_worker_rejects_bogus_tier(tmp_path):
 
 
 def test_make_worker_session_uses_dispatched_model(tmp_path):
-    """The persisted model reaches the CoreSession as its override — restart-proof,
-    since _make_worker_session reads rec.model, not the (gone) tier."""
+    """The persisted model and effort reach CoreSession across a restart."""
     engine, t = _engine(tmp_path)
     rec = ThreadRecord(role="worker", name="Nova", worker_id="nova",
-                       cwd=str(tmp_path), repo=str(tmp_path), model="haiku")
+                       cwd=str(tmp_path), repo=str(tmp_path), model="haiku",
+                       reasoning_effort="low")
     sess = engine._make_worker_session("55", rec)
     assert sess._model_override == "haiku"
+    assert sess._reasoning_effort_override == "low"
+
+
+def test_routing_status_is_model_visible_and_reports_health(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.settings.agent_backend = "codex"
+    engine.settings.model_tiers = {
+        "fast": "gpt-5.6-luna", "balanced": "gpt-5.6-terra",
+        "deep": "gpt-5.6-sol"}
+    engine.settings.reasoning_effort_tiers = {
+        "fast": "low", "balanced": "medium", "deep": "high"}
+    namespace = engine._build_fleet_tools()
+    tool = next(spec for spec in namespace.tools if spec.name == "routing_status")
+
+    result = asyncio.run(tool.handler({}))
+    text = result["content"][0]["text"]
+
+    assert "gpt-5.6-luna" in text and "gpt-5.6-sol" in text
+    assert "health: healthy" in text
+
+
+def test_routing_health_detects_maxed_out_fast_tier(tmp_path):
+    from beaboss.core.engine import _routing_warnings
+    engine, _ = _engine(tmp_path)
+    engine.settings.agent_backend = "codex"
+    engine.settings.model_tiers = {tier: "gpt-5.6-sol" for tier in (
+        "fast", "balanced", "deep")}
+    engine.settings.reasoning_effort_tiers = {tier: "high" for tier in (
+        "fast", "balanced", "deep")}
+
+    warnings = _routing_warnings(engine.settings)
+
+    assert any("same model and effort" in warning for warning in warnings)
+    assert any("fast uses expensive" in warning for warning in warnings)
 
 
 def test_codex_backend_applies_equally_to_every_session_role(tmp_path):
