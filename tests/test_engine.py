@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import subprocess
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import pytest
@@ -536,6 +538,13 @@ def test_factory_reset_wipes_everything(tmp_path):
     engine.sessions["general"] = FakeSession()
     engine._note("stale note")
     engine._pending_delivery["nova"] = "merge"
+    state_dir = tmp_path / "state"
+    (state_dir / "core.json.pre-upgrade").write_text(
+        '{"old_prompt":"sensitive history"}', encoding="utf-8")
+    (state_dir / "beaboss.log").write_text(
+        "old conversation\n", encoding="utf-8")
+    (state_dir / "beaboss.log.1").write_text(
+        "older conversation\n", encoding="utf-8")
 
     result = asyncio.run(engine.factory_reset())
     assert "Factory reset complete" in result
@@ -548,6 +557,52 @@ def test_factory_reset_wipes_everything(tmp_path):
     assert engine.sessions == {}
     assert engine._inbox == [] and engine._pending_delivery == {}
     assert not dest.exists()                   # dirty worktree force-removed
+    assert not (state_dir / "core.json.pre-upgrade").exists()
+    assert (state_dir / "beaboss.log").read_text(encoding="utf-8") == ""
+    assert not (state_dir / "beaboss.log.1").exists()
+
+
+def test_factory_reset_preserves_active_log_handler_without_old_history(tmp_path):
+    engine, _ = _engine(tmp_path)
+    log_path = tmp_path / "state" / "beaboss.log"
+    handler = RotatingFileHandler(
+        log_path, maxBytes=1024, backupCount=1, encoding="utf-8")
+    app_log = logging.getLogger("beaboss")
+    app_log.addHandler(handler)
+    previous_level = app_log.level
+    app_log.setLevel(logging.INFO)
+    try:
+        app_log.info("pre-reset secret")
+        handler.flush()
+        asyncio.run(engine.factory_reset())
+        handler.flush()
+        text = log_path.read_text(encoding="utf-8")
+        assert "pre-reset secret" not in text
+        assert "factory reset executed" in text
+    finally:
+        app_log.setLevel(previous_level)
+        app_log.removeHandler(handler)
+        handler.close()
+
+
+def test_factory_reset_discloses_history_files_it_cannot_erase(tmp_path, monkeypatch):
+    engine, _ = _engine(tmp_path)
+    backup = tmp_path / "state" / "core.json.pre-upgrade"
+    backup.write_text("old history", encoding="utf-8")
+    real_unlink = Path.unlink
+
+    def fail_target(path: Path, *args, **kwargs):
+        if path == backup:
+            raise PermissionError("locked")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_target)
+    result = asyncio.run(engine.factory_reset())
+
+    assert "active bot state is clean" in result
+    assert "core.json.pre-upgrade" in result
+    assert "full history purge" in result
+    assert backup.exists()
 
 
 def test_dismissed_worker_is_not_resummoned(tmp_path):

@@ -346,7 +346,7 @@ Commands in **General**:
 | `/list` | All threads (orchestrator, workers, direct) + status |
 | `/status` | Bot health |
 | `/setup` | Check the group is configured right |
-| `/reset` | Factory reset — wipe all memory, state, worker topics, and the conversation itself: on web/CLI the log is cleared; on Telegram the #general/DM messages are deleted if I have the Delete-Messages right (asks to confirm) |
+| `/reset` | Factory reset — wipe all memory, state, diagnostic state snapshots, persisted be-a-boss log files in the state volume, worker topics, and the conversation itself: on web/CLI the surface log is cleared; on Telegram the #general/DM messages are deleted if I have the Delete-Messages right (asks to confirm). Any file-erasure failure is reported explicitly. |
 | `/whoami` | Your Telegram id + the chat id (handy for the allowlist) |
 
 In any **session/worker topic**:

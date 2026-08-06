@@ -2768,6 +2768,27 @@ class Engine:
         # projects until the boss sends the next message.
         self._last_organization = None
         await self._refresh_organization()
+        # A reset must not leave old prompts and replies recoverable through our own
+        # diagnostic artifacts.  Keep the freshly-written core.json/organization.json,
+        # but remove any pre-migration snapshots and rotated logs.  Truncate the live
+        # log instead of unlinking it: a running RotatingFileHandler may still hold the
+        # inode, and future diagnostics after the reset must remain visible.
+        history_cleanup_failures: list[str] = []
+        for backup in self.settings.state_dir.glob("core.json.*"):
+            try:
+                backup.unlink()
+            except OSError:
+                history_cleanup_failures.append(backup.name)
+        live_log = self.settings.state_dir / "beaboss.log"
+        try:
+            live_log.write_text("", encoding="utf-8")
+        except OSError:
+            history_cleanup_failures.append(live_log.name)
+        for rotated_log in self.settings.state_dir.glob("beaboss.log.*"):
+            try:
+                rotated_log.unlink()
+            except OSError:
+                history_cleanup_failures.append(rotated_log.name)
         for sub in ("orchestrator-home", "managers", "worktrees"):
             shutil.rmtree(self.settings.state_dir / sub, ignore_errors=True)
         log.warning("factory reset executed — all state wiped")
@@ -2777,6 +2798,13 @@ class Engine:
         # Telegram can only delete messages it tracked). Let it own that caveat here so
         # the confirmation never over-claims a blank slate it didn't fully deliver.
         caveat = getattr(self.transport, "reset_caveat", "")
+        if history_cleanup_failures:
+            retained = ", ".join(sorted(set(history_cleanup_failures)))
+            caveat += (
+                "\n\n⚠️ The active bot state is clean, but these persisted diagnostic "
+                f"history files could not be erased: {retained}. Stop the service and "
+                "remove them manually before treating the reset as a full history purge."
+            )
         return f"{msg}{caveat}" if caveat else msg
 
     async def shutdown(self) -> None:
