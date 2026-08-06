@@ -12,7 +12,7 @@
   class BeabossClient {
     constructor(url) {
       this.url = url;
-      this.threads = new Map();          // id -> {id, title, open}
+      this.threads = new Map();          // id -> title/open + optional org metadata
       this.messages = new Map();         // id -> [{speaker, text, ts, media?}]
       this.handlers = {};                // event -> fn
       this.ws = null;
@@ -80,7 +80,10 @@
         this._emit("threads");
       } else if (msg.type === "thread") {
         if (msg.removed) this.threads.delete(msg.id);
-        else this._upsertThread({ id: msg.id, title: msg.title, open: msg.open });
+        else {
+          const previous = this.threads.get(msg.id) || {};
+          this._upsertThread(Object.assign({}, previous, msg));
+        }
         this._emit("threads");
       } else if (msg.type === "message") {
         const list = this.messages.get(msg.thread_id) || [];
@@ -219,13 +222,41 @@
   const fmtTime = (ts) => new Date(ts)
     .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-  function threadIcon(id, title) {
+  function threadIcon(thread) {
+    const id = thread.id, title = thread.title || "";
     if (id === "general") return { emoji: "🧭", name: "Orchestrator" };
     if (id.startsWith("dm:")) return { emoji: "💬", name: title || id };
-    if ((title || "").startsWith("⚙️")) {
-      return { emoji: "⚙️", name: title.replace(/^⚙️\s*/, "") };
+    if (thread.role === "project_manager" || title.startsWith("🗂️")) {
+      return { emoji: "🗂️", name: title.replace(/^🗂️?\s*/, "") };
+    }
+    if (thread.role === "worker" || title.startsWith("⚙️")) {
+      return { emoji: "⚙️", name: title.replace(/^↳\s*/, "").replace(/^⚙️\s*/, "") };
     }
     return { emoji: "▸", name: title || id };
+  }
+
+  function repoName(path) {
+    const parts = String(path || "").split(/[\\/]/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : "";
+  }
+
+  // The wire remains a flat list because transports such as Telegram expose flat
+  // topics. Structured metadata lets richer cockpits present the same truth as an
+  // org: General, then each project manager and their workers, then everything else.
+  function orderedThreads(threads) {
+    const all = Array.from(threads.values());
+    const result = [];
+    const used = new Set();
+    const add = (t) => { if (t && !used.has(t.id)) { used.add(t.id); result.push(t); } };
+    add(all.find((t) => t.id === "general"));
+    for (const manager of all.filter((t) => t.role === "project_manager")) {
+      add(manager);
+      for (const worker of all.filter((t) =>
+        t.role === "worker" && t.supervisor_id &&
+        t.supervisor_id === manager.manager_id)) add(worker);
+    }
+    all.forEach(add);
+    return result;
   }
 
   function connect(url) {
@@ -307,11 +338,13 @@
     function renderThreads() {
       const el = $("threads");
       el.textContent = "";
-      for (const t of client.threads.values()) {
+      for (const t of orderedThreads(client.threads)) {
         const row = document.createElement("div");
         row.className = "thread" + (t.id === active ? " active" : "") +
-          (t.open ? "" : " closed");
-        const ic = threadIcon(t.id, t.title);
+          (t.open ? "" : " closed") +
+          (t.role === "project_manager" ? " manager" : "") +
+          (t.role === "worker" && t.supervisor_id ? " child" : "");
+        const ic = threadIcon(t);
         const emoji = document.createElement("span");
         emoji.className = "emoji"; emoji.textContent = ic.emoji;
         const name = document.createElement("span");
@@ -337,11 +370,22 @@
         $("active-title").textContent = "—"; $("active-sub").textContent = "";
         chip.classList.remove("show"); return;
       }
-      const ic = threadIcon(t.id, t.title);
+      const ic = threadIcon(t);
       $("active-title").textContent = ic.name;
-      $("active-sub").textContent = t.id === "general" ? "orchestrator"
+      const repo = repoName(t.repo);
+      let subtype = t.id === "general" ? "orchestrator"
         : t.id.startsWith("dm:") ? "direct message"
-        : (t.open ? "worker session" : "session ended");
+        : t.role === "project_manager" ? "project manager"
+        : t.role === "worker" ? "worker"
+        : "direct session";
+      if (repo && (t.role === "project_manager" || t.role === "worker")) {
+        subtype += " · " + repo;
+      }
+      if (!t.open) subtype += " · ended";
+      else if (t.status && !["active", "working"].includes(t.status)) {
+        subtype += " · " + t.status;
+      }
+      $("active-sub").textContent = subtype;
       chip.classList.toggle("show", busy.has(active));
     }
 

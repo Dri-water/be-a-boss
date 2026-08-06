@@ -289,7 +289,7 @@ class TelegramTransport:
     def _header(out: Outbound) -> str:
         if out.thread_id.startswith("dm:"):
             return ""  # a 1:1 chat — a name card on every message is noise
-        if out.speaker.role in ("orchestrator", "worker"):
+        if out.speaker.role in ("orchestrator", "project_manager", "worker"):
             return f"{out.speaker.label}:"
         if out.speaker.role == "system":
             return ""  # system lines carry their own tone
@@ -337,8 +337,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"👋 {settings.bot_name} — your agent org, in one place.\n\n"
         "🧭 I'm the orchestrator. DM me for a private 1:1, or talk to me here in the "
         "group — either way, give me goals (\"fix the login bug in myapp, then audit "
-        "deps\") and I hire worker agents, brief them, and supervise. Each worker gets "
-        "its own topic in the group — watch, and type in to steer us both.\n"
+        "deps\"). For larger or ongoing repos I can hire a 🗂️ project manager to keep "
+        "that project's context focused; they hire and supervise ⚙️ workers. Managers "
+        "and workers each get a visible topic — open one to watch or steer the work.\n"
         "📋 #general is a live status board — what's running, blocked, and waiting on "
         "you, always current.\n\n"
         "🗂 Commands:\n"
@@ -508,8 +509,13 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     lines = ["Threads:"]
     for _tid, rec, status in rows:
-        extra = f" · {rec.worker_status}" if rec.role == "worker" else ""
-        lines.append(f"• [{rec.role}] {rec.name} [{status}]{extra} — {rec.cwd or '—'}")
+        role_status = (rec.worker_status if rec.role == "worker"
+                       else rec.manager_status if rec.role == "project_manager" else "")
+        extra = f" · {role_status}" if role_status else ""
+        owner = f" · managed by {rec.supervisor_id}" if rec.supervisor_id else ""
+        lines.append(
+            f"• [{rec.role}] {rec.name} [{status}]{extra}{owner} — "
+            f"{rec.repo or rec.cwd or '—'}")
     await update.effective_message.reply_text("\n".join(lines))
 
 
@@ -520,8 +526,11 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     engine: Engine = ctx.bot_data["engine"]
     rows = engine.listing()
     live = sum(1 for _t, _r, s in rows if s != "dormant")
+    managers = sum(1 for _t, rec, _s in rows if rec.role == "project_manager")
+    workers = sum(1 for _t, rec, _s in rows if rec.role == "worker")
     await update.effective_message.reply_text(
-        f"{settings.bot_name} up. {live} live / {len(rows)} known thread(s).")
+        f"{settings.bot_name} up. {live} live / {len(rows)} known thread(s) · "
+        f"{managers} project manager(s) · {workers} worker(s).")
 
 
 async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

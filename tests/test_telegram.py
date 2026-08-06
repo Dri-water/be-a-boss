@@ -63,6 +63,19 @@ def test_post_normal_message_not_truncated():
     assert bot.sent == ["a short reply"]
 
 
+def test_project_manager_header_is_distinct_and_visible():
+    out = Outbound(
+        thread_id="42",
+        speaker=Speaker(role="project_manager", name="Maya", emoji="🗂️"),
+        text="project update",
+    )
+    assert TelegramTransport._header(out) == "🗂️ Maya:"
+
+    # A private office remains conversational: repeated identity cards are noise.
+    out.thread_id = "dm:1"
+    assert TelegramTransport._header(out) == ""
+
+
 class RecordingBot:
     def __init__(self, reject_html: bool = False):
         self.calls: list[dict] = []

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from beaboss.cli.__main__ import State, handle_line
 from beaboss.core.ports import Outbound, Speaker
+from beaboss.core.store import CoreStore, ThreadRecord
 from beaboss.transports.cli import CLITransport
 
 
@@ -83,6 +84,37 @@ def test_transport_emits_websocket_compatible_events(tmp_path):
                          "speaker": {"role": "worker", "name": "Nova", "emoji": "⚙️"},
                          "text": "on it"}
     assert events[3]["kind"] == "photo" and events[3]["filename"] == "shot.png"
+
+
+def test_cli_transport_emits_and_rehydrates_project_hierarchy(tmp_path):
+    store = CoreStore(tmp_path / "state")
+    store.put("3", ThreadRecord(
+        role="project_manager", name="Maya", manager_id="app",
+        manager_status="active", repo="/r/app"))
+    store.put("4", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", repo="/r/app",
+        worker_status="working", supervisor_id="app"))
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    transport = CLITransport(emit, store)
+    snapshot = transport.snapshot()
+    assert snapshot["threads"][1]["role"] == "project_manager"
+    assert snapshot["threads"][1]["manager_id"] == "app"
+    assert snapshot["threads"][2]["supervisor_id"] == "app"
+
+    async def update():
+        tid = await transport.create_thread("new project")
+        await transport.update_thread(
+            tid, role="project_manager", repo="/r/new", manager_id="new",
+            supervisor_id="", status="active")
+        return tid
+
+    tid = asyncio.run(update())
+    assert events[-1]["type"] == "thread" and events[-1]["id"] == tid
+    assert events[-1]["role"] == "project_manager"
 
 
 # ---- input drives the engine identically for text / slash / JSON ------------
@@ -206,6 +238,29 @@ def test_tui_snapshot_seeds_sidebar_on_restart():
         async with app.run_test():
             assert "7" in app.titles                                # rehydrated worker seeded
             assert app.query_one("#sidebar").has_class("show")
+
+    asyncio.run(go())
+
+
+def test_tui_orders_project_manager_before_owned_workers():
+    """Project metadata creates a readable hierarchy without parsing display titles."""
+    import pytest
+    pytest.importorskip("textual")
+    from beaboss.cli.tui import Cockpit
+
+    async def go():
+        app = Cockpit(bot_name="X", demo_events=[{"type": "threads", "threads": [
+            {"id": "general", "title": "Orchestrator", "open": True,
+             "role": "orchestrator"},
+            # Deliberately out of order: the view owns presentation order.
+            {"id": "4", "title": "⚙️ Nova · app", "open": True,
+             "role": "worker", "repo": "/r/app", "supervisor_id": "app"},
+            {"id": "3", "title": "🗂️ Maya · app", "open": True,
+             "role": "project_manager", "repo": "/r/app", "manager_id": "app"},
+        ]}])
+        async with app.run_test():
+            assert app._ordered_thread_ids() == ["general", "3", "4"]
+            assert app.thread_meta["4"]["supervisor_id"] == "app"
 
     asyncio.run(go())
 

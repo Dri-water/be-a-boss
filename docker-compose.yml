@@ -12,6 +12,14 @@ services:
     image: be-a-boss
     container_name: be-a-boss
     restart: unless-stopped
+    # Bound bursty builds/browser tests so the always-on agent cannot consume the
+    # whole host. Override in .env for a larger workstation.
+    cpus: ${BEABOSS_CPU_LIMIT:-4}
+    mem_limit: ${BEABOSS_MEMORY_LIMIT:-4g}
+    # Required only by the optional BEABOSS_NETWORK_LIMIT traffic shaper. The
+    # entrypoint leaves networking untouched when the variable is blank/unset.
+    cap_add:
+      - NET_ADMIN
     env_file: .env
     environment:
       # Container-side overrides (these win over .env). Paths are INSIDE the container.

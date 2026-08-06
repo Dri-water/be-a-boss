@@ -404,6 +404,71 @@ def test_status_parsed_from_full_reply_not_truncated_digest(tmp_path):
     assert engine.store.get("55").worker_status == "done"
 
 
+def test_done_worker_retires_runtime_and_descendants_but_keeps_state(
+    tmp_path, monkeypatch,
+):
+    engine, _ = _engine(tmp_path)
+    repo = tmp_path / "repo"
+    worker = tmp_path / "worker"
+    repo.mkdir(); worker.mkdir()
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(worker), worker_id="nova",
+        repo=str(repo), task="finish", worker_status="working"))
+    session = FakeSession(); session.thread_id = "55"
+    engine.sessions["55"] = session
+    terminated: list[tuple[Path, str | None]] = []
+
+    async def terminate(path, worker_thread_id=None, **_kwargs):
+        terminated.append((path, worker_thread_id))
+        return 3
+
+    monkeypatch.setattr(worktrees, "terminate_worker_processes", terminate)
+
+    class Done:
+        result = "finished cleanly\nSTATUS: done"
+        is_error = False
+
+    async def go():
+        await engine._on_worker_turn_done(session, Done())
+        await asyncio.gather(*tuple(engine._retirement_tasks))
+
+    asyncio.run(go())
+
+    assert engine.store.get("55").worker_status == "done"
+    assert engine.store.get("55").worker_id == "nova"
+    assert "55" not in engine.sessions
+    assert session.status == "stopped"
+    assert terminated == [(worker, "55")]
+
+
+def test_followup_wins_race_with_scheduled_worker_retirement(tmp_path, monkeypatch):
+    engine, _ = _engine(tmp_path)
+    engine.store.put("55", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path / "worker"),
+        worker_id="nova", repo=str(tmp_path / "repo"), task="finish",
+        worker_status="done"))
+    session = FakeSession(); session.thread_id = "55"
+    engine.sessions["55"] = session
+    terminated: list[Path] = []
+
+    async def terminate(path, **_kwargs):
+        terminated.append(path)
+        return 0
+
+    monkeypatch.setattr(worktrees, "terminate_worker_processes", terminate)
+
+    async def go():
+        engine._schedule_worker_retirement("55", session)
+        engine.store.update("55", worker_status="working")
+        await asyncio.gather(*tuple(engine._retirement_tasks))
+
+    asyncio.run(go())
+
+    assert engine.sessions["55"] is session
+    assert session.status == "idle"
+    assert terminated == []
+
+
 def test_message_worker_unsticks_done_status(tmp_path):
     """Sending a done/blocked worker back to work resets it to 'working' so the
     fleet snapshot and dashboard tell the truth."""
@@ -548,6 +613,262 @@ def test_listing_and_kill_direct(tmp_path):
     assert rows[0][2] == "dormant"
     assert asyncio.run(engine.kill("7")) is True
     assert engine.store.get("7") is None
+
+
+def test_hire_project_manager_reuses_one_manager_for_canonical_repo(
+    tmp_path, monkeypatch,
+):
+    engine, transport = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    manager_session = FakeSession()
+
+    async def ensure(thread_id, rec):
+        manager_session.thread_id = thread_id
+        engine.sessions[thread_id] = manager_session
+        return manager_session
+
+    monkeypatch.setattr(engine, "_ensure_session", ensure)
+
+    first = asyncio.run(engine._hire_project_manager("myrepo", "Own checkout"))
+    aliased = repo / ".." / repo.name
+    second = asyncio.run(engine._hire_project_manager(
+        str(aliased), "Also own the release"))
+
+    assert not first.get("is_error") and not second.get("is_error")
+    assert len(engine.store.managers()) == 1
+    assert len(transport.threads) == 1
+    manager = next(iter(engine.store.managers().values()))
+    assert Path(manager.repo) == repo.resolve()
+    assert manager_session.submitted == [
+        "[Initial charter from the global orchestrator]\nOwn checkout",
+        "[From the global orchestrator]: Also own the release",
+    ]
+    assert "reused project manager" in second["content"][0]["text"]
+
+
+def test_project_manager_session_uses_home_and_scoped_tools_without_delivery(tmp_path):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    home = tmp_path / "state" / "managers" / "myrepo-home"
+    rec = ThreadRecord(
+        role="project_manager", name="myrepo PM", cwd=str(home), repo=str(repo),
+        manager_id="myrepo", manager_status="active", task="Own this project",
+    )
+    engine.store.put("80", rec)
+
+    session = engine._make_project_manager_session("80", rec)
+    namespace = session._extra_tools[0]
+    tool_names = {tool.name for tool in namespace.tools}
+
+    assert session.cwd == home
+    assert namespace.name == "project"
+    assert tool_names == {
+        "inspect_project", "spawn_worker", "message_worker", "worker_status",
+        "dismiss_worker", "review_worker", "run_checks",
+    }
+    assert "deliver_worker" not in tool_names
+    assert "hire_project_manager" not in tool_names
+    assert f"repo={repo}" in session._system_append
+
+
+def test_managed_worker_result_wakes_project_manager_not_global(tmp_path):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    engine.store.put("general", ThreadRecord(
+        role="orchestrator", name="orchestrator"))
+    engine.store.set_orchestrator_thread("general")
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="myrepo PM", cwd=str(tmp_path),
+        repo=str(repo), manager_id="myrepo", manager_status="active"))
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(repo), task="Fix checkout", worker_status="working",
+        supervisor_id="myrepo"))
+    top = FakeSession()
+    manager = FakeSession()
+    engine.sessions.update({"general": top, "80": manager})
+
+    class Result:
+        result = "Checkpoint: reproduced and fixed the race.\nSTATUS: working"
+        is_error = False
+
+    worker = FakeSession()
+    worker.thread_id = "81"
+    asyncio.run(engine._on_worker_turn_done(worker, Result()))
+
+    assert len(manager.submitted) == 1
+    assert manager.submitted[0].startswith("[project inbox]")
+    assert "worker nova" in manager.submitted[0]
+    assert top.submitted == []
+    assert engine._inbox == []
+
+
+def test_project_manager_meaningful_summary_wakes_global_orchestrator(tmp_path):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    engine.store.put("general", ThreadRecord(
+        role="orchestrator", name="orchestrator"))
+    engine.store.set_orchestrator_thread("general")
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="myrepo PM", cwd=str(tmp_path),
+        repo=str(repo), manager_id="myrepo", manager_status="active"))
+    top = FakeSession()
+    manager = FakeSession()
+    manager.thread_id = "80"
+    engine.sessions.update({"general": top, "80": manager})
+
+    class Result:
+        result = "Checkout fix is verified; recommend delivery of nova."
+        is_error = False
+
+    asyncio.run(engine._on_project_manager_turn_done(manager, Result()))
+
+    assert engine.store.get("80").last_summary == Result.result
+    assert len(top.submitted) == 1
+    assert top.submitted[0].startswith("[fleet inbox]")
+    assert "project manager myrepo" in top.submitted[0]
+    assert Result.result in top.submitted[0]
+
+
+def test_project_manager_tools_reject_another_managers_worker(tmp_path):
+    engine, _ = _engine(tmp_path)
+    repo_a = _repo(tmp_path, "alpha")
+    repo_b = _repo(tmp_path, "beta")
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="alpha PM", cwd=str(tmp_path),
+        repo=str(repo_a), manager_id="alpha", manager_status="active"))
+    engine.store.put("90", ThreadRecord(
+        role="project_manager", name="beta PM", cwd=str(tmp_path),
+        repo=str(repo_b), manager_id="beta", manager_status="active"))
+    engine.store.put("91", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(repo_b), task="Beta task", worker_status="working",
+        supervisor_id="beta"))
+    tools = {tool.name: tool for tool in engine._build_manager_tools("80").tools}
+
+    result = asyncio.run(tools["message_worker"].handler({
+        "worker_id": "nova", "text": "Change direction",
+    }))
+
+    assert result.get("is_error") is True
+    assert "no such worker" in result["content"][0]["text"]
+
+
+def test_project_manager_hibernates_then_lazily_resumes(tmp_path, monkeypatch):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    rec = ThreadRecord(
+        role="project_manager", name="myrepo PM", cwd=str(tmp_path), repo=str(repo),
+        manager_id="myrepo", manager_status="active", session_id="native-pm-session",
+    )
+    engine.store.put("80", rec)
+    live = FakeSession()
+    live.thread_id = "80"
+    engine.sessions["80"] = live
+
+    assert asyncio.run(engine._retire_project_manager_runtime("80", live)) is True
+    assert "80" not in engine.sessions
+    assert live.status == "stopped"
+    assert engine.store.get("80").session_id == "native-pm-session"
+
+    resumed = FakeSession()
+    resumed.thread_id = "80"
+    resumed.started = False
+
+    async def start():
+        resumed.started = True
+
+    resumed.start = start
+    monkeypatch.setattr(
+        engine, "_make_project_manager_session",
+        lambda thread_id, manager_rec: resumed)
+
+    result = asyncio.run(engine._message_project_manager("myrepo", "Continue"))
+
+    assert not result.get("is_error")
+    assert resumed.started is True
+    assert engine.sessions["80"] is resumed
+    assert resumed.submitted == ["[From the global orchestrator]: Continue"]
+
+
+def test_dismiss_project_manager_refuses_unfinished_owned_worker(tmp_path):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="myrepo PM", cwd=str(tmp_path),
+        repo=str(repo), manager_id="myrepo", manager_status="active"))
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(repo), task="Fix checkout", worker_status="done",
+        supervisor_id="myrepo"))
+
+    result = asyncio.run(engine._dismiss_project_manager("myrepo"))
+
+    assert result.get("is_error") is True
+    assert "unfinished owned workers: nova" in result["content"][0]["text"]
+    assert engine.store.get("80").manager_status == "active"
+
+
+def test_restart_recovery_routes_managed_workers_to_their_manager(tmp_path):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="myrepo PM", cwd=str(tmp_path),
+        repo=str(repo), manager_id="myrepo", manager_status="active",
+        last_summary="Last release was green"))
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(repo), task="Fix checkout", worker_status="working",
+        supervisor_id="myrepo"))
+    engine.store.put("82", ThreadRecord(
+        role="worker", name="Kite", cwd=str(tmp_path), worker_id="kite",
+        repo=str(repo), task="Audit docs", worker_status="blocked",
+        supervisor_id="myrepo"))
+    engine.store.put("83", ThreadRecord(
+        role="worker", name="Juno", cwd=str(tmp_path), worker_id="juno",
+        repo=str(repo), task="One-off", worker_status="done"))
+
+    engine.rehydrate()
+
+    manager_notes = "\n".join(engine._manager_inboxes.get("80", []))
+    global_notes = "\n".join(engine._inbox)
+    assert "Nova (working)" in manager_notes
+    assert "Kite (blocked)" in manager_notes
+    assert "Nova" not in global_notes and "Kite" not in global_notes
+    assert "Juno (done)" in global_notes
+    assert "Last release was green" in global_notes
+
+
+def test_startup_recovery_resumes_managed_worker_and_wakes_manager_first(tmp_path):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    engine.store.put("general", ThreadRecord(
+        role="orchestrator", name="orchestrator"))
+    engine.store.set_orchestrator_thread("general")
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="myrepo PM", cwd=str(tmp_path),
+        repo=str(repo), manager_id="myrepo", manager_status="active",
+        last_summary="Project was healthy before restart"))
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", cwd=str(tmp_path), worker_id="nova",
+        repo=str(repo), task="Fix checkout", worker_status="working",
+        supervisor_id="myrepo"))
+    top = FakeSession()
+    manager = FakeSession()
+    worker = FakeSession()
+    engine.sessions.update({"general": top, "80": manager, "81": worker})
+
+    engine.rehydrate()
+    asyncio.run(engine.startup_recovery())
+
+    assert len(worker.submitted) == 1
+    assert "AUTOMATIC RESTART RECOVERY" in worker.submitted[0]
+    assert len(manager.submitted) == 1
+    assert "[project inbox]" in manager.submitted[0]
+    assert "Nova (working)" in manager.submitted[0]
+    assert len(top.submitted) == 1
+    assert "project managers restored dormant" in top.submitted[0]
+    assert "Nova (working)" not in top.submitted[0]
 
 
 def test_deliver_requests_approval_then_human_lands_it(tmp_path):

@@ -17,6 +17,7 @@
       --dim: #8b93a7;
       --faint: #5f677b;
       --orchestrator: #7c9bff;
+      --manager: #55c2b7;
       --worker: #c58cf2;
       --you: #4fce93;
       --system: #8b93a7;
@@ -35,7 +36,8 @@
         --bg: #f6f7fb; --panel: #eef1f7; --raised: #ffffff;
         --border: #dbe0ec; --border-soft: #e6eaf2;
         --text: #171b24; --dim: #5c6478; --faint: #8b93a7;
-        --orchestrator: #3a5bd9; --worker: #8b3fd0; --you: #1f9c62;
+        --orchestrator: #3a5bd9; --manager: #16877d;
+        --worker: #8b3fd0; --you: #1f9c62;
         --amber: #c77b12; --approve: #1f9c62; --reject: #d33a5e; --accent: #3a5bd9;
         --accent-ink: #ffffff;
       }
@@ -83,6 +85,8 @@
       transition: background .12s ease;
     }
     .thread:hover { background: var(--raised); }
+    .thread.manager { margin-top: 7px; font-weight: 650; }
+    .thread.child { padding-left: 28px; }
     .thread.active { background: var(--raised); border-color: var(--border); }
     .thread.active::before {
       content: ""; position: absolute; left: -8px; top: 8px; bottom: 8px;
@@ -144,6 +148,7 @@
     .msg .who { font-weight: 650; font-size: 13.5px; }
     .msg .time { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
     .role-orchestrator .who { color: var(--orchestrator); }
+    .role-project_manager .who { color: var(--manager); }
     .role-worker .who { color: var(--worker); }
     .role-you .who { color: var(--you); }
     .role-system .who, .role-direct .who { color: var(--system); }
@@ -257,7 +262,7 @@
       <span class="org">be-a-boss</span>
       <span id="conn" title="connecting…"></span>
     </header>
-    <div class="section-label">THREADS</div>
+    <div class="section-label">ORG</div>
     <div id="threads"></div>
     <footer id="status">connecting…</footer>
   </aside>

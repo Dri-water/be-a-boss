@@ -222,6 +222,11 @@ class CodexBackend:
         self._write_lock = asyncio.Lock()
         self._next_id = 0
         self._active_turn_id: str | None = None
+        # A lost connection can leave the remote thread on a different active turn
+        # than this adapter. Once app-server proves that mismatch, the next queued
+        # input must use a fresh native thread instead of piling onto stale work.
+        self._rotate_before_next_send = False
+        self._rotation_notice = False
         self._emit_init = False
         self._final_text = ""
         self._turn_error = ""
@@ -353,13 +358,25 @@ class CodexBackend:
                 f"by {self._model}; supported: {', '.join(sorted(supported))}")
 
     async def send(self, turn: "Turn") -> None:
+        if self._rotate_before_next_send:
+            await self._rotate_desynchronized_thread()
         if not self._thread_id:
             raise RuntimeError("Codex thread is not initialized")
         self._final_text = ""
         self._turn_error = ""
+        inputs = self._turn_inputs(turn)
+        if self._rotation_notice and inputs and inputs[0].get("type") == "text":
+            inputs[0]["text"] = (
+                "[AUTOMATIC CODEX THREAD RESYNCHRONIZATION]\n"
+                "The former native thread lost turn/tool synchronization and was "
+                "intentionally replaced. Treat the current request, persisted "
+                "fleet/workspace state, and system instructions as authoritative. "
+                "Do not replay earlier side effects.\n\n" + inputs[0]["text"]
+            )
+            self._rotation_notice = False
         params: dict[str, Any] = {
             "threadId": self._thread_id,
-            "input": self._turn_inputs(turn),
+            "input": inputs,
             "cwd": str(self._cwd),
             "approvalPolicy": self._approval_policy(),
         }
@@ -404,10 +421,52 @@ class CodexBackend:
                 "expectedTurnId": expected,
             })
         except Exception as exc:  # completion/non-steerable races become FIFO
+            if self._is_active_turn_mismatch(exc):
+                self._rotate_before_next_send = True
             log.info("Codex steer fell back to queue thread=%s turn=%s: %s",
                      self._thread_id, expected, exc)
             return False
         return str(response.get("turnId") or "") == expected
+
+    @staticmethod
+    def _is_active_turn_mismatch(error: BaseException) -> bool:
+        text = str(error).lower().replace("_", "")
+        return (
+            "expectedturnid" in text
+            or ("expected" in text and "active turn" in text and "found" in text)
+        )
+
+    @staticmethod
+    def _is_terminal_stream_failure(text: str) -> bool:
+        """Recognize app-server's exhausted reconnect message.
+
+        Codex can report this text as a normal final answer followed by a
+        ``completed`` turn. Treat only the terminal reconnect form as a transport
+        failure so CoreSession retries it and the next send gets a fresh thread.
+        """
+        normalized = text.lower().replace("_", "")
+        return (
+            "reconnecting" in normalized
+            and ("responsestreamdisconnected" in normalized
+                 or "responsestreamconnectionfailed" in normalized)
+        )
+
+    @staticmethod
+    def _is_missing_tool_result(text: str) -> bool:
+        """A missing native tool result makes that Codex thread unsafe to resume."""
+        normalized = text.lower().replace("_", "")
+        return "tool call output is missing for call id" in normalized
+
+    async def _rotate_desynchronized_thread(self) -> None:
+        former = self._thread_id
+        self._thread_id = None
+        self._rotate_before_next_send = False
+        await self.start()
+        self._rotation_notice = True
+        log.warning(
+            "rotated desynchronized Codex thread old=%s new=%s",
+            former, self._thread_id,
+        )
 
     async def receive(self) -> AsyncIterator[AgentEvent]:
         if self._emit_init and self._thread_id:
@@ -420,6 +479,8 @@ class CodexBackend:
             params = event.get("params") or {}
             if method == "backend/eof":
                 detail = params.get("error") or "Codex app-server exited unexpectedly"
+                if self._is_missing_tool_result(str(detail)):
+                    self._rotate_before_next_send = True
                 yield AgentResult(
                     subtype="error", duration_ms=0, duration_api_ms=0,
                     is_error=True, num_turns=1, session_id=self._thread_id or "",
@@ -459,6 +520,18 @@ class CodexBackend:
                 error = turn.get("error") or {}
                 detail = _codex_error_detail(error) or self._turn_error
                 is_error = status != "completed"
+                final = detail or self._final_text or None
+                if (not is_error and final
+                        and self._is_terminal_stream_failure(final)):
+                    is_error = True
+                    status = "stream_disconnected"
+                    detail = final
+                    self._rotate_before_next_send = True
+                elif (final and self._is_missing_tool_result(final)):
+                    is_error = True
+                    status = "tool_result_desynchronized"
+                    detail = final
+                    self._rotate_before_next_send = True
                 self._active_turn_id = None
                 yield AgentResult(
                     subtype="success" if not is_error else status,

@@ -61,6 +61,58 @@ def test_workers_filter_and_fields(tmp_path):
     assert rec.worker_id == "nova" and rec.task == "fix bug"
 
 
+def test_project_manager_hierarchy_fields_roundtrip_and_filters(tmp_path):
+    """Project ownership must survive a restart without changing worker lookup."""
+    s = CoreStore(tmp_path / "state")
+    s.put("20", ThreadRecord(
+        role="project_manager", name="Maya", cwd="/state/managers/maya-home",
+        manager_id="maya", manager_status="active", repo="/r/app",
+        task="Own the app project", last_summary="Release candidate is green",
+    ))
+    s.put("21", ThreadRecord(
+        role="worker", name="Nova", cwd="/wt/nova", worker_id="nova",
+        repo="/r/app", task="Fix checkout", worker_status="working",
+        supervisor_id="maya",
+    ))
+    s.put("22", ThreadRecord(role="direct", name="Scratch", cwd="/r/app"))
+
+    reloaded = CoreStore(tmp_path / "state")
+    manager = reloaded.get("20")
+    worker = reloaded.get("21")
+
+    assert manager.manager_id == "maya"
+    assert manager.manager_status == "active"
+    assert manager.last_summary == "Release candidate is green"
+    assert worker.supervisor_id == "maya"
+    assert list(reloaded.managers()) == ["20"]
+    assert list(reloaded.workers()) == ["21"]
+
+
+def test_legacy_records_default_project_hierarchy_fields(tmp_path):
+    """The additive hierarchy migration must load a v1 record written pre-manager."""
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "core.json").write_text(json.dumps({
+        "version": 1,
+        "threads": {
+            "7": {
+                "role": "worker",
+                "name": "Nova",
+                "worker_id": "nova",
+                "repo": "/r/app",
+                "worker_status": "working",
+            },
+        },
+    }))
+
+    rec = CoreStore(state).get("7")
+
+    assert rec.supervisor_id == ""
+    assert rec.manager_id == ""
+    assert rec.manager_status == ""
+    assert rec.last_summary == ""
+
+
 def test_delete_and_update_unknown(tmp_path):
     s = CoreStore(tmp_path / "state")
     s.put("1", ThreadRecord(role="direct", name="x", cwd="/w"))

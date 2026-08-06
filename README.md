@@ -18,10 +18,11 @@
 <p align="center"><em>▶︎ <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4">Watch with sound (43s)</a></em></p>
 
 **Run your own agent org.** You're the boss: you talk to an **orchestrator** agent,
-and it hires **worker** agents for your tasks, briefs them, and supervises — while
-you watch every agent-to-agent conversation and can step into any of them. Each
-worker runs in an isolated git worktree, so parallel work never collides.
-Self-hosted, on your box.
+which can keep one **project manager** per repo and hire **worker** agents for the
+actual tasks. The hierarchy is adaptive: a small job can still go straight from the
+orchestrator to a worker. You can watch every agent-to-agent conversation and step
+into any of them. Each worker runs in an isolated git worktree, so parallel work
+never collides. Self-hosted, on your box.
 
 be-a-boss is a **framework**, and deliberately modular: the org logic is a
 transport-agnostic, backend-agnostic core. The **surface** you drive it from and
@@ -49,8 +50,9 @@ terminal cockpit (`pip install be-a-boss[tui]`).
 ```mermaid
 flowchart LR
     H([You<br/>the boss]) <-->|"# General"| O["🧭 orchestrator"]
-    O <-->|"brief / report<br/>(visible thread)"| C1["⚙️ Nova · myapp<br/>worktree A"]
-    O <-->|"brief / report"| C2["⚙️ Kite · myapp<br/>worktree B"]
+    O <-->|"goal / milestone<br/>(project room)"| PM["🗂️ myapp manager"]
+    PM <-->|"brief / report<br/>(visible room)"| C1["⚙️ Nova · myapp<br/>worktree A"]
+    O <-->|"small direct brief"| C2["⚙️ Kite · docs<br/>worktree B"]
     H -.->|"interject any time —<br/>both see it"| C1
 ```
 
@@ -59,14 +61,19 @@ flowchart LR
   tweak) out of #general. Give it goals in plain language ("fix the login 500 in
   myapp, then audit deps"). It splits the work, hires workers, briefs them, supervises
   at checkpoints, and reports outcomes.
+- **Long-lived repos can have a project manager.** Repo aliases that resolve to the
+  same canonical checkout share one manager and one project context. The manager
+  supervises that repo's workers and escalates concise milestones and decisions;
+  the orchestrator stays focused on your portfolio. Small jobs can bypass the
+  manager and use the original direct-worker route.
 - **#general is a live status board** — a single pinned message, always current,
   showing what's running, what's blocked, and what's awaiting your `/approve`. It's
   code-rendered from state, not chatter.
-- **Every worker gets its own topic** named after it (`⚙️ Nova · myapp`); the
-  orchestrator's instructions and the worker's work stream into that topic live —
-  you literally watch the manager drive the worker.
+- **Every manager and worker gets a visible room.** The web and terminal surfaces
+  can group workers beneath their project. Telegram uses flat project/worker topics
+  with project-aware names and headers because forum topics cannot be nested.
 - **You can interject in any worker topic.** Your message reaches the worker as
-  input *and* the orchestrator's inbox — both see it, like walking up to a desk.
+  input *and* its supervisor's inbox — both see it, like walking up to a desk.
 - **Isolated worktrees.** Each worker works on its own branch (`worker/<name>`) in
   its own git worktree forked from the resolved default branch — same-repo
   parallelism is safe. Dismissal refuses dirty worktrees, so uncommitted work
@@ -85,6 +92,10 @@ sender per message.
 
 - **Orchestrator + team** — talk to one agent; it hires, briefs, and supervises
   workers. Or go direct with `/new`.
+- **Adaptive project managers** — one scoped manager per canonical repo isolates
+  project context when it helps; direct delegation avoids the extra hop when it
+  would only add latency and tokens. Managers can review and request delivery, but
+  cannot land work or operate outside their repo.
 - **Glass-walled delegation** — every worker conversation is a visible topic you
   can watch and interject into; both agents see your message.
 - **Isolated git worktrees** — each worker on its own `worker/<name>` branch;
@@ -105,6 +116,9 @@ sender per message.
 - **Resumable** across restarts, **always-on** in Docker, **container-isolated**,
   **batteries-included image** (node/python/git/ffmpeg/chromium; agents can
   install more).
+- **Manager hibernation** — project record and backend session survive,
+  while idle manager processes stop and resume only for a project message or
+  checkpoint. Many remembered repos do not mean many permanently resident agents.
 - **Transport-agnostic core** — the engine (`core/`) speaks in `Speaker`/`Outbound`
   abstractions; Telegram and a WebSocket surface (the web app) are adapters in
   `transports/`. Slack is the next adapter — zero core changes.
@@ -116,13 +130,23 @@ flowchart LR
     U([You]) -->|"# General"| ENG[engine<br/>core, transport-agnostic]
     U -. "interject in a worker topic" .-> ENG
     ENG --> ORC["🧭 orchestrator session"]
-    ORC -->|"fleet tools:<br/>spawn / message / dismiss"| ENG
+    ORC -->|"portfolio + fleet tools"| ENG
+    ENG -->|"project context<br/>(when useful)"| PM["🗂️ manager session"]
+    PM -->|"project-scoped tools"| ENG
     ENG -->|worktree + thread| C1["⚙️ worker session"]
-    C1 -->|"turn-end / blocked / done"| SUP[checkpoint inbox]
-    SUP -->|coalesced digest| ORC
+    C1 -->|"turn-end / blocked / done"| SUP[project checkpoint inbox]
+    SUP -->|coalesced digest| PM
+    PM -->|"decision / milestone / delivery request"| ORC
     ENG <-->|Transport contract| TG[telegram adapter<br/>topics ⇄ threads, header cards]
     TG <--> U
 ```
+
+This is intentionally not a claim that more agents are always better. Multi-agent
+systems help most when work and context divide cleanly; sequential coding tasks can
+lose time and fidelity at hand-offs. be-a-boss uses the shallow project layer to
+separate unrelated repos, keeps a direct path for simple work, passes durable git
+and test evidence rather than relying on summaries alone, and leaves delivery at
+the orchestrator/human boundary.
 
 A delegated task, end to end:
 
@@ -131,17 +155,25 @@ sequenceDiagram
     actor You
     participant O as 🧭 Orchestrator
     participant E as Engine
+    participant P as 🗂️ Project manager
     participant C as ⚙️ Worker
     You->>O: "fix the login 500 in myapp"
-    O->>E: spawn_worker(myapp, brief)
+    O->>E: ensure/reuse manager for myapp
+    E->>P: project goal (posted in its room)
+    P->>E: spawn scoped worker with brief
     E->>C: new worktree worker/nova + brief (posted in its topic)
     C->>C: work autonomously, commit on branch
     C-->>You: streams into its topic (you can watch)
     You-->>C: interjection: "check the TTL too"
     C-->>E: turn ends · STATUS: done
-    E->>O: [fleet inbox] Nova done (+ your interjection)
+    E->>P: [project inbox] Nova done (+ your interjection)
+    P->>P: inspect diff + run checks
+    P->>O: verified milestone + delivery recommendation
     O-->>You: reports outcome in General
 ```
+
+For a small one-off, the orchestrator can call `spawn_worker` directly; the worker
+then reports its checkpoint straight to the orchestrator, exactly as before.
 
 Every session role runs on your chosen backend — by default the official
 [`claude-agent-sdk`](https://code.claude.com/docs/en/agent-sdk/overview) driving
@@ -264,6 +296,8 @@ runs locally, gated by who can run a process on the host.
 | `DEPLOY_BRAVENESS` | – | How work lands: `balanced` (default; orchestrator merges on your say-so) or `conservative` (explicit `/approve` only) |
 | `AGENT_MODEL`, `AGENT_REASONING_EFFORT`, `AGENT_MAX_TURNS` | – | Backend-neutral session tuning (override per backend with `CLAUDE_*` / `CODEX_*`) |
 | `AGENT_MODEL_FAST/BALANCED/DEEP`, `AGENT_REASONING_EFFORT_FAST/BALANCED/DEEP` | – | Worker routing overrides. Codex defaults: Luna/low, Terra/medium, Sol/high; `CODEX_*` overrides just Codex. |
+| `BEABOSS_NETWORK_UPLOAD_LIMIT`, `BEABOSS_NETWORK_DOWNLOAD_LIMIT` | – | Optional fair-queued Docker caps such as `12mbit` / `30mbit`; blank/unset is uncapped. `BEABOSS_NETWORK_LIMIT` remains the symmetric fallback. Recreate after changing. |
+| `BEABOSS_CPU_LIMIT`, `BEABOSS_MEMORY_LIMIT` | – | Whole-container host safeguards for bursty builds/tests (Docker defaults: `4` CPUs / `4g`). |
 
 Docker mounts `HOST_DOCUMENTS` → `/workspace` and sets `PROJECTS_ROOT=/workspace`,
 so `/new myapp` targets `/workspace/myapp`. Use forward slashes on all platforms

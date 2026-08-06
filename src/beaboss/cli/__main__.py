@@ -33,7 +33,8 @@ from ..transports.cli import OFFICE, CLITransport
 log = logging.getLogger("beaboss.cli")
 
 HELP = (
-    "type to talk to the orchestrator · /threads · /thread <id> · /new <path> [name]"
+    "type to talk to the orchestrator (project managers get their own threads) · "
+    "/threads · /thread <id> · /new <path> [name]"
     " · /approve <id> · /reject <id> · /stop · /kill · /reset [confirm] · /quit")
 
 
@@ -172,7 +173,8 @@ async def _dispatch(engine, transport, state, msg: dict) -> None:
 
 # ---- renderers ---------------------------------------------------------------
 
-_C = {"orchestrator": "\033[38;5;75m", "worker": "\033[38;5;177m",
+_C = {"orchestrator": "\033[38;5;75m", "project_manager": "\033[38;5;79m",
+      "worker": "\033[38;5;177m",
       "you": "\033[38;5;78m", "system": "\033[38;5;244m", "direct": "\033[38;5;250m"}
 _RESET, _DIM, _BOLD = "\033[0m", "\033[2m", "\033[1m"
 

@@ -190,6 +190,36 @@ def test_rehydrate_seeds_threads_and_advances_id(tmp_path):
     assert asyncio.run(transport.create_thread("new")) == "4"  # no reuse of "3"
 
 
+def test_project_hierarchy_metadata_survives_rehydrate_and_live_updates(tmp_path):
+    from beaboss.core.store import CoreStore, ThreadRecord
+    store = CoreStore(tmp_path / "state")
+    store.put("3", ThreadRecord(
+        role="project_manager", name="Maya", manager_id="app",
+        manager_status="active", repo="/r/app"))
+    store.put("4", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", repo="/r/app",
+        worker_status="working", supervisor_id="app"))
+
+    transport = WebSocketTransport(store)
+    manager = transport._snapshot()["threads"][1]
+    worker = transport._snapshot()["threads"][2]
+    assert manager["role"] == "project_manager"
+    assert manager["manager_id"] == "app" and manager["status"] == "active"
+    assert worker["role"] == "worker" and worker["supervisor_id"] == "app"
+
+    async def update():
+        tid = await transport.create_thread("new project")
+        await transport.update_thread(
+            tid, role="project_manager", repo="/r/new", manager_id="new",
+            supervisor_id="", status="active", ignored="not-on-the-wire")
+        return tid
+
+    tid = asyncio.run(update())
+    assert transport.threads[tid]["role"] == "project_manager"
+    assert transport.threads[tid]["manager_id"] == "new"
+    assert "ignored" not in transport.threads[tid]
+
+
 def test_ws_commands_route_to_engine():
     """The web kill switch + approval: interrupt/kill/approve/reject/new reach the
     engine (they were silently unsupported before)."""
@@ -357,6 +387,11 @@ def test_app_shell_ships_inside_the_package():
     assets = _load_assets(static)
     assert "/index.html" in assets and "/client.js" in assets
     assert assets["/index.html"][0].startswith("text/html")
+
+    html = assets["/index.html"][1].decode("utf-8")
+    client = assets["/client.js"][1].decode("utf-8")
+    assert "role-project_manager" in html and ".thread.child" in html
+    assert "orderedThreads" in client and 't.role === "project_manager"' in client
 
 
 def test_decode_inbound_media_validates_caps_and_kind(monkeypatch):

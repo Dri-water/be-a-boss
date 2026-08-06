@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
-Role = Literal["orchestrator", "worker", "direct", "system"]
+Role = Literal["orchestrator", "project_manager", "worker", "direct", "system"]
 
 
 @dataclass(frozen=True)

@@ -54,6 +54,11 @@ class ThreadRecord:
     models: dict[str, str] = field(default_factory=dict)
     reasoning_effort: str = ""  # resolved effort for the active backend
     reasoning_efforts: dict[str, str] = field(default_factory=dict)
+    # project-manager hierarchy (additive; blank fields preserve legacy/direct work):
+    manager_id: str = ""       # manager-only stable id (normally the repo slug)
+    manager_status: str = ""   # manager-only: active | dismissed
+    supervisor_id: str = ""    # worker-only: owning manager_id; blank = orchestrator
+    last_summary: str = ""     # manager's latest bounded portfolio-level report
 
 
 class CoreStore:
@@ -257,3 +262,9 @@ class CoreStore:
 
     def workers(self) -> dict[str, ThreadRecord]:
         return {k: v for k, v in self._threads.items() if v.role == "worker"}
+
+    def managers(self) -> dict[str, ThreadRecord]:
+        return {
+            k: v for k, v in self._threads.items()
+            if v.role == "project_manager"
+        }

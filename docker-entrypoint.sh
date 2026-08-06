@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+python -m beaboss.container_network
+
 # CODEX_HOME is the host's live Codex directory, including its rotating OAuth
 # credential. SQLite alone lives on the native named volume via CODEX_SQLITE_HOME.
 # Before this split, the volume held both; merge its non-SQLite session artifacts

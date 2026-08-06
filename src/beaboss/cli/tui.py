@@ -23,7 +23,8 @@ from textual.widgets import Input, Label, ListItem, ListView, RichLog, Static
 from ..transports.cli import OFFICE
 
 # Speaker colours — one identity system across the whole cockpit.
-_ROLE = {"orchestrator": "#5fafff", "worker": "#d787ff", "you": "#5fd787",
+_ROLE = {"orchestrator": "#5fafff", "project_manager": "#5fd7c7",
+         "worker": "#d787ff", "you": "#5fd787",
          "system": "#8a8a8a", "direct": "#bcbcbc"}
 
 EngineBuilder = Callable[[Callable], Awaitable[tuple]]
@@ -62,6 +63,8 @@ class Cockpit(App):
         self._demo_events = demo_events or []
         self.msgs: dict[str, list[tuple[dict, str]]] = {OFFICE: []}
         self.titles: dict[str, str] = {OFFICE: "🧭 Orchestrator"}
+        self.thread_meta: dict[str, dict] = {
+            OFFICE: {"role": "orchestrator", "open": True}}
         self.unread: dict[str, int] = {}
         self.working: set[str] = set()   # threads mid-turn (busy → next message)
         self._activity_text = ""
@@ -73,7 +76,7 @@ class Cockpit(App):
         yield Static(f" be-a-boss · [b]{self.bot_name}[/b]", id="titlebar")
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
-                yield Static("THREADS", id="sidebar-title")
+                yield Static("ORG", id="sidebar-title")
                 yield ListView(id="threads")
             yield RichLog(id="convo", wrap=True, markup=True, highlight=False)
         yield Static("", id="dash")
@@ -105,13 +108,16 @@ class Cockpit(App):
             # exactly it: seeds restarted workers on connect, and on a factory reset
             # wipes the old conversation instead of leaving it on screen.
             self.titles = {OFFICE: "🧭 Orchestrator"}
+            self.thread_meta = {OFFICE: {"role": "orchestrator", "open": True}}
             self.msgs = {OFFICE: []}
             self.unread = {}
             self.working = set()
             for th in event.get("threads", []):
-                if th["id"] != OFFICE:
-                    self.titles[th["id"]] = th["title"]
-                    self.msgs.setdefault(th["id"], [])
+                tid = th["id"]
+                self.thread_meta[tid] = dict(th)
+                if tid != OFFICE:
+                    self.titles[tid] = th["title"]
+                    self.msgs.setdefault(tid, [])
             if self.active not in self.titles:
                 self.active = OFFICE
             self._reveal_frames()
@@ -141,6 +147,7 @@ class Cockpit(App):
         if tid != OFFICE and tid not in self.titles:
             # a message for a thread we never got a `thread` event for → still list it
             self.titles[tid] = tid
+            self.thread_meta[tid] = {}
             self._reveal_frames()
             self._refresh_sidebar()
         self.msgs.setdefault(tid, []).append((event.get("speaker", {}), text))
@@ -168,6 +175,7 @@ class Cockpit(App):
         tid = event["id"]
         if event.get("removed"):
             self.titles.pop(tid, None)
+            self.thread_meta.pop(tid, None)
             self.msgs.pop(tid, None)
             self.working.discard(tid)
             if self.active == tid:
@@ -176,6 +184,8 @@ class Cockpit(App):
                 self._refresh_activity()
         else:
             self.titles[tid] = event["title"]
+            previous = self.thread_meta.get(tid, {})
+            self.thread_meta[tid] = {**previous, **event}
             self.msgs.setdefault(tid, [])
         self._reveal_frames()
         self._refresh_sidebar()
@@ -195,7 +205,12 @@ class Cockpit(App):
     def _refresh_sidebar(self) -> None:
         lv = self.query_one("#threads", ListView)
         lv.clear()
-        for tid, title in self.titles.items():
+        for tid in self._ordered_thread_ids():
+            title = self.titles[tid]
+            meta = self.thread_meta.get(tid, {})
+            if meta.get("role") == "worker" and meta.get("supervisor_id"):
+                title = title.removeprefix("↳ ")
+                title = f"  └ {title}"
             dot = f"[{self._WORKING}]●[/] " if tid in self.working else ""
             # the active thread is by definition read — never badge it
             badge = (f"  [b]●{self.unread[tid]}[/b]"
@@ -205,6 +220,32 @@ class Cockpit(App):
             if tid == self.active:
                 item.add_class("-active")
             lv.append(item)
+
+    def _ordered_thread_ids(self) -> list[str]:
+        """General, then each project manager and its workers, then legacy/direct."""
+        ordered: list[str] = []
+        used: set[str] = set()
+
+        def add(tid: str) -> None:
+            if tid in self.titles and tid not in used:
+                used.add(tid)
+                ordered.append(tid)
+
+        add(OFFICE)
+        managers = [tid for tid in self.titles
+                    if self.thread_meta.get(tid, {}).get("role") == "project_manager"]
+        for tid in managers:
+            add(tid)
+            manager_id = self.thread_meta.get(tid, {}).get("manager_id")
+            if manager_id:
+                for child in self.titles:
+                    meta = self.thread_meta.get(child, {})
+                    if (meta.get("role") == "worker"
+                            and meta.get("supervisor_id") == manager_id):
+                        add(child)
+        for tid in self.titles:
+            add(tid)
+        return ordered
 
     def _refresh_activity(self) -> None:
         """The one-line bar above the prompt: what's moving, or a quiet hint."""

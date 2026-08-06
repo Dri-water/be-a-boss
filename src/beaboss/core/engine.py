@@ -24,7 +24,8 @@ from typing import Any
 from .agent_backend import AgentResult, AgentTool, ToolNamespace
 from .names import pick_name, worker_id_for
 from .prompts import (DELIVERY_BALANCED, DELIVERY_CONSERVATIVE,
-                      ORCHESTRATOR_APPEND, WORKER_APPEND_EXTRA)
+                      ORCHESTRATOR_APPEND, PROJECT_MANAGER_APPEND,
+                      WORKER_APPEND_EXTRA)
 from .ports import (InboundMessage, MediaIn, Outbound, OutboundDeliveryError,
                     Speaker, SYSTEM, Transport)
 from .session import CoreSession, DEFAULT_SESSION_APPEND
@@ -35,6 +36,7 @@ from . import worktrees
 log = logging.getLogger("beaboss.core.engine")
 
 ORCHESTRATOR_EMOJI = "🧭"
+PROJECT_MANAGER_EMOJI = "🗂️"
 WORKER_EMOJI = "⚙️"
 MAX_INBOX = 200  # bound the supervision backlog if the orchestrator can't drain it
 
@@ -181,7 +183,14 @@ class Engine:
         self.store = store
         self.transport: Transport | None = None
         self.sessions: dict[str, CoreSession] = {}
+        # Done/delivered workers remain resumable from their persisted native id,
+        # but their local app-server and descendant dev servers must not consume
+        # resources indefinitely. Retirement runs just after the completing turn
+        # unwinds, then _ensure_session lazily reattaches if follow-up arrives.
+        self._retirement_tasks: set[asyncio.Task] = set()
         self._inbox: list[str] = []          # pending supervision notes for the orchestrator
+        self._manager_inboxes: dict[str, list[str]] = {}
+        self._manager_waking: set[str] = set()
         self._pending_vision: list[str] = []  # recent worker screenshots to show the orchestrator
         self._waking = False                 # digest wake in flight
         self._session_locks: dict[str, asyncio.Lock] = {}  # per-thread start lock
@@ -277,6 +286,11 @@ class Engine:
                        emoji=ORCHESTRATOR_EMOJI)
 
     @staticmethod
+    def project_manager_speaker(name: str) -> Speaker:
+        return Speaker(role="project_manager", name=name,
+                       emoji=PROJECT_MANAGER_EMOJI)
+
+    @staticmethod
     def worker_speaker(name: str) -> Speaker:
         return Speaker(role="worker", name=name, emoji=WORKER_EMOJI)
 
@@ -289,9 +303,22 @@ class Engine:
     def _fleet_snapshot(self) -> str:
         """One compact line of ground truth, injected into every boss turn."""
         rows = []
+        for _tid, manager in self.store.managers().items():
+            if manager.manager_status == "dismissed":
+                continue
+            active = sum(
+                1 for worker in self.store.workers().values()
+                if worker.supervisor_id == manager.manager_id
+                and worker.worker_status not in ("dismissed", "delivered")
+            )
+            rows.append(
+                f"project {Path(manager.repo).name}={manager.manager_id}/"
+                f"{active} active workers")
         for tid, rec in self.store.workers().items():
             if rec.worker_status in ("dismissed", "delivered"):
                 continue  # terminal — not "right now" work; keeps the line bounded
+            if rec.supervisor_id:
+                continue
             live = self.sessions.get(tid)
             run = live.status if live else "dormant"
             state = rec.worker_status or "working"
@@ -362,12 +389,29 @@ class Engine:
             ))
             return
 
+        if rec.role == "project_manager" and rec.manager_status == "dismissed":
+            await self._post(Outbound(
+                thread_id=msg.thread_id, speaker=SYSTEM,
+                text=(f"{rec.name} was dismissed. Ask the orchestrator to reopen "
+                      f"management for {Path(rec.repo).name}."),
+            ))
+            return
+
         session = await self._ensure_session(msg.thread_id, rec)
         if session is None:
             return
 
         if rec.role == "worker":
             await self._interject(msg, rec, session)
+            return
+
+        if rec.role == "project_manager":
+            who = msg.sender_name or "the boss"
+            text = f"[Direct project-room message from {who}]: {msg.text}"
+            if msg.media:
+                await session.submit_media(text, msg.media)
+            else:
+                await session.submit(text)
             return
 
         # direct session: plain turn
@@ -378,10 +422,10 @@ class Engine:
 
     async def _interject(self, msg: InboundMessage, rec: ThreadRecord,
                          session: CoreSession) -> None:
-        """Boss speaks inside a worker thread: worker hears it now, orchestrator
-        sees it in the next digest."""
+        """Boss speaks in a worker thread; its immediate supervisor is notified."""
         who = msg.sender_name or "the boss"
-        text = (f"[Interjection from {who} — visible to you and the orchestrator]: "
+        supervisor = "your project manager" if rec.supervisor_id else "the orchestrator"
+        text = (f"[Interjection from {who} — visible to you and {supervisor}]: "
                 f"{msg.text}")
         # a boss follow-up un-sticks a done/blocked marker (the worker is back at it)
         if rec.worker_status in ("done", "blocked"):
@@ -390,7 +434,12 @@ class Engine:
             await session.submit_media(text, msg.media)
         else:
             await session.submit(text)
-        self._note(f"{who} said in {rec.worker_id}'s thread: {msg.text}")
+        note = f"{who} said in {rec.worker_id}'s thread: {msg.text}"
+        manager = self._find_manager(rec.supervisor_id) if rec.supervisor_id else None
+        if manager:
+            self._manager_note(manager[0], note)
+        else:
+            self._note(note)
 
     # ---- session management ---------------------------------------------
 
@@ -416,6 +465,8 @@ class Engine:
             try:
                 if rec.role == "orchestrator":
                     session = self._make_orchestrator_session(thread_id, rec)
+                elif rec.role == "project_manager":
+                    session = self._make_project_manager_session(thread_id, rec)
                 elif rec.role == "worker":
                     session = self._make_worker_session(thread_id, rec)
                 else:
@@ -554,6 +605,35 @@ class Engine:
         session.on_turn_error = self._on_worker_turn_error
         return session
 
+    def _make_project_manager_session(
+        self, thread_id: str, rec: ThreadRecord,
+    ) -> CoreSession:
+        resume_id, model, effort, handoff = self._session_material(thread_id, rec)
+        home = Path(rec.cwd)
+        home.mkdir(parents=True, exist_ok=True)
+        base = (self.settings.session_system_append
+                if self.settings.session_system_append is not None else "")
+        project = (
+            "\n\nCODE-GENERATED PROJECT SCOPE (cannot be widened by chat):\n"
+            f"manager_id={rec.manager_id}\nrepo={rec.repo}\n"
+            f"charter={rec.task or '(ongoing project stewardship)'}\n")
+        append = ((base + "\n\n" if base else "") + PROJECT_MANAGER_APPEND
+                  + project + handoff)
+        session = CoreSession(
+            thread_id=thread_id, cwd=home,
+            speaker=self.project_manager_speaker(rec.name),
+            settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
+            on_session_id=self._sid_saver(thread_id), session_id=resume_id,
+            system_append=append,
+            extra_tool_namespaces=(self._build_manager_tools(thread_id),),
+            final_only=True,
+            model_override=model,
+            reasoning_effort_override=effort,
+        )
+        session.on_turn_done = self._on_project_manager_turn_done
+        session.on_turn_error = self._on_project_manager_turn_error
+        return session
+
     async def _ensure_orchestrator(self, thread_id: str) -> None:
         if self.store.get(thread_id) is None:
             self.store.put(thread_id, ThreadRecord(
@@ -571,7 +651,96 @@ class Engine:
             log.warning("inbox exceeded %d notes; dropped %d oldest", MAX_INBOX, drop)
         log.info("inbox note: %s", text[:160])
 
+    def _manager_note(self, manager_thread: str, text: str) -> None:
+        inbox = self._manager_inboxes.setdefault(manager_thread, [])
+        inbox.append(text)
+        if len(inbox) > MAX_INBOX:
+            drop = len(inbox) - MAX_INBOX
+            del inbox[:drop]
+            log.warning(
+                "manager inbox %s exceeded %d notes; dropped %d oldest",
+                manager_thread, MAX_INBOX, drop)
+        log.info("manager inbox note thread=%s: %s", manager_thread, text[:160])
+
+    async def _route_worker_supervision(
+        self, rec: ThreadRecord, note: str,
+    ) -> None:
+        manager = self._find_manager(rec.supervisor_id) if rec.supervisor_id else None
+        if manager:
+            self._manager_note(manager[0], note)
+            await self._wake_project_manager(manager[0])
+        else:
+            self._note(note)
+            await self._wake_orchestrator()
+
+    async def _wake_project_manager(self, manager_thread: str) -> None:
+        inbox = self._manager_inboxes.get(manager_thread)
+        if not inbox or manager_thread in self._manager_waking:
+            return
+        rec = self.store.get(manager_thread)
+        if rec is None or rec.role != "project_manager" \
+                or rec.manager_status == "dismissed":
+            # A missing supervisor must never make worker evidence disappear.
+            notes = self._manager_inboxes.pop(manager_thread, [])
+            for note in notes:
+                self._note(f"[manager unavailable] {note}")
+            await self._wake_orchestrator()
+            return
+        self._manager_waking.add(manager_thread)
+        try:
+            session = await self._ensure_session(manager_thread, rec)
+            if session is None:
+                notes = self._manager_inboxes.pop(manager_thread, [])
+                for note in notes:
+                    self._note(f"[manager {rec.manager_id} failed to start] {note}")
+                await self._wake_orchestrator()
+                return
+            while self._manager_inboxes.get(manager_thread):
+                await asyncio.sleep(self.WAKE_COALESCE_SECS)
+                notes = self._manager_inboxes.pop(manager_thread, [])
+                if not notes:
+                    break
+                snapshot = self._project_snapshot(rec.manager_id)
+                digest = (
+                    "[project inbox]\n" + "\n".join(f"- {n}" for n in notes)
+                    + "\n\n[code-generated project state]\n" + snapshot)
+                await session.submit(digest, quiet_ok=True)
+        finally:
+            self._manager_waking.discard(manager_thread)
+
     # ---- dashboard (the shared #general status board) -------------------
+
+    def _find_manager(self, manager_id: str) -> tuple[str, ThreadRecord] | None:
+        if not manager_id:
+            return None
+        for thread_id, rec in self.store.managers().items():
+            if rec.manager_id == manager_id:
+                return thread_id, rec
+        return None
+
+    def _project_snapshot(self, manager_id: str) -> str:
+        found = self._find_manager(manager_id)
+        if found is None:
+            return "(project manager missing)"
+        thread_id, manager = found
+        live = self.sessions.get(thread_id)
+        lines = [
+            f"project={Path(manager.repo).name} repo={manager.repo}",
+            f"manager={manager.manager_id} runtime={live.status if live else 'dormant'}",
+        ]
+        children = [
+            (tid, worker) for tid, worker in self.store.workers().items()
+            if worker.supervisor_id == manager_id
+        ]
+        if not children:
+            lines.append("workers=(none)")
+        for tid, worker in children:
+            runtime = self.sessions.get(tid)
+            lines.append(
+                f"- {worker.worker_id}: status={worker.worker_status or 'working'} "
+                f"runtime={runtime.status if runtime else 'dormant'} "
+                f"checks={worker.checks or 'not-run'} task={worker.task[:100]}")
+        return "\n".join(lines)
 
     def _render_dashboard(self) -> str:
         """A deterministic snapshot of the fleet, rendered from the store in code
@@ -601,6 +770,25 @@ class Engine:
         out = [f"📋 {self.settings.bot_name} — live status",
                f"🟢 {len(cats['running'])} running   🔎 {len(cats['review'])} in review"
                f"   🚦 {len(cats['approve'])} to approve   ⛔ {len(cats['blocked'])} blocked"]
+        managers = [m for m in self.store.managers().values()
+                    if m.manager_status != "dismissed"]
+        if managers:
+            out += ["", "🗂 Projects:"]
+            for manager in managers[-12:]:
+                children = [w for w in workers
+                            if w.supervisor_id == manager.manager_id]
+                counts = {key: 0 for key in cats}
+                for child in children:
+                    counts[bucket(child)] += 1
+                out.append(
+                    f"  • {Path(manager.repo).name} · {manager.manager_id} — "
+                    f"{counts['running']} running, {counts['review']} review, "
+                    f"{counts['blocked']} blocked")
+                for child in children:
+                    state = bucket(child)
+                    if state in ("blocked", "review", "approve"):
+                        out.append(
+                            f"    ↳ {child.name} [{state}] — {child.task[:48]}")
         if cats["approve"]:
             out += ["", "🚦 Awaiting your approval:"] + [
                 f"  • {r.name} · {Path(r.repo).name} — /approve {r.worker_id}"
@@ -659,6 +847,64 @@ class Engine:
             log.warning("retaining %d crashed boss turn(s) for restart recovery: %s",
                         len(ids), error)
 
+    async def _on_project_manager_turn_done(
+        self, session: CoreSession, result: AgentResult,
+    ) -> None:
+        rec = self.store.get(session.thread_id)
+        if rec is None:
+            return
+        full = (result.result or "").strip()
+        meaningful = bool(full and full.upper() != "NOTHING")
+        if meaningful:
+            summary = full if len(full) <= 1000 else full[:1000] + "…"
+            self.store.update(session.thread_id, last_summary=summary)
+            self._note(
+                f"project manager {rec.manager_id} ({Path(rec.repo).name}) report: "
+                f"{summary}")
+            await self._wake_orchestrator()
+        self._schedule_project_manager_retirement(session.thread_id, session)
+
+    async def _on_project_manager_turn_error(
+        self, session: CoreSession, error: BaseException,
+    ) -> None:
+        rec = self.store.get(session.thread_id)
+        if rec is None:
+            return
+        detail = str(error) or error.__class__.__name__
+        self._note(
+            f"project manager {rec.manager_id} ({Path(rec.repo).name}) failed a turn: "
+            f"{detail[:400]}. Inspect the project and recover supervision.")
+        await self._wake_orchestrator()
+        self._schedule_project_manager_retirement(session.thread_id, session)
+
+    def _schedule_project_manager_retirement(
+        self, thread_id: str, session: CoreSession,
+    ) -> None:
+        task = asyncio.create_task(
+            self._retire_project_manager_runtime(thread_id, session),
+            name=f"retire-project-manager-{thread_id}",
+        )
+        self._retirement_tasks.add(task)
+        task.add_done_callback(self._retirement_tasks.discard)
+
+    async def _retire_project_manager_runtime(
+        self, thread_id: str, expected_session: CoreSession | None = None,
+    ) -> bool:
+        """Hibernate an idle manager while keeping its native session resumable."""
+        await asyncio.sleep(0)
+        rec = self.store.get(thread_id)
+        if rec is None or rec.role != "project_manager":
+            return False
+        session = self.sessions.get(thread_id)
+        if expected_session is not None and session is not expected_session:
+            return False
+        if session is None or getattr(session, "pending", 0):
+            return False
+        self.sessions.pop(thread_id, None)
+        await session.stop()
+        log.info("hibernated project manager %s", rec.manager_id)
+        return True
+
     async def _on_worker_turn_done(self, session: CoreSession, result: AgentResult) -> None:
         rec = self.store.get(session.thread_id)
         if rec is None:
@@ -669,10 +915,73 @@ class Engine:
             self.store.update(session.thread_id, worker_status=new_status)
         tail = full if len(full) <= 600 else full[:600] + "…"
         status = "errored" if result.is_error else "finished a turn"
-        self._note(f"worker {rec.worker_id} ({rec.name}, task: {rec.task[:80]}) "
-                   f"{status}: {tail or '(no text)'}")
+        note = (f"worker {rec.worker_id} ({rec.name}, task: {rec.task[:80]}) "
+                f"{status}: {tail or '(no text)'}")
+        manager = self._find_manager(rec.supervisor_id) if rec.supervisor_id else None
+        if manager:
+            self._manager_note(manager[0], note)
+        else:
+            self._note(note)
         await self._refresh_dashboard()
-        await self._wake_orchestrator()
+        if manager:
+            await self._wake_project_manager(manager[0])
+        else:
+            await self._wake_orchestrator()
+        if new_status in ("done", "delivered"):
+            self._schedule_worker_retirement(session.thread_id, session)
+
+    def _schedule_worker_retirement(
+        self, thread_id: str, session: CoreSession,
+    ) -> None:
+        """Retire after the current CoreSession callback has returned."""
+        task = asyncio.create_task(
+            self._retire_worker_runtime(thread_id, session),
+            name=f"retire-worker-{thread_id}",
+        )
+        self._retirement_tasks.add(task)
+
+        def finished(done: asyncio.Task) -> None:
+            self._retirement_tasks.discard(done)
+            if done.cancelled():
+                return
+            error = done.exception()
+            if error is not None:
+                log.error(
+                    "worker runtime retirement failed thread=%s: %s",
+                    thread_id, error,
+                )
+
+        task.add_done_callback(finished)
+
+    async def _retire_worker_runtime(
+        self, thread_id: str, expected_session: CoreSession | None = None,
+    ) -> bool:
+        """Stop terminal worker runtimes while preserving resumable fleet state.
+
+        Yield once so an on_turn_done caller can leave the session run loop. A
+        simultaneous follow-up changes the persisted status back to ``working``;
+        that wins the race and keeps the live session.
+        """
+        await asyncio.sleep(0)
+        rec = self.store.get(thread_id)
+        if rec is None or rec.role != "worker":
+            return False
+        if rec.worker_status not in ("done", "delivered"):
+            return False
+        session = self.sessions.get(thread_id)
+        if expected_session is not None and session is not expected_session:
+            return False
+        if session is not None:
+            self.sessions.pop(thread_id, None)
+            await session.stop()
+        if rec.repo and rec.cwd and Path(rec.cwd) != Path(rec.repo):
+            await worktrees.terminate_worker_processes(
+                Path(rec.cwd), worker_thread_id=thread_id)
+        log.info(
+            "retired terminal worker runtime %s status=%s",
+            rec.worker_id, rec.worker_status,
+        )
+        return True
 
     async def _on_worker_turn_error(self, session: CoreSession, error: BaseException) -> None:
         """A worker's turn CRASHED (no agent result — e.g. the SDK hit a fatal read
@@ -683,19 +992,19 @@ class Engine:
         if rec is None:
             return
         if isinstance(error, OutboundDeliveryError):
-            self._note(
+            note = (
                 f"worker {rec.worker_id} ({rec.name}) completed agent activity but its "
                 f"chat output could not be delivered: {error}. Inspect the worktree and "
                 "follow up without blindly repeating the turn; its side effects may "
                 "already be complete.")
             await self._refresh_dashboard()
-            await self._wake_orchestrator()
+            await self._route_worker_supervision(rec, note)
             return
         detail = str(error) or error.__class__.__name__
         if len(detail) > 300:
             detail = detail[:300] + "…"
         recovered = session.status not in ("error", "stopped")
-        self._note(
+        note = (
             f"worker {rec.worker_id} ({rec.name}) hit an error mid-turn and that turn "
             f"was lost: {detail}. "
             + ("I reconnected the session — decide how to get it moving again (retry, or "
@@ -704,7 +1013,7 @@ class Engine:
                if recovered else
                "The session could NOT recover — tell the boss it needs a look."))
         await self._refresh_dashboard()
-        await self._wake_orchestrator()
+        await self._route_worker_supervision(rec, note)
 
     # Coalescing window: near-simultaneous worker events (e.g. two workers finish
     # together, or a boss interjection followed by the worker's reply) become one
@@ -834,6 +1143,57 @@ class Engine:
         )
         async def inspect_repo(args: dict[str, Any]) -> dict[str, Any]:
             return await engine._inspect_repo(str(args.get("repo", "")))
+
+        @fleet_tool(
+            "hire_project_manager",
+            "Create or reuse one durable, hibernating project manager for a repository. "
+            "Use this context boundary for continuing, multi-step, or multi-worker work; "
+            "keep trivial one-offs on the direct worker path.",
+            {"type": "object", "properties": {
+                "repo": {"type": "string"},
+                "charter": {"type": "string"},
+                "tier": {"type": "string", "enum": ["fast", "balanced", "deep"]},
+            }, "required": ["repo", "charter"]},
+        )
+        async def hire_project_manager(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._hire_project_manager(
+                str(args.get("repo", "")), str(args.get("charter", "")),
+                tier=str(args.get("tier", "")).strip().lower() or None)
+
+        @fleet_tool(
+            "message_project_manager",
+            "Send a project outcome, constraint, decision, or follow-up to a manager.",
+            {"type": "object", "properties": {
+                "manager_id": {"type": "string"}, "text": {"type": "string"},
+            }, "required": ["manager_id", "text"]},
+        )
+        async def message_project_manager(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._message_project_manager(
+                str(args.get("manager_id", "")), str(args.get("text", "")))
+
+        @fleet_tool(
+            "project_status",
+            "Code-owned project/manager/worker state. Pass manager_id for one project.",
+            {"type": "object", "properties": {
+                "manager_id": {"type": "string"}}},
+        )
+        async def project_status(args: dict[str, Any]) -> dict[str, Any]:
+            want = str(args.get("manager_id", "")).strip()
+            managers = engine.store.managers().items()
+            blocks = [engine._project_snapshot(rec.manager_id)
+                      for _tid, rec in managers
+                      if not want or rec.manager_id == want]
+            return ok("\n\n".join(blocks) or "(no matching projects)")
+
+        @fleet_tool(
+            "dismiss_project_manager",
+            "Dismiss an idle project manager. Refuses while owned work is unfinished.",
+            {"type": "object", "properties": {
+                "manager_id": {"type": "string"}}, "required": ["manager_id"]},
+        )
+        async def dismiss_project_manager(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._dismiss_project_manager(
+                str(args.get("manager_id", "")))
 
         @fleet_tool(
             "spawn_worker",
@@ -970,11 +1330,134 @@ class Engine:
             tools=tuple(specs),
         )
 
+    def _build_manager_tools(self, manager_thread: str) -> ToolNamespace:
+        """A deliberately small, repository-scoped project-management surface."""
+        engine = self
+        specs: list[AgentTool] = []
+
+        def project_tool(name: str, description: str, schema: dict[str, Any]):
+            def decorate(handler):
+                specs.append(AgentTool(name, description, schema, handler))
+                return handler
+            return decorate
+
+        def err(text: str) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": text}], "is_error": True}
+
+        def manager() -> ThreadRecord | None:
+            rec = engine.store.get(manager_thread)
+            return rec if rec and rec.role == "project_manager" else None
+
+        @project_tool(
+            "inspect_project",
+            "Inspect your assigned repository's guidance, layout, branch, and test hint.",
+            {"type": "object", "properties": {}},
+        )
+        async def inspect_project(args: dict[str, Any]) -> dict[str, Any]:
+            rec = manager()
+            return await engine._inspect_repo(rec.repo) if rec else err("manager missing")
+
+        @project_tool(
+            "spawn_worker",
+            "Hire a worker inside your assigned repository for one self-contained task.",
+            {"type": "object", "properties": {
+                "task": {"type": "string"},
+                "tier": {"type": "string", "enum": ["fast", "balanced", "deep"]},
+            }, "required": ["task"]},
+        )
+        async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
+            rec = manager()
+            if rec is None:
+                return err("manager missing")
+            return await engine._spawn_worker(
+                rec.repo, str(args.get("task", "")),
+                tier=str(args.get("tier", "")).strip().lower() or None,
+                supervisor_id=rec.manager_id)
+
+        @project_tool(
+            "message_worker",
+            "Steer one of your own workers; workers owned by other projects are refused.",
+            {"type": "object", "properties": {
+                "worker_id": {"type": "string"}, "text": {"type": "string"},
+            }, "required": ["worker_id", "text"]},
+        )
+        async def message_worker(args: dict[str, Any]) -> dict[str, Any]:
+            rec = manager()
+            if rec is None:
+                return err("manager missing")
+            return await engine._message_worker(
+                str(args.get("worker_id", "")), str(args.get("text", "")),
+                supervisor_id=rec.manager_id)
+
+        @project_tool(
+            "worker_status",
+            "Show code-owned state for workers in your project only.",
+            {"type": "object", "properties": {}},
+        )
+        async def worker_status(args: dict[str, Any]) -> dict[str, Any]:
+            rec = manager()
+            if rec is None:
+                return err("manager missing")
+            return {"content": [{"type": "text",
+                                 "text": engine._project_snapshot(rec.manager_id)}]}
+
+        @project_tool(
+            "dismiss_worker",
+            "Dismiss one of your own workers; refuses dirty workspaces.",
+            {"type": "object", "properties": {
+                "worker_id": {"type": "string"}}, "required": ["worker_id"]},
+        )
+        async def dismiss_worker(args: dict[str, Any]) -> dict[str, Any]:
+            rec = manager()
+            if rec is None:
+                return err("manager missing")
+            return await engine._dismiss_worker(
+                str(args.get("worker_id", "")), supervisor_id=rec.manager_id)
+
+        @project_tool(
+            "review_worker",
+            "Inspect committed diff and delivery routes for one of your own workers.",
+            {"type": "object", "properties": {
+                "worker_id": {"type": "string"}}, "required": ["worker_id"]},
+        )
+        async def review_worker(args: dict[str, Any]) -> dict[str, Any]:
+            rec = manager()
+            if rec is None:
+                return err("manager missing")
+            return await engine._review_worker(
+                str(args.get("worker_id", "")), supervisor_id=rec.manager_id)
+
+        @project_tool(
+            "run_checks",
+            "Run a bounded check command inside one of your own worker worktrees.",
+            {"type": "object", "properties": {
+                "worker_id": {"type": "string"}, "command": {"type": "string"},
+            }, "required": ["worker_id", "command"]},
+        )
+        async def run_checks(args: dict[str, Any]) -> dict[str, Any]:
+            rec = manager()
+            if rec is None:
+                return err("manager missing")
+            return await engine._run_checks(
+                str(args.get("worker_id", "")), str(args.get("command", "")),
+                supervisor_id=rec.manager_id)
+
+        return ToolNamespace(
+            name="project",
+            description=("Manage workers and verification inside exactly one assigned "
+                         "repository. Delivery remains with the global orchestrator."),
+            tools=tuple(specs),
+        )
+
     # ---- fleet operations ------------------------------------------------
 
-    def _find_worker(self, worker_id: str) -> tuple[str, ThreadRecord] | None:
+    def _find_worker(
+        self, worker_id: str, supervisor_id: str | None = None,
+    ) -> tuple[str, ThreadRecord] | None:
         for tid, rec in self.store.workers().items():
-            if rec.worker_id == worker_id:
+            if (rec.worker_id == worker_id
+                    and (supervisor_id is None
+                         or rec.supervisor_id == supervisor_id)):
                 return tid, rec
         return None
 
@@ -995,6 +1478,140 @@ class Engine:
         except ValueError:
             return None  # outside the projects root — refused
         return repo if repo.is_dir() else None
+
+    async def _hire_project_manager(
+        self, repo_raw: str, charter: str, tier: str | None = None,
+    ) -> dict[str, Any]:
+        def err(text: str) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": text}], "is_error": True}
+
+        if not charter.strip():
+            return err("charter is required")
+        if tier and tier not in ("fast", "balanced", "deep"):
+            return err(f"unknown tier '{tier}' — use fast, balanced, or deep")
+        repo = self._resolve_repo(repo_raw)
+        if repo is None:
+            return err(f"no such repo: {repo_raw}")
+
+        for thread_id, rec in self.store.managers().items():
+            if Path(rec.repo).resolve() == repo and rec.manager_status != "dismissed":
+                result = await self._message_project_manager(
+                    rec.manager_id, charter.strip())
+                if result.get("is_error"):
+                    return result
+                self._action(f"reuse_project_manager({rec.manager_id})")
+                return {"content": [{"type": "text", "text":
+                        f"reused project manager {rec.manager_id} for {repo.name}; "
+                        "the new charter was delivered."}]}
+
+        selected_tier, model, effort = self.settings.resolve_worker_profile(
+            tier or "balanced")
+        base_id = worker_id_for(repo.name) or "project"
+        taken = {r.manager_id for r in self.store.managers().values()}
+        manager_id = base_id
+        suffix = 2
+        while manager_id in taken:
+            manager_id = f"{base_id}-{suffix}"
+            suffix += 1
+        name = f"{repo.name} PM"
+        home = self.settings.state_dir / "managers" / f"{manager_id}-home"
+        home.mkdir(parents=True, exist_ok=True)
+
+        assert self.transport is not None
+        thread_id = await self.transport.create_thread(
+            f"{PROJECT_MANAGER_EMOJI} {repo.name} · project manager")
+        rec = ThreadRecord(
+            role="project_manager", name=name, cwd=str(home), repo=str(repo),
+            task=charter.strip(), manager_id=manager_id, manager_status="active",
+            tier=selected_tier, model=model or "", reasoning_effort=effort or "",
+            backend=self.settings.agent_backend,
+            models=({self.settings.agent_backend: model} if model else {}),
+            reasoning_efforts=(
+                {self.settings.agent_backend: effort} if effort else {}),
+        )
+        self.store.put(thread_id, rec)
+        update_thread = getattr(self.transport, "update_thread", None)
+        if update_thread is not None:
+            await update_thread(
+                thread_id, role="project_manager", repo=str(repo),
+                manager_id=manager_id, supervisor_id="", status="active")
+        await self._post(Outbound(
+            thread_id=thread_id, speaker=SYSTEM,
+            text=(f"Project room opened for {repo.name}. {name} retains project "
+                  "context and hibernates when idle.")))
+        await self._post(Outbound(
+            thread_id=thread_id, speaker=self.orchestrator_speaker(),
+            text=charter.strip()))
+        session = await self._ensure_session(thread_id, rec)
+        if session is None:
+            return err("project manager session failed to start (see project room)")
+        await session.submit(
+            "[Initial charter from the global orchestrator]\n" + charter.strip())
+        await self._refresh_dashboard()
+        self._action(f"hire_project_manager → {manager_id} · {repo.name}")
+        return {"content": [{"type": "text", "text":
+                f"hired project manager {manager_id} for {repo.name}; project room "
+                "created and charter delivered."}]}
+
+    async def _message_project_manager(
+        self, manager_id: str, text: str,
+    ) -> dict[str, Any]:
+        def err(detail: str) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": detail}], "is_error": True}
+
+        found = self._find_manager(manager_id.strip())
+        if found is None:
+            return err(f"no such project manager: {manager_id}")
+        if not text.strip():
+            return err("text is required")
+        thread_id, rec = found
+        if rec.manager_status == "dismissed":
+            return err(f"project manager {manager_id} is dismissed")
+        await self._post(Outbound(
+            thread_id=thread_id, speaker=self.orchestrator_speaker(),
+            text=text.strip()))
+        session = await self._ensure_session(thread_id, rec)
+        if session is None:
+            return err("project manager session unavailable")
+        await session.submit(f"[From the global orchestrator]: {text.strip()}")
+        self._action(f"message_project_manager({rec.manager_id})")
+        return {"content": [{"type": "text", "text": "delivered"}]}
+
+    async def _dismiss_project_manager(self, manager_id: str) -> dict[str, Any]:
+        def err(detail: str) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": detail}], "is_error": True}
+
+        found = self._find_manager(manager_id.strip())
+        if found is None:
+            return err(f"no such project manager: {manager_id}")
+        thread_id, rec = found
+        unfinished = [
+            worker for worker in self.store.workers().values()
+            if worker.supervisor_id == rec.manager_id
+            and worker.worker_status not in ("dismissed", "delivered")
+        ]
+        if unfinished:
+            ids = ", ".join(worker.worker_id for worker in unfinished)
+            return err(
+                f"refused to dismiss {manager_id}: unfinished owned workers: {ids}")
+        session = self.sessions.pop(thread_id, None)
+        if session is not None:
+            await session.stop()
+        self.store.update(thread_id, manager_status="dismissed")
+        update_thread = getattr(self.transport, "update_thread", None)
+        if update_thread is not None:
+            await update_thread(thread_id, status="dismissed")
+        await self._post(Outbound(
+            thread_id=thread_id, speaker=SYSTEM,
+            text=f"{rec.name} dismissed by the orchestrator."))
+        if self.transport is not None:
+            try:
+                await self.transport.close_thread(thread_id)
+            except Exception:  # noqa: BLE001
+                pass
+        await self._refresh_dashboard()
+        self._action(f"dismiss_project_manager({manager_id})")
+        return {"content": [{"type": "text", "text": f"dismissed {manager_id}"}]}
 
     async def _inspect_repo(self, repo_raw: str) -> dict[str, Any]:
         """Ground the orchestrator in a repo: its guide docs, layout, check command —
@@ -1023,7 +1640,8 @@ class Engine:
         return {"content": [{"type": "text", "text": body}]}
 
     async def _spawn_worker(self, repo_raw: str, task: str,
-                            tier: str | None = None) -> dict[str, Any]:
+                            tier: str | None = None,
+                            supervisor_id: str = "") -> dict[str, Any]:
         def err(text: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": text}], "is_error": True}
 
@@ -1068,8 +1686,9 @@ class Engine:
             return err(f"couldn't set up an isolated workspace for {repo.name}: {e}")
 
         assert self.transport is not None
+        prefix = "↳ " if supervisor_id else ""
         thread_id = await self.transport.create_thread(
-            f"{WORKER_EMOJI} {name} · {repo.name}")
+            f"{prefix}{WORKER_EMOJI} {name} · {repo.name}")
 
         rec = ThreadRecord(
             role="worker", name=name, cwd=str(cwd), worker_id=worker_id,
@@ -1080,8 +1699,14 @@ class Engine:
             models=({self.settings.agent_backend: model} if model else {}),
             reasoning_efforts=(
                 {self.settings.agent_backend: effort} if effort else {}),
+            supervisor_id=supervisor_id,
         )
         self.store.put(thread_id, rec)
+        update_thread = getattr(self.transport, "update_thread", None)
+        if update_thread is not None:
+            await update_thread(
+                thread_id, role="worker", repo=str(repo),
+                supervisor_id=supervisor_id, status="working")
 
         iso_note = ("its own isolated copy · branch worker/" + worker_id if isolated
                     else "⚠️ not a git repo — working directly in the project dir")
@@ -1090,29 +1715,35 @@ class Engine:
             text=f"{name} hired for {repo.name} ({iso_note}).",
         ))
         # the orchestrator's brief, visible in the thread:
+        supervisor = self._find_manager(supervisor_id) if supervisor_id else None
+        speaker = (self.project_manager_speaker(supervisor[1].name)
+                   if supervisor else self.orchestrator_speaker())
         await self._post(Outbound(
-            thread_id=thread_id, speaker=self.orchestrator_speaker(), text=task.strip(),
+            thread_id=thread_id, speaker=speaker, text=task.strip(),
         ))
 
         session = await self._ensure_session(thread_id, rec)
         if session is None:
             return err("worker session failed to start (see thread)")
-        await session.submit(
-            f"[Brief from the orchestrator]\n{task.strip()}"
-        )
+        source = (f"project manager {supervisor[1].name}"
+                  if supervisor else "the orchestrator")
+        await session.submit(f"[Brief from {source}]\n{task.strip()}")
         await self._refresh_dashboard()
         profile = f"{selected_tier} → {model or 'default'}/{effort or 'default'}"
-        self._action(f"spawn_worker → {name} · {repo.name} [{profile}]")
+        if not supervisor_id:
+            self._action(f"spawn_worker → {name} · {repo.name} [{profile}]")
         return {"content": [{"type": "text", "text":
                 f"spawned worker {worker_id} ({name}) in {iso_note}; "
-                f"profile {profile}; thread created. They will report back via "
-                f"the fleet inbox."}]}
+                f"profile {profile}; thread created. They will report back to "
+                f"{'their project manager' if supervisor else 'the fleet inbox'}."}]}
 
-    async def _message_worker(self, worker_id: str, text: str) -> dict[str, Any]:
+    async def _message_worker(
+        self, worker_id: str, text: str, supervisor_id: str | None = None,
+    ) -> dict[str, Any]:
         def err(t: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": t}], "is_error": True}
 
-        found = self._find_worker(worker_id.strip())
+        found = self._find_worker(worker_id.strip(), supervisor_id)
         if found is None:
             return err(f"no such worker: {worker_id}")
         if not text.strip():
@@ -1121,21 +1752,28 @@ class Engine:
         # being sent back to work un-sticks a done/blocked marker
         if rec.worker_status in ("done", "blocked"):
             self.store.update(thread_id, worker_status="working")
+        manager = self._find_manager(supervisor_id or "")
+        speaker = (self.project_manager_speaker(manager[1].name)
+                   if manager else self.orchestrator_speaker())
         await self._post(Outbound(
-            thread_id=thread_id, speaker=self.orchestrator_speaker(), text=text.strip(),
+            thread_id=thread_id, speaker=speaker, text=text.strip(),
         ))
         session = await self._ensure_session(thread_id, rec)
         if session is None:
             return err("worker session unavailable")
-        await session.submit(f"[From the orchestrator]: {text.strip()}")
-        self._action(f"message_worker({rec.worker_id})")
+        source = "your project manager" if manager else "the orchestrator"
+        await session.submit(f"[From {source}]: {text.strip()}")
+        if supervisor_id is None:
+            self._action(f"message_worker({rec.worker_id})")
         return {"content": [{"type": "text", "text": "delivered"}]}
 
-    async def _dismiss_worker(self, worker_id: str) -> dict[str, Any]:
+    async def _dismiss_worker(
+        self, worker_id: str, supervisor_id: str | None = None,
+    ) -> dict[str, Any]:
         def err(t: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": t}], "is_error": True}
 
-        found = self._find_worker(worker_id.strip())
+        found = self._find_worker(worker_id.strip(), supervisor_id)
         if found is None:
             return err(f"no such worker: {worker_id}")
         thread_id, rec = found
@@ -1170,14 +1808,17 @@ class Engine:
             except Exception:  # noqa: BLE001
                 pass
         await self._refresh_dashboard()
-        self._action(f"dismiss_worker({worker_id})")
+        if supervisor_id is None:
+            self._action(f"dismiss_worker({worker_id})")
         return {"content": [{"type": "text", "text": f"dismissed {worker_id}"}]}
 
-    async def _review_worker(self, worker_id: str) -> dict[str, Any]:
+    async def _review_worker(
+        self, worker_id: str, supervisor_id: str | None = None,
+    ) -> dict[str, Any]:
         def err(t: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": t}], "is_error": True}
 
-        found = self._find_worker(worker_id.strip())
+        found = self._find_worker(worker_id.strip(), supervisor_id)
         if found is None:
             return err(f"no such worker: {worker_id}")
         _tid, rec = found
@@ -1223,14 +1864,17 @@ class Engine:
                 f"- checks: {checks_line}\n"
                 f"- delivery routes available: {', '.join(routes)}{work_note}\n\n{diff}"}]}
 
-    async def _run_checks(self, worker_id: str, command: str) -> dict[str, Any]:
+    async def _run_checks(
+        self, worker_id: str, command: str,
+        supervisor_id: str | None = None,
+    ) -> dict[str, Any]:
         """Actually RUN a check command in the worker's worktree — real exit code,
         not the worker's word. Records the verdict + the revision it ran against so
         delivery can gate on it (and notice if the branch moved since)."""
         def err(t: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": t}], "is_error": True}
 
-        found = self._find_worker(worker_id.strip())
+        found = self._find_worker(worker_id.strip(), supervisor_id)
         if found is None:
             return err(f"no such worker: {worker_id}")
         thread_id, rec = found
@@ -1245,7 +1889,8 @@ class Engine:
         self.store.update(thread_id,
                           checks=("pass" if code == 0 else "fail"), checks_sha=sha)
         verdict = "✅ passed" if code == 0 else f"❌ FAILED (exit {code})"
-        self._action(f"run_checks({rec.worker_id}): {'✅' if code == 0 else '❌'}")
+        if supervisor_id is None:
+            self._action(f"run_checks({rec.worker_id}): {'✅' if code == 0 else '❌'}")
         # Surface the REAL result into the worker's own thread so the boss sees proof.
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM,
@@ -1405,6 +2050,7 @@ class Engine:
             await self._wake_orchestrator()
             return f"⚠️ delivery of {rec.name} failed: {detail}"
         self.store.update(plan.thread_id, worker_status="delivered")
+        await self._retire_worker_runtime(plan.thread_id)
         await self._post(Outbound(
             thread_id=plan.thread_id, speaker=SYSTEM, text=f"📦 {detail}."))
         self._note(f"{rec.name}'s work delivered — {detail}")
@@ -1447,6 +2093,9 @@ class Engine:
 
     async def kill(self, thread_id: str) -> bool:
         rec = self.store.get(thread_id)
+        if rec is not None and rec.role == "project_manager":
+            result = await self._dismiss_project_manager(rec.manager_id)
+            return not bool(result.get("is_error"))
         session = self.sessions.pop(thread_id, None)
         if session is not None:
             await session.stop()
@@ -1479,15 +2128,36 @@ class Engine:
         a working worker as surely as it can strand a finished or blocked one.
         Re-enqueue all of them for startup_recovery() to deliver to the orchestrator.
         """
-        pending = [rec for rec in self.store.workers().values()
-                   if rec.worker_status in ("working", "blocked", "done")]
-        if pending:
-            names = ", ".join(f"{r.name} ({r.worker_status})" for r in pending)
+        managers = [rec for rec in self.store.managers().values()
+                    if rec.manager_status != "dismissed"]
+        if managers:
+            summaries = "; ".join(
+                f"{m.manager_id}={m.last_summary[:120] or 'no prior summary'}"
+                for m in managers)
+            self._note(
+                f"[after restart] project managers restored dormant: {summaries}. "
+                "Their native sessions resume lazily; dormant is healthy.")
+        legacy_pending: list[ThreadRecord] = []
+        for rec in self.store.workers().values():
+            if rec.worker_status not in ("working", "blocked", "done"):
+                continue
+            note = (
+                f"[after restart] {rec.name} ({rec.worker_status}) needs recovery. "
+                "Working turns are resumed automatically; inspect current workspace "
+                "state and do not duplicate external side effects.")
+            manager = self._find_manager(rec.supervisor_id) if rec.supervisor_id else None
+            if manager:
+                self._manager_note(manager[0], note)
+            else:
+                legacy_pending.append(rec)
+        if legacy_pending:
+            names = ", ".join(
+                f"{worker.name} ({worker.worker_status})"
+                for worker in legacy_pending)
             self._note(
                 f"[after restart] non-terminal workers need recovery: {names}. "
-                "Working workers lost their in-memory turn and are being resumed "
-                "automatically; do not duplicate their brief unless follow-up is needed. "
-                "Review done workers and resolve blocked workers as usual.")
+                "Working workers are resumed automatically; inspect current workspace "
+                "state and do not duplicate external side effects.")
 
     async def startup_recovery(self) -> None:
         """Resume interrupted workers, then wake the orchestrator with ground truth."""
@@ -1496,8 +2166,8 @@ class Engine:
                 continue
             session = await self._ensure_session(thread_id, rec)
             if session is None:
-                self._note(
-                    f"automatic restart recovery could not start {rec.name}; "
+                await self._route_worker_supervision(
+                    rec, f"automatic restart recovery could not start {rec.name}; "
                     "inspect and re-brief them")
                 continue
             await self._post(Outbound(
@@ -1531,6 +2201,8 @@ class Engine:
                         text, reply_to=turn["thread_id"],
                         delivery_ids=[turn["id"]])
                 log.info("re-enqueued %d durable boss turn(s)", len(pending))
+        for manager_thread in list(self._manager_inboxes):
+            await self._wake_project_manager(manager_thread)
         await self._wake_orchestrator()
 
     async def factory_reset(self) -> str:
@@ -1546,6 +2218,8 @@ class Engine:
                 pass
         self.sessions.clear()
         self._inbox.clear()
+        self._manager_inboxes.clear()
+        self._manager_waking.clear()
         self._waking = False
         self._pending_delivery.clear()
         self._last_dashboard = ""
@@ -1583,7 +2257,7 @@ class Engine:
                 pass
 
         self.store.wipe()
-        for sub in ("orchestrator-home", "worktrees"):
+        for sub in ("orchestrator-home", "managers", "worktrees"):
             shutil.rmtree(self.settings.state_dir / sub, ignore_errors=True)
         log.warning("factory reset executed — all state wiped")
         msg = ("🏭 Factory reset complete — memory, state, and worker threads wiped. "
@@ -1595,6 +2269,9 @@ class Engine:
         return f"{msg}{caveat}" if caveat else msg
 
     async def shutdown(self) -> None:
+        if self._retirement_tasks:
+            await asyncio.gather(
+                *tuple(self._retirement_tasks), return_exceptions=True)
         for session in list(self.sessions.values()):
             await session.stop()
         self.sessions.clear()

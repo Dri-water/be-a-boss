@@ -54,6 +54,18 @@ def test_receive_surfaces_app_server_exit():
     assert "authentication failed" in (messages[0].result or "")
 
 
+def test_missing_tool_result_exit_rotates_desynchronized_thread():
+    backend = CodexBackend(Path("."), resume_id="thread-stale")
+    messages = _drain(backend, [{
+        "method": "backend/eof", "params": {"error": (
+            "Codex app-server exited -7: Custom tool call output is missing "
+            "for call id: call_123"
+        )}}])
+
+    assert messages[-1].is_error is True
+    assert backend._rotate_before_next_send is True
+
+
 def test_receive_stops_at_turn_completed():
     backend = CodexBackend(Path("."), resume_id="thread-1")
     messages = _drain(backend, [
@@ -62,6 +74,39 @@ def test_receive_stops_at_turn_completed():
             "type": "agentMessage", "text": "leaked"}}},
     ])
     assert [type(message) for message in messages] == [AgentResult]
+
+
+def test_exhausted_stream_reconnect_rotates_thread_and_reaches_retry_layer():
+    backend = CodexBackend(Path("."), resume_id="thread-stale")
+    message = (
+        "Reconnecting... 5/5 · responseStreamDisconnected · "
+        "stream disconnected before completion: Broken pipe"
+    )
+    messages = _drain(backend, [
+        {"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "phase": "final_answer", "text": message}}},
+        {"method": "turn/completed", "params": {"turn": {
+            "status": "completed", "id": "turn-1"}}},
+    ])
+
+    result = messages[-1]
+    assert isinstance(result, AgentResult) and result.is_error
+    assert result.subtype == "stream_disconnected"
+    assert "responseStreamDisconnected" in (result.result or "")
+    assert backend._rotate_before_next_send is True
+
+
+def test_nonterminal_reconnect_progress_is_not_treated_as_failure():
+    backend = CodexBackend(Path("."), resume_id="thread-1")
+    messages = _drain(backend, [
+        {"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "phase": "final_answer",
+            "text": "Reconnecting... 1/5"}}},
+        {"method": "turn/completed", "params": {"turn": {
+            "status": "completed"}}},
+    ])
+    assert messages[-1].is_error is False
+    assert backend._rotate_before_next_send is False
 
 
 def test_dynamic_tools_are_namespaced_and_dispatched():
@@ -179,6 +224,48 @@ def test_steer_race_falls_back_without_losing_input():
 
     backend._request = request
     assert asyncio.run(backend.steer(Turn("do not lose me"))) is False
+    assert backend._rotate_before_next_send is True
+
+
+def test_active_turn_mismatch_rotates_before_queued_input():
+    backend = CodexBackend(Path("."), resume_id="thread-stale")
+    backend._rotate_before_next_send = True
+    starts: list[str | None] = []
+    requests: list[tuple[str, dict]] = []
+
+    async def start():
+        starts.append(backend._thread_id)
+        backend._thread_id = "thread-fresh"
+
+    async def request(method, params):
+        requests.append((method, params))
+        return {"turn": {"id": "turn-fresh"}}
+
+    backend.start = start
+    backend._request = request
+    asyncio.run(backend.send(Turn("answer the latest request")))
+
+    assert starts == [None]
+    assert backend.session_id == "thread-fresh"
+    assert backend._rotate_before_next_send is False
+    method, params = requests[0]
+    assert method == "turn/start" and params["threadId"] == "thread-fresh"
+    text = params["input"][0]["text"]
+    assert "THREAD RESYNCHRONIZATION" in text
+    assert text.endswith("answer the latest request")
+
+
+def test_transient_steer_failure_keeps_existing_thread():
+    backend = CodexBackend(Path("."), resume_id="thread-1")
+    backend._proc = object()
+    backend._active_turn_id = "turn-1"
+
+    async def request(_method, _params):
+        raise RuntimeError("connection timed out")
+
+    backend._request = request
+    assert asyncio.run(backend.steer(Turn("keep me queued"))) is False
+    assert backend._rotate_before_next_send is False
 
 
 def test_structured_codex_error_kind_reaches_retry_layer():

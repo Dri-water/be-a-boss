@@ -38,17 +38,17 @@ class CLITransport:
 
     def __init__(self, emit: EmitFn, store=None) -> None:
         self._emit = emit
-        self.threads: dict[str, dict] = {}   # id -> {"title", "open"}
+        self.threads: dict[str, dict] = {}   # id -> title/open + optional org metadata
         self.dashboard = ""
         self._next = 0
-        self._add_thread(OFFICE, "Orchestrator")
+        self._add_thread(OFFICE, "Orchestrator", role="orchestrator")
         if store is not None:
             self._rehydrate(store)
 
     # ---- thread bookkeeping ---------------------------------------------
 
-    def _add_thread(self, thread_id: str, title: str) -> None:
-        self.threads[thread_id] = {"title": title, "open": True}
+    def _add_thread(self, thread_id: str, title: str, **metadata) -> None:
+        self.threads[thread_id] = {"title": title, "open": True, **metadata}
 
     def _rehydrate(self, store) -> None:
         highest = 0
@@ -58,8 +58,16 @@ class CLITransport:
             title = rec.name
             if rec.role == "worker" and rec.repo:
                 title = f"⚙️ {rec.name} · {Path(rec.repo).name}"
-            open_ = not (rec.role == "worker" and rec.worker_status == "dismissed")
-            self.threads[tid] = {"title": title, "open": open_}
+            elif rec.role == "project_manager" and rec.repo:
+                title = f"🗂️ {rec.name} · {Path(rec.repo).name}"
+            status = (rec.manager_status if rec.role == "project_manager"
+                      else rec.worker_status if rec.role == "worker" else "")
+            open_ = status != "dismissed"
+            self.threads[tid] = {
+                "title": title, "open": open_, "role": rec.role,
+                "repo": rec.repo, "manager_id": rec.manager_id,
+                "supervisor_id": rec.supervisor_id, "status": status,
+            }
             if tid.isdigit():
                 highest = max(highest, int(tid))
         self._next = highest
@@ -74,13 +82,21 @@ class CLITransport:
                           "open": True})
         return thread_id
 
+    async def update_thread(self, thread_id: str, **metadata) -> None:
+        """Optional live metadata hook; mirrors the websocket event shape."""
+        thread = self.threads.get(thread_id)
+        if thread is None:
+            return
+        allowed = {"role", "repo", "manager_id", "supervisor_id", "status"}
+        thread.update({key: value for key, value in metadata.items() if key in allowed})
+        await self._emit({"type": "thread", "id": thread_id, **thread})
+
     async def close_thread(self, thread_id: str) -> None:
         t = self.threads.get(thread_id)
         if t is None:
             return
         t["open"] = False
-        await self._emit({"type": "thread", "id": thread_id, "title": t["title"],
-                          "open": False})
+        await self._emit({"type": "thread", "id": thread_id, **t})
 
     async def delete_thread(self, thread_id: str) -> None:
         if self.threads.pop(thread_id, None) is not None:
@@ -145,5 +161,5 @@ class CLITransport:
     def snapshot(self) -> dict:
         """The connect-time snapshot a driver replays to a fresh screen."""
         return {"type": "threads", "threads": [
-            {"id": tid, "title": t["title"], "open": t["open"]}
+            {"id": tid, **t}
             for tid, t in self.threads.items()]}

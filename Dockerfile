@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip python3-dev pipx \
         ripgrep jq unzip zip ffmpeg \
         chromium fonts-liberation \
-        tini sudo less procps ca-certificates \
+        tini sudo less procps ca-certificates iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # So sessions can screenshot web pages out of the box (headless chromium as root

@@ -4,8 +4,8 @@ The reusable base for any browser-style surface. The wire protocol is
 deliberately tiny and platform-neutral:
 
 server → client
-  {"type": "threads",  "threads": [{"id", "title", "open"}]}   snapshot on connect
-  {"type": "thread",   "id", "title", "open", "removed"?}      create / close / delete
+  {"type": "threads",  "threads": [{"id", "title", "open", ...}]} snapshot on connect
+  {"type": "thread",   "id", "title", "open", ...}              create / close / delete
   {"type": "message",  "thread_id", "speaker": {...}, "text"}  an Outbound
   {"type": "media",    "thread_id", "speaker", "kind",
                        "filename", "mime", "data_b64", "caption"}  real files inline
@@ -17,9 +17,12 @@ client → server
   {"type": "interrupt"|"kill", "thread_id"} · {"type": "approve"|"reject", "worker_id"}
   {"type": "new", "path", "name"?} · {"type": "reset", "confirm": bool}
 
-Every connected client sees every thread — the core's threads map straight onto
-the client's thread list. Speaker identity rides in the message body (role, name,
-emoji) so the client can render header cards, exactly like the Telegram adapter.
+Thread events may also carry the backward-compatible metadata fields ``role``,
+``repo``, ``manager_id``, ``supervisor_id``, and ``status``. They let richer
+clients group a flat transport thread list into projects without parsing display
+titles; older clients simply ignore them. Every connected client sees every
+thread. Speaker identity rides in the message body (role, name, emoji) so the
+client can render header cards, exactly like the Telegram adapter.
 """
 
 from __future__ import annotations
@@ -88,11 +91,11 @@ class WebSocketTransport:
     def __init__(self, store=None, bot_name: str = "be-a-boss") -> None:
         self.clients: set[ServerConnection] = set()
         self.bot_name = bot_name            # the org's name — shown as the UI brand
-        self.threads: dict[str, dict] = {}  # id -> {"title", "open"}
+        self.threads: dict[str, dict] = {}  # id -> title/open + optional org metadata
         self.dashboard = ""                 # latest rendered status board
         self.history: list[dict] = []       # recent message events for reconnect replay
         self._next = 0
-        self._add_thread(OFFICE, "Orchestrator")
+        self._add_thread(OFFICE, "Orchestrator", role="orchestrator")
         if store is not None:
             self._rehydrate(store)
 
@@ -115,21 +118,28 @@ class WebSocketTransport:
             title = rec.name
             if rec.role == "worker" and rec.repo:
                 title = f"⚙️ {rec.name} · {Path(rec.repo).name}"
-            open_ = not (rec.role == "worker" and rec.worker_status == "dismissed")
-            self.threads[tid] = {"title": title, "open": open_}
+            elif rec.role == "project_manager" and rec.repo:
+                title = f"🗂️ {rec.name} · {Path(rec.repo).name}"
+            status = (rec.manager_status if rec.role == "project_manager"
+                      else rec.worker_status if rec.role == "worker" else "")
+            open_ = status != "dismissed"
+            self.threads[tid] = {
+                "title": title, "open": open_, "role": rec.role,
+                "repo": rec.repo, "manager_id": rec.manager_id,
+                "supervisor_id": rec.supervisor_id, "status": status,
+            }
             if tid.isdigit():
                 highest = max(highest, int(tid))
         self._next = highest
 
     # ---- thread bookkeeping ---------------------------------------------
 
-    def _add_thread(self, thread_id: str, title: str) -> None:
-        self.threads[thread_id] = {"title": title, "open": True}
+    def _add_thread(self, thread_id: str, title: str, **metadata) -> None:
+        self.threads[thread_id] = {"title": title, "open": True, **metadata}
 
     def _thread_event(self, thread_id: str) -> dict:
         t = self.threads[thread_id]
-        return {"type": "thread", "id": thread_id, "title": t["title"],
-                "open": t["open"]}
+        return {"type": "thread", "id": thread_id, **t}
 
     # ---- Transport interface --------------------------------------------
 
@@ -139,6 +149,19 @@ class WebSocketTransport:
         self._add_thread(thread_id, title)
         await self._broadcast(self._thread_event(thread_id))
         return thread_id
+
+    async def update_thread(self, thread_id: str, **metadata) -> None:
+        """Attach semantic org metadata after the core persists a new thread.
+
+        Keeping ``create_thread`` unchanged preserves the transport seam. The core
+        learns the native id only after creation, then may call this optional hook.
+        """
+        thread = self.threads.get(thread_id)
+        if thread is None:
+            return
+        allowed = {"role", "repo", "manager_id", "supervisor_id", "status"}
+        thread.update({key: value for key, value in metadata.items() if key in allowed})
+        await self._broadcast(self._thread_event(thread_id))
 
     async def close_thread(self, thread_id: str) -> None:
         t = self.threads.get(thread_id)
@@ -230,7 +253,7 @@ class WebSocketTransport:
         """The connect/reset thread snapshot; a client clears its log and rebuilds
         from this + whatever history replay follows."""
         return {"type": "threads", "bot_name": self.bot_name, "threads": [
-            {"id": tid, "title": t["title"], "open": t["open"]}
+            {"id": tid, **t}
             for tid, t in self.threads.items()]}
 
     async def register(self, ws: ServerConnection) -> None:
