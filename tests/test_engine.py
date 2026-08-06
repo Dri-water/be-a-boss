@@ -955,6 +955,17 @@ def test_archived_project_children_do_not_reappear_as_independent(tmp_path):
     assert snapshot["independent_workers"] == []
 
 
+def test_live_org_omits_delivered_workers_but_dashboard_keeps_delivery_history(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", worker_status="delivered",
+        repo=str(tmp_path), cwd=str(tmp_path)))
+
+    assert engine._organization_snapshot()["independent_workers"] == []
+    assert "Recently delivered" in engine._render_dashboard()
+    assert "Nova" in engine._render_dashboard()
+
+
 def test_delivered_worker_thread_cannot_resume_closed_work(tmp_path):
     engine, transport = _engine(tmp_path)
     engine.store.put("81", ThreadRecord(

@@ -885,7 +885,7 @@ class Engine:
                 if (worker.project_id == project.project_id
                         or (not worker.project_id and manager_id
                             and worker.supervisor_id == manager_id)) \
-                        and worker.worker_status != "dismissed":
+                        and worker.worker_status not in ("dismissed", "delivered"):
                     assigned_threads.add(thread_id)
                     children.append(worker_json(thread_id, worker))
             projects.append({
@@ -902,7 +902,7 @@ class Engine:
             worker_json(thread_id, worker)
             for thread_id, worker in workers.items()
             if thread_id not in assigned_threads
-            and worker.worker_status != "dismissed"
+            and worker.worker_status not in ("dismissed", "delivered")
             and not worker.project_id
             and not worker.supervisor_id
         ]
