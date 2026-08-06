@@ -40,6 +40,7 @@ class CLITransport:
         self._emit = emit
         self.threads: dict[str, dict] = {}   # id -> title/open + optional org metadata
         self.dashboard = ""
+        self.organization: dict = {}
         self._next = 0
         self._add_thread(OFFICE, "Orchestrator", role="orchestrator")
         if store is not None:
@@ -66,6 +67,7 @@ class CLITransport:
             self.threads[tid] = {
                 "title": title, "open": open_, "role": rec.role,
                 "repo": rec.repo, "manager_id": rec.manager_id,
+                "project_id": rec.project_id,
                 "supervisor_id": rec.supervisor_id, "status": status,
             }
             if tid.isdigit():
@@ -87,7 +89,8 @@ class CLITransport:
         thread = self.threads.get(thread_id)
         if thread is None:
             return
-        allowed = {"role", "repo", "manager_id", "supervisor_id", "status"}
+        allowed = {"role", "repo", "project_id", "manager_id",
+                   "supervisor_id", "status"}
         thread.update({key: value for key, value in metadata.items() if key in allowed})
         await self._emit({"type": "thread", "id": thread_id, **thread})
 
@@ -148,15 +151,24 @@ class CLITransport:
         self.dashboard = text
         await self._emit({"type": "dashboard", "text": text})
 
+    async def update_organization(self, organization: dict) -> None:
+        if organization == self.organization:
+            return
+        self.organization = organization
+        await self._emit({"type": "organization", "organization": organization})
+
     async def delete_dashboard(self) -> None:
         self.dashboard = ""
+        self.organization = {}
         await self._emit({"type": "dashboard", "text": ""})
 
     async def reset(self) -> None:
         """Factory reset: re-emit the (now bare) snapshot so the cockpit clears its
         message log — a blank slate on screen, not just in the store."""
         self.dashboard = ""
+        self.organization = {}
         await self._emit(self.snapshot())
+        await self._emit({"type": "organization", "organization": None})
 
     def snapshot(self) -> dict:
         """The connect-time snapshot a driver replays to a fresh screen."""

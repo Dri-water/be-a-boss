@@ -21,8 +21,10 @@
    run autonomously (`bypassPermissions`). Their supervisor is woken at
    checkpoints — task finished, worker blocked, question asked, human interjected —
    never per token. Events come as SDK pushes, not polling.
-5. **Shallow, adaptive hierarchy.** A repo may have one project manager between
-   the orchestrator and its workers. This isolates long-lived project context, but
+5. **Shallow, adaptive hierarchy.** An outcome-based project may have one project
+   manager between the orchestrator and its workers. Boundaries follow shared goals,
+   decisions, dependencies, and delivery timing: one project can span repos, while
+   one monorepo can contain several projects. This isolates context, but
    it is not a mandatory extra model hop: small or one-off tasks can still go
    straight from the orchestrator to a worker. The hierarchy never grows beyond
    orchestrator → project manager → worker.
@@ -35,6 +37,7 @@ flowchart TB
         TG[telegram adapter<br/>topics ⇄ threads, header cards]
         WS[websocket adapter<br/>web app / any UI]
         CLI[cli adapter<br/>--json + cockpit TUI]
+        OBS[read-only observers<br/>browser + VS Code]
         SLACK[slack adapter<br/>next]
     end
     subgraph core/
@@ -48,6 +51,7 @@ flowchart TB
     end
     TG -- InboundMessage --> ENG
     ENG -- Outbound --> TG
+    ENG -. atomic org projection .-> OBS
     ENG --> ORC & PROJECTS & FLEET & SUP
     PROJECTS --> CS
     FLEET --> CS
@@ -72,7 +76,7 @@ formats platform text; the adapter never holds session state.
 ```mermaid
 flowchart LR
     H([Human<br/>the boss]) <-->|main room| O[🧭 Orchestrator<br/>portfolio context]
-    O <-->|"goal / milestone<br/>(project room)"| PM[🗂️ Project manager<br/>one canonical repo]
+    O <-->|"goal / milestone<br/>(project room)"| PM[🗂️ Project manager<br/>one outcome, 1..n repos]
     PM <-->|"brief / report<br/>(visible room)"| C1[⚙️ worker Nova<br/>worktree A]
     O <-->|"small direct brief"| C2[⚙️ worker Kite<br/>worktree B]
     H -.->|"interject in any<br/>worker thread"| C1
@@ -85,9 +89,11 @@ flowchart LR
 - **#general is a live dashboard** as well as a chat surface: a single pinned message
   rendered from the store in code (never by the LLM) and edited in place on every
   state change — the fleet at a glance.
-- **One project manager per canonical repo.** Repo aliases and paths that resolve
-  to the same checkout share a manager and durable project record. The manager's
-  own resumable session holds the detailed repo context; its bounded stored summary
+- **One project manager per outcome project.** The orchestrator creates a durable
+  project from the work's real coordination boundary. Its code-owned record carries
+  a stable id, charter, lifecycle, manager, and one-or-more canonical repo paths.
+  Scope can be updated deliberately as dependencies change. The manager's own
+  resumable session holds the detailed project context; its bounded stored summary
   keeps the orchestrator informed. The orchestrator retains cross-project
   priorities and the boss relationship.
 - **Adaptive routing.** Multi-project and long-running work benefits from a
@@ -96,6 +102,11 @@ flowchart LR
 - **Project and worker rooms are glass-walled.** A project manager has a visible
   room, and every worker retains its own visible room. On a surface without nested
   rooms, project identity is carried in names and headers instead.
+- **Observation is separate from command transport.** The engine atomically writes
+  a deterministic `organization.json`. Docker's localhost-only dashboard and the
+  VS Code tree read it without constructing another engine, consuming Telegram
+  updates, or gaining command authority. Interactive web/CLI transports receive the
+  same structured organization shape directly.
 - **Interjection**: a human message in a worker thread is delivered to the worker
   as user input *and* recorded for its supervisor, so both see it. Project-level
   decisions can be made directly in the manager room; portfolio decisions stay in
@@ -109,32 +120,44 @@ flowchart LR
 |---|---|---|---|---|
 | Logical lifetime | deployment | project | task | until `/kill` |
 | Active process | persistent | only while handling a turn | while task is active | while session is active |
-| Scope | all projects | one canonical repo | one worktree/task | repo itself |
+| Scope | all projects | one outcome + assigned repo set | one worktree/task | repo itself |
 | Tools | portfolio + fleet control | project-scoped worker control | chat media tools | chat media tools |
 | Speaks in | main room + escalations | project room + its worker rooms | its own room | its own room |
 | Supervised by | human | orchestrator | manager or orchestrator | human |
 
 The orchestrator is itself a coding-agent session — its "powers" are MCP tools exposed
-by the engine: `spawn_worker(repo, task)`, `message_worker(id, text)`,
-`worker_status(id?)`, `dismiss_worker(id)` — plus `routing_status`, `inspect_repo`,
-`review_worker`, `run_checks`, `deliver_worker`. `routing_status` exposes the effective
+by the engine. Project tools are `create_project(name, charter, repos)`,
+`update_project_scope`, `update_project_status`, `message_project`, and
+`project_status`; the original `hire_project_manager` / `message_project_manager`
+remain compatibility aliases. Fleet tools include `spawn_worker(repo, task)`,
+`message_worker(id, text)`, `worker_status(id?)`, `dismiss_worker(id)`,
+`routing_status`, `inspect_repo`, `review_worker`, `run_checks`, and
+`deliver_worker`. `routing_status` exposes the effective
 fast/balanced/deep model-and-effort map and persisted worker profiles so the
 orchestrator can diagnose collapsed or unexpectedly expensive routing itself. Its system prompt
 teaches briefing etiquette: self-contained briefs, explicit report-back markers,
 escalate-don't-guess, and the code-quality bar it holds workers to.
 
 A project manager is a narrower instance of the same session machinery. Its tool
-scope is enforced by the engine: it can inspect and supervise only workers attached
-to its canonical repo. It cannot land work. It can review, run checks, and request
+delegation scope is enforced by the engine's project tools: it can supervise only
+workers attached to its project, and each newly delegated worker repo must be inside
+its canonical repo set. It
+cannot land work. It can review, run checks, and request
 delivery, but the orchestrator and the existing human authorization policy remain
 the only route to `deliver_worker`. A manager also cannot hire another manager, so
 delegation cannot grow into an unbounded tree.
+
+This is an organizational safety boundary, not a hostile-process sandbox. Manager
+sessions are trusted coding-agent runtimes inside the same deployment and retain
+their backend's native read/shell capabilities; prompts tell them not to use those
+to edit project code. The engine strictly gates worker creation/control and delivery,
+but a separate container/OS sandbox is required if managers themselves are adversarial.
 
 Managers are persistent identities, not permanently resident processes. Once a
 manager finishes a turn, its provider-native session ID and project record remain
 in the store while its backend process is allowed to stop. The next project event
 resumes it lazily. This lets the organisation remember many repos without keeping
-one heavyweight coding-agent process alive per repo.
+one heavyweight coding-agent process alive per project.
 
 ## Why the hierarchy is adaptive
 
@@ -175,12 +198,23 @@ reports dirty ones instead of deleting them.
 ## State (restart-proof)
 
 `state/` holds JSON: thread registry (thread ⇄ role ⇄ provider-native session IDs ⇄
-cwd/worktree), manager records (canonical repo, identity, charter, latest bounded
-summary), fleet records (worker id, supervisor, task brief, status log), and the
+cwd/worktree), project records (stable identity, charter, canonical repo set,
+manager, lifecycle, latest bounded summary), fleet records (worker id, supervisor,
+task brief, status log), and the
 active backend. On restart, threads reattach lazily using the selected provider's
 native resume ID. Hibernated managers remain hibernated until an event needs them;
 active or actionable project work is re-surfaced to the correct manager and then
 to the orchestrator when escalation is required.
+
+Legacy one-repo manager records are migrated additively at load time: existing
+thread ids, worker ids, session ids, branches, pending deliveries, and pending boss
+turns remain untouched. They simply gain a project record and `project_id`. The
+separate `organization.json` is a disposable projection, never recovery truth.
+Codex native threads also persist their dynamic-tool definitions and cannot replace
+them during `thread/resume`. A code-owned tool-schema version therefore rotates only
+stale orchestrator/manager threads once, with a bounded recovery handoff grounded in
+the durable project/fleet/git state; worker threads and current-schema sessions keep
+their native resume ids.
 
 A backend change retains provider IDs and supplies a bounded visible-text hand-off;
 the manager record, workspace, git, and fleet state are the recovery ground truth

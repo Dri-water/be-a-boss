@@ -139,6 +139,25 @@
       color: var(--dim); white-space: pre-wrap; word-break: break-word;
       max-height: 168px; overflow-y: auto;
     }
+    #org-wrap { border-bottom: 1px solid var(--border-soft); background: var(--panel); }
+    #org-wrap[hidden] { display: none; }
+    #org-tree { padding: 5px 20px 12px; max-height: 280px; overflow: auto; }
+    .org-root, .org-project, .org-person {
+      border-left: 2px solid var(--border); margin-left: 9px; padding-left: 12px;
+    }
+    .org-root > button, .org-person button, .org-project summary {
+      color: var(--text); background: none; border: 0; padding: 4px 2px;
+      font: 13px/1.35 var(--sans); cursor: pointer; text-align: left;
+    }
+    .org-project { margin-top: 5px; }
+    .org-project summary { font-weight: 650; list-style-position: outside; }
+    .org-project .meta { color: var(--dim); font: 11.5px/1.4 var(--mono); margin: 0 0 4px 2px; }
+    .org-person { margin-left: 12px; }
+    .org-person.worker { border-left-color: var(--worker); }
+    .org-person.manager { border-left-color: var(--manager); }
+    .org-status { color: var(--dim); font-size: 11px; margin-left: 7px; }
+    .org-status.blocked, .org-status.approve { color: var(--amber); }
+    .org-charter { color: var(--dim); margin: 2px 0 5px 2px; font-size: 12px; }
 
     #log { flex: 1; overflow-y: auto; padding: 20px; min-height: 0; }
     .msg { margin: 0 auto 18px; max-width: 760px; }
@@ -272,6 +291,10 @@
       <span id="active-sub"></span>
       <span id="active-chip"><span class="dot"></span><span id="active-chip-text">working…</span></span>
     </header>
+    <section id="org-wrap" hidden>
+      <div class="dash-head">ORGANIZATION</div>
+      <div id="org-tree" role="tree" aria-label="Live organization chart"></div>
+    </section>
     <section id="dash-wrap" hidden>
       <div class="dash-head">FLEET</div>
       <pre id="dash"></pre>

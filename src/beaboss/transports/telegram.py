@@ -337,13 +337,14 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"👋 {settings.bot_name} — your agent org, in one place.\n\n"
         "🧭 I'm the orchestrator. DM me for a private 1:1, or talk to me here in the "
         "group — either way, give me goals (\"fix the login bug in myapp, then audit "
-        "deps\"). For larger or ongoing repos I can hire a 🗂️ project manager to keep "
-        "that project's context focused; they hire and supervise ⚙️ workers. Managers "
+        "deps\"). For larger or ongoing outcomes I can hire a 🗂️ project manager to "
+        "keep context focused across one or more repos; they supervise ⚙️ workers. Managers "
         "and workers each get a visible topic — open one to watch or steer the work.\n"
         "📋 #general is a live status board — what's running, blocked, and waiting on "
         "you, always current.\n\n"
         "🗂 Commands:\n"
         "  /new <path> [name] — classic direct session, in the group (no orchestrator)\n"
+        "  /org — live project manager and worker tree\n"
         "  /list — all threads + status\n"
         "  /status — bot health\n"
         "  /approve <id> · /reject <id> — land or decline a worker's delivery\n"
@@ -533,6 +534,14 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"{managers} project manager(s) · {workers} worker(s).")
 
 
+async def cmd_org(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _ok(update, ctx):
+        return
+    engine: Engine = ctx.bot_data["engine"]
+    for part in chunk(engine.render_organization_text(), 4096):
+        await update.effective_message.reply_text(part)
+
+
 async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _ok(update, ctx):
         return
@@ -683,6 +692,7 @@ async def _post_init(app: Application) -> None:
         BotCommand("new", "direct session: /new <path> [name]"),
         BotCommand("reset", "factory reset: wipe all bot memory/state"),
         BotCommand("list", "list all threads"),
+        BotCommand("org", "live organization chart"),
         BotCommand("status", "bot health"),
         BotCommand("stop", "interrupt this thread's turn"),
         BotCommand("kill", "end this thread's session"),
@@ -756,6 +766,7 @@ def build_application(settings: Settings, store: CoreStore) -> Application:
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("new", cmd_new))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("org", cmd_org))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("kill", cmd_kill))
     app.add_handler(CommandHandler("stop", cmd_stop))

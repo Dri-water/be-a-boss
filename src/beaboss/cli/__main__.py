@@ -34,7 +34,7 @@ log = logging.getLogger("beaboss.cli")
 
 HELP = (
     "type to talk to the orchestrator (project managers get their own threads) · "
-    "/threads · /thread <id> · /new <path> [name]"
+    "/threads · /org · /thread <id> · /new <path> [name]"
     " · /approve <id> · /reject <id> · /stop · /kill · /reset [confirm] · /quit")
 
 
@@ -83,6 +83,8 @@ async def _slash(engine, transport, state, cmd, rest) -> None:
             f"{'  ← active' if tid == state.active else ''}"
             for tid, t in transport.threads.items())
         await _sys(transport, state, "threads:\n" + rows)
+    elif cmd == "org":
+        await _sys(transport, state, engine.render_organization_text())
     elif cmd == "thread":
         tid = rest[0] if rest else ""
         if tid in transport.threads:

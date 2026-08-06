@@ -59,6 +59,27 @@ class ThreadRecord:
     manager_status: str = ""   # manager-only: active | dismissed
     supervisor_id: str = ""    # worker-only: owning manager_id; blank = orchestrator
     last_summary: str = ""     # manager's latest bounded portfolio-level report
+    project_id: str = ""       # owning durable project; blank = independent/legacy
+    # Version of the dynamic-tool schema embedded in the Codex native session.
+    # Zero is legacy/unknown; used to rotate sessions whose resume protocol
+    # cannot accept updated dynamic tool definitions.
+    tool_schema_version: int = 0
+
+
+@dataclass
+class ProjectRecord:
+    """A durable outcome/context boundary, independent of repository layout."""
+
+    project_id: str
+    name: str
+    charter: str
+    repos: list[str] = field(default_factory=list)
+    status: str = "active"      # active | blocked | completed | archived
+    manager_id: str = ""
+    manager_thread: str = ""
+    last_summary: str = ""
+    created_at: float = 0.0
+    updated_at: float = 0.0
 
 
 class CoreStore:
@@ -66,7 +87,9 @@ class CoreStore:
         self.state_dir = state_dir
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.state_dir / "core.json"
+        self.organization_path = self.state_dir / "organization.json"
         self._threads: dict[str, ThreadRecord] = {}
+        self._projects: dict[str, ProjectRecord] = {}
         self.orchestrator_thread: str | None = None
         # Where the boss last spoke to the orchestrator (#general or a DM), so
         # asynchronous supervision replies continue in the same conversation after
@@ -131,6 +154,51 @@ class CoreStore:
             filtered.setdefault("role", "direct")
             filtered.setdefault("name", "")
             self._threads[k] = ThreadRecord(**filtered)
+        project_known = {f.name for f in dataclass_fields(ProjectRecord)}
+        for project_id, value in raw.get("projects", {}).items():
+            if not isinstance(value, dict):
+                continue
+            filtered = {k: v for k, v in value.items() if k in project_known}
+            filtered.setdefault("project_id", str(project_id))
+            filtered.setdefault("name", str(project_id))
+            filtered.setdefault("charter", "")
+            self._projects[str(project_id)] = ProjectRecord(**filtered)
+        self._migrate_legacy_projects()
+
+    def _migrate_legacy_projects(self) -> None:
+        """Lift repo-bound manager records into outcome projects without losing IDs."""
+        changed = False
+        for thread_id, manager in self.managers().items():
+            project_id = manager.project_id or manager.manager_id
+            if not project_id:
+                continue
+            if project_id not in self._projects:
+                now = manager.created_at or time.time()
+                self._projects[project_id] = ProjectRecord(
+                    project_id=project_id,
+                    name=Path(manager.repo).name if manager.repo else manager.name,
+                    charter=manager.task,
+                    repos=[manager.repo] if manager.repo else [],
+                    status=("archived" if manager.manager_status == "dismissed"
+                            else "active"),
+                    manager_id=manager.manager_id,
+                    manager_thread=thread_id,
+                    last_summary=manager.last_summary,
+                    created_at=now,
+                    updated_at=now,
+                )
+                changed = True
+            if manager.project_id != project_id:
+                manager.project_id = project_id
+                changed = True
+            for worker in self._threads.values():
+                if (worker.role == "worker"
+                        and worker.supervisor_id == manager.manager_id
+                        and not worker.project_id):
+                    worker.project_id = project_id
+                    changed = True
+        if changed:
+            self._flush()
 
     def _quarantine(self, why: str) -> None:
         log.error("core state %s — starting fresh: %s", self.path.name, why)
@@ -152,6 +220,7 @@ class CoreStore:
             "office_message_ids": self.office_message_ids,
             "pending_boss_turns": self.pending_boss_turns,
             "threads": {k: asdict(v) for k, v in self._threads.items()},
+            "projects": {k: asdict(v) for k, v in self._projects.items()},
         }
         try:
             tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -168,6 +237,9 @@ class CoreStore:
 
     def all(self) -> dict[str, ThreadRecord]:
         return dict(self._threads)
+
+    def projects(self) -> dict[str, ProjectRecord]:
+        return dict(self._projects)
 
     def put(self, thread_id: str, rec: ThreadRecord) -> None:
         if not rec.created_at:
@@ -190,6 +262,48 @@ class CoreStore:
     def delete(self, thread_id: str) -> None:
         if self._threads.pop(thread_id, None) is not None:
             self._flush()
+
+    def put_project(self, project: ProjectRecord) -> None:
+        now = time.time()
+        if not project.created_at:
+            project.created_at = now
+        project.updated_at = now
+        self._projects[project.project_id] = project
+        self._flush()
+
+    def update_project(self, project_id: str, **fields) -> None:
+        project = self._projects.get(project_id)
+        if project is None:
+            return
+        changed = False
+        for key, value in fields.items():
+            if getattr(project, key, None) != value:
+                setattr(project, key, value)
+                changed = True
+        if changed:
+            project.updated_at = time.time()
+            self._flush()
+
+    def delete_project(self, project_id: str) -> None:
+        if self._projects.pop(project_id, None) is not None:
+            self._flush()
+
+    def write_organization(self, organization: dict) -> None:
+        """Publish the code-owned org view for read-only observer surfaces.
+
+        This deliberately lives beside, rather than inside, ``core.json`` so a
+        dashboard can mount state read-only without parsing mutable engine state.
+        The atomic replace also means readers never observe a partial document.
+        """
+        tmp = self.organization_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(
+                json.dumps(organization, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, self.organization_path)
+        except OSError as e:
+            log.error("could not publish organization snapshot: %s", e)
 
     def set_orchestrator_thread(self, thread_id: str | None) -> None:
         if self.orchestrator_thread != thread_id:
@@ -258,6 +372,7 @@ class CoreStore:
         self.pending_delivery = {}
         self.office_message_ids = {}
         self.pending_boss_turns = []
+        self._projects.clear()
         self._flush()
 
     def workers(self) -> dict[str, ThreadRecord]:

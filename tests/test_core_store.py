@@ -1,6 +1,6 @@
 import json
 
-from beaboss.core.store import CoreStore, ThreadRecord
+from beaboss.core.store import CoreStore, ProjectRecord, ThreadRecord
 
 
 def test_roundtrip_and_reload(tmp_path):
@@ -86,6 +86,33 @@ def test_project_manager_hierarchy_fields_roundtrip_and_filters(tmp_path):
     assert worker.supervisor_id == "maya"
     assert list(reloaded.managers()) == ["20"]
     assert list(reloaded.workers()) == ["21"]
+    # Additive migration preserves every thread while introducing stable projects.
+    assert manager.project_id == "maya"
+    assert worker.project_id == "maya"
+    assert reloaded.projects()["maya"].repos == ["/r/app"]
+
+
+def test_outcome_project_roundtrip_supports_multiple_repositories(tmp_path):
+    store = CoreStore(tmp_path / "state")
+    store.put_project(ProjectRecord(
+        project_id="checkout", name="Checkout", charter="Ship unified checkout",
+        repos=["/r/web", "/r/api"], manager_id="checkout",
+        manager_thread="20",
+    ))
+
+    project = CoreStore(tmp_path / "state").projects()["checkout"]
+    assert project.name == "Checkout"
+    assert project.repos == ["/r/web", "/r/api"]
+    assert project.charter == "Ship unified checkout"
+
+
+def test_organization_projection_is_separate_atomic_json(tmp_path):
+    store = CoreStore(tmp_path / "state")
+    organization = {"version": 1, "projects": [{"id": "checkout"}]}
+    store.write_organization(organization)
+
+    assert json.loads(store.organization_path.read_text(encoding="utf-8")) == organization
+    assert not store.organization_path.with_suffix(".json.tmp").exists()
 
 
 def test_legacy_records_default_project_hierarchy_fields(tmp_path):

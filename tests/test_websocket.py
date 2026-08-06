@@ -330,6 +330,49 @@ def test_dashboard_broadcasts_and_snapshots(tmp_path):
     asyncio.run(scenario())
 
 
+def test_organization_broadcasts_and_is_replayed_to_late_clients():
+    async def scenario():
+        engine = FakeEngine()
+        transport = WebSocketTransport()
+        organization = {
+            "version": 1,
+            "orchestrator": {"name": "Boss"},
+            "projects": [{"id": "checkout", "name": "Checkout"}],
+            "independent_workers": [],
+        }
+        async with serve(make_handler(engine, transport), "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+                await ws.recv()
+                await transport.update_organization(organization)
+                assert json.loads(await ws.recv()) == {
+                    "type": "organization", "organization": organization}
+            async with websockets.connect(f"ws://127.0.0.1:{port}") as late:
+                assert json.loads(await late.recv())["type"] == "threads"
+                event = json.loads(await late.recv())
+                assert event["type"] == "organization"
+                assert event["organization"]["projects"][0]["id"] == "checkout"
+
+    asyncio.run(scenario())
+
+
+def test_reset_explicitly_clears_live_client_organization():
+    class Client:
+        def __init__(self): self.events = []
+        async def send(self, payload): self.events.append(json.loads(payload))
+
+    async def scenario():
+        transport = WebSocketTransport()
+        transport.organization = {"projects": [{"id": "old"}]}
+        client = Client()
+        transport.clients.add(client)
+        await transport.reset()
+        return client.events
+
+    events = asyncio.run(scenario())
+    assert events[-1] == {"type": "organization", "organization": None}
+
+
 def test_history_replayed_on_reconnect(tmp_path):
     """A reconnecting/reloading client is not amnesiac: the server replays recent
     messages after the threads snapshot (HIGH-2 from the UX review)."""
@@ -392,6 +435,8 @@ def test_app_shell_ships_inside_the_package():
     client = assets["/client.js"][1].decode("utf-8")
     assert "role-project_manager" in html and ".thread.child" in html
     assert "orderedThreads" in client and 't.role === "project_manager"' in client
+    assert 'id="org-tree"' in html
+    assert "renderOrganization" in client and 'msg.type === "organization"' in client
 
 
 def test_decode_inbound_media_validates_caps_and_kind(monkeypatch):

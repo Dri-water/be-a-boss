@@ -37,6 +37,9 @@ class FakeEngine:
     async def factory_reset(self):
         self.calls.append(("reset",)); return "🏭 wiped"
 
+    def render_organization_text(self):
+        return "🧭 Boss\n└─ 📦 Checkout"
+
 
 def _wired():
     events = []
@@ -84,6 +87,19 @@ def test_transport_emits_websocket_compatible_events(tmp_path):
                          "speaker": {"role": "worker", "name": "Nova", "emoji": "⚙️"},
                          "text": "on it"}
     assert events[3]["kind"] == "photo" and events[3]["filename"] == "shot.png"
+
+
+def test_cli_org_command_and_structured_event():
+    engine, transport, events = _wired()
+    state = State()
+    _run(engine, transport, state, "/org")
+    assert events[-1]["text"].startswith("🧭 Boss")
+
+    organization = {"version": 1, "projects": []}
+    asyncio.run(transport.update_organization(organization))
+    assert events[-1] == {"type": "organization", "organization": organization}
+    asyncio.run(transport.reset())
+    assert events[-1] == {"type": "organization", "organization": None}
 
 
 def test_cli_transport_emits_and_rehydrates_project_hierarchy(tmp_path):

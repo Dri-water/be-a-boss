@@ -25,6 +25,11 @@ holds session state. A new surface is a new adapter and **zero core changes**.
 - **Supported:** Telegram; a **WebSocket** surface (the bundled web app,
   `python -m beaboss.web`); and a **CLI** (`boss-cli`) with an agent-drivable
   `--json` mode and a Textual cockpit — all speaking the same tiny event protocol.
+- **Observers:** the Docker organization dashboard and bundled VS Code Explorer
+  tree consume the atomic `organization.json` projection. They are intentionally
+  read-only, so they can run beside Telegram without competing for updates or
+  creating a second orchestrator. Build a full transport only when the surface
+  must send commands.
 - **Next:** Slack.
 
 ## Seam 2 — the agent backend

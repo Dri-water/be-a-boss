@@ -93,6 +93,7 @@ class WebSocketTransport:
         self.bot_name = bot_name            # the org's name — shown as the UI brand
         self.threads: dict[str, dict] = {}  # id -> title/open + optional org metadata
         self.dashboard = ""                 # latest rendered status board
+        self.organization: dict = {}
         self.history: list[dict] = []       # recent message events for reconnect replay
         self._next = 0
         self._add_thread(OFFICE, "Orchestrator", role="orchestrator")
@@ -126,6 +127,7 @@ class WebSocketTransport:
             self.threads[tid] = {
                 "title": title, "open": open_, "role": rec.role,
                 "repo": rec.repo, "manager_id": rec.manager_id,
+                "project_id": rec.project_id,
                 "supervisor_id": rec.supervisor_id, "status": status,
             }
             if tid.isdigit():
@@ -159,7 +161,8 @@ class WebSocketTransport:
         thread = self.threads.get(thread_id)
         if thread is None:
             return
-        allowed = {"role", "repo", "manager_id", "supervisor_id", "status"}
+        allowed = {"role", "repo", "project_id", "manager_id",
+                   "supervisor_id", "status"}
         thread.update({key: value for key, value in metadata.items() if key in allowed})
         await self._broadcast(self._thread_event(thread_id))
 
@@ -229,6 +232,12 @@ class WebSocketTransport:
         self.dashboard = text
         await self._broadcast({"type": "dashboard", "text": text})
 
+    async def update_organization(self, organization: dict) -> None:
+        if organization == self.organization:
+            return
+        self.organization = organization
+        await self._broadcast({"type": "organization", "organization": organization})
+
     async def delete_dashboard(self) -> None:
         self.dashboard = ""
         await self._broadcast({"type": "dashboard", "text": ""})
@@ -245,7 +254,9 @@ class WebSocketTransport:
         wipes messages) and no old message replays on the next reload."""
         self.history.clear()
         self.dashboard = ""
+        self.organization = {}
         await self._broadcast(self._snapshot())
+        await self._broadcast({"type": "organization", "organization": None})
 
     # ---- client plumbing -------------------------------------------------
 
@@ -263,11 +274,15 @@ class WebSocketTransport:
         # time means no message is missed and none is delivered twice.
         history = list(self.history)
         dashboard = self.dashboard
+        organization = self.organization
         await ws.send(json.dumps(self._snapshot()))
         for event in history:                 # replay recent conversation (no amnesia)
             await ws.send(json.dumps(event))
         if dashboard:
             await ws.send(json.dumps({"type": "dashboard", "text": dashboard}))
+        if organization:
+            await ws.send(json.dumps({
+                "type": "organization", "organization": organization}))
 
     def unregister(self, ws: ServerConnection) -> None:
         self.clients.discard(ws)

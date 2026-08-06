@@ -69,6 +69,7 @@ class Cockpit(App):
         self.working: set[str] = set()   # threads mid-turn (busy → next message)
         self._activity_text = ""
         self._dash_text = ""
+        self.organization: dict = {}
         self.active = OFFICE
         self.engine = self.transport = self.state = None
 
@@ -103,6 +104,9 @@ class Cockpit(App):
             self._ingest_thread(event)
         elif t == "dashboard":
             self._ingest_dashboard(event.get("text", ""))
+        elif t == "organization":
+            self.organization = dict(event.get("organization") or {})
+            self._refresh_sidebar()
         elif t == "threads":
             # A full snapshot = "this is everything there is now". Re-sync the view to
             # exactly it: seeds restarted workers on connect, and on a factory reset

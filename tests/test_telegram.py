@@ -12,6 +12,7 @@ from beaboss.transports.telegram import (
     _ok,
     _thread_of,
     build_application,
+    cmd_org,
 )
 
 
@@ -221,6 +222,34 @@ def test_dashboard_not_modified_does_not_duplicate(tmp_path):
     asyncio.run(t.update_dashboard("same text"))
     assert bot.sent == []                      # no new message created
     assert store.dashboard_msg_id == 101       # board id unchanged
+
+
+def test_org_command_renders_code_owned_tree():
+    class Reply:
+        def __init__(self): self.parts = []
+        async def reply_text(self, text): self.parts.append(text)
+
+    class EngineStub:
+        def render_organization_text(self):
+            return "🧭 Boss [idle]\n└─ 📦 Checkout [active]"
+
+    settings = _settings()
+    reply = Reply()
+    update = _Upd(_U(1), _C(1, "supergroup"), reply)
+    ctx = _Ctx(settings, TelegramTransport(RecordingBot(), settings))
+    ctx.bot_data["engine"] = EngineStub()
+
+    asyncio.run(cmd_org(update, ctx))
+    assert "Checkout" in "".join(reply.parts)
+
+    class LargeEngine:
+        def render_organization_text(self):
+            return "project row\n" * 1000
+
+    ctx.bot_data["engine"] = LargeEngine()
+    asyncio.run(cmd_org(update, ctx))
+    assert len(reply.parts) > 2
+    assert all(len(part) <= 4096 for part in reply.parts)
 
 
 # ---- factory-reset message deletion (#general + DMs have no topic to drop) --------

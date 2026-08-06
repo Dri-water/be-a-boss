@@ -25,6 +25,7 @@ Issues = "https://github.com/Dri-water/be-a-boss/issues"
 [project.scripts]
 boss = "beaboss.__main__:main"
 boss-cli = "beaboss.cli.__main__:main"
+boss-dashboard = "beaboss.org_dashboard:main"
 
 [build-system]
 requires = ["hatchling"]

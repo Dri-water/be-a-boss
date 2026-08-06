@@ -17,6 +17,7 @@
       this.handlers = {};                // event -> fn
       this.ws = null;
       this.dashboard = "";
+      this.organization = null;
     }
 
     on(event, fn) { this.handlers[event] = fn; return this; }
@@ -100,6 +101,9 @@
       } else if (msg.type === "dashboard") {
         this.dashboard = msg.text || "";
         this._emit("dashboard");
+      } else if (msg.type === "organization") {
+        this.organization = msg.organization || null;
+        this._emit("organization");
       } else if (msg.type === "busy") {
         this._emit("busy", msg.thread_id);
       } else if (msg.type === "idle") {
@@ -308,6 +312,7 @@
       $("dash").textContent = client.dashboard || "";
       $("dash-wrap").hidden = !client.dashboard;
     });
+    client.on("organization", () => renderOrganization());
     // "working…" indicator: instant confirmation the turn started, before the first
     // reply. Set when the agent's turn starts (or when you hit send), cleared when
     // output arrives.
@@ -361,6 +366,60 @@
         row.onclick = () => switchTo(t.id);
         el.appendChild(row);
       }
+    }
+
+    function renderOrganization() {
+      const tree = $("org-tree"), wrap = $("org-wrap");
+      tree.replaceChildren();
+      const org = client.organization;
+      if (!org) { wrap.hidden = true; return; }
+      wrap.hidden = false;
+      const root = document.createElement("div"); root.className = "org-root";
+      const boss = document.createElement("button");
+      boss.textContent = "🧭 " + ((org.orchestrator && org.orchestrator.name) || "Orchestrator");
+      boss.onclick = () => switchTo((org.orchestrator && org.orchestrator.thread_id) || "general");
+      root.appendChild(boss);
+      for (const project of (org.projects || [])) {
+        const card = document.createElement("details");
+        card.className = "org-project"; card.open = project.status !== "completed";
+        const summary = document.createElement("summary");
+        summary.textContent = "📦 " + project.name + "  ";
+        const ps = document.createElement("span");
+        ps.className = "org-status " + (project.status || "active");
+        ps.textContent = project.status || "active"; summary.appendChild(ps);
+        card.appendChild(summary);
+        const meta = document.createElement("div"); meta.className = "meta";
+        meta.textContent = (project.repos || []).map(repoName).join(" · ") || "no repository scope";
+        card.appendChild(meta);
+        if (project.charter) {
+          const charter = document.createElement("div"); charter.className = "org-charter";
+          charter.textContent = project.charter.length > 140
+            ? project.charter.slice(0, 140) + "…" : project.charter;
+          card.appendChild(charter);
+        }
+        const addPerson = (person, kind, emoji) => {
+          if (!person) return;
+          const row = document.createElement("div"); row.className = "org-person " + kind;
+          const button = document.createElement("button");
+          button.textContent = emoji + " " + person.name;
+          if (person.thread_id) button.onclick = () => switchTo(person.thread_id);
+          const state = document.createElement("span");
+          state.className = "org-status " + (person.status || "");
+          state.textContent = person.status || person.runtime || "";
+          button.appendChild(state); row.appendChild(button); card.appendChild(row);
+        };
+        addPerson(project.manager, "manager", "🗂️");
+        for (const worker of (project.workers || [])) addPerson(worker, "worker", "⚙️");
+        root.appendChild(card);
+      }
+      for (const worker of (org.independent_workers || [])) {
+        const row = document.createElement("div"); row.className = "org-person worker";
+        const button = document.createElement("button");
+        button.textContent = "⚙️ " + worker.name + " (independent)";
+        button.onclick = () => switchTo(worker.thread_id); row.appendChild(button);
+        root.appendChild(row);
+      }
+      tree.appendChild(root);
     }
 
     function renderTopbar() {

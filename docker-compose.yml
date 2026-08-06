@@ -43,6 +43,29 @@ services:
       # Bot's own state (topic <-> session map).
       - bot_state:/data
 
+  # Read-only observer: Telegram remains the sole command transport while browser
+  # and editor views consume the same atomic organization snapshot concurrently.
+  organization-dashboard:
+    image: be-a-boss
+    container_name: be-a-boss-dashboard
+    restart: unless-stopped
+    cpus: 0.25
+    mem_limit: 128m
+    command: ["boss-dashboard"]
+    environment:
+      STATE_DIR: /data
+      ORG_DASHBOARD_HOST: 0.0.0.0
+      ORG_DASHBOARD_PORT: 8766
+      BEABOSS_NETWORK_LIMIT: ""
+      BEABOSS_NETWORK_UPLOAD_LIMIT: ""
+      BEABOSS_NETWORK_DOWNLOAD_LIMIT: ""
+    ports:
+      - "127.0.0.1:${BEABOSS_DASHBOARD_PORT:-8766}:8766"
+    volumes:
+      - bot_state:/data:ro
+    depends_on:
+      - be-a-boss
+
 volumes:
   bot_state:
     # Explicit name → decoupled from the project/folder. This is the line that makes

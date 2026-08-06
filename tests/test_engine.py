@@ -7,9 +7,9 @@ import pytest
 from beaboss.config import Settings
 from beaboss.core.agent_backend import CodexBackend
 from beaboss.core import worktrees
-from beaboss.core.engine import Engine
+from beaboss.core.engine import Engine, ORG_TOOL_SCHEMA_VERSION
 from beaboss.core.ports import InboundMessage, Outbound, OutboundDeliveryError, SYSTEM
-from beaboss.core.store import CoreStore, ThreadRecord
+from beaboss.core.store import CoreStore, ProjectRecord, ThreadRecord
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -539,6 +539,10 @@ def test_factory_reset_wipes_everything(tmp_path):
 
     result = asyncio.run(engine.factory_reset())
     assert "Factory reset complete" in result
+    organization = __import__("json").loads(
+        engine.store.organization_path.read_text(encoding="utf-8"))
+    assert organization["projects"] == []
+    assert organization["independent_workers"] == []
     assert engine.store.all() == {}
     assert engine.store.orchestrator_thread is None
     assert engine.sessions == {}
@@ -630,6 +634,8 @@ def test_hire_project_manager_reuses_one_manager_for_canonical_repo(
     monkeypatch.setattr(engine, "_ensure_session", ensure)
 
     first = asyncio.run(engine._hire_project_manager("myrepo", "Own checkout"))
+    project_id = next(iter(engine.store.projects()))
+    engine.store.update_project(project_id, status="completed")
     aliased = repo / ".." / repo.name
     second = asyncio.run(engine._hire_project_manager(
         str(aliased), "Also own the release"))
@@ -639,6 +645,9 @@ def test_hire_project_manager_reuses_one_manager_for_canonical_repo(
     assert len(transport.threads) == 1
     manager = next(iter(engine.store.managers().values()))
     assert Path(manager.repo) == repo.resolve()
+    assert manager.task == "Also own the release"
+    assert engine.store.projects()[project_id].charter == "Also own the release"
+    assert engine.store.projects()[project_id].status == "active"
     assert manager_session.submitted == [
         "[Initial charter from the global orchestrator]\nOwn checkout",
         "[From the global orchestrator]: Also own the release",
@@ -669,6 +678,294 @@ def test_project_manager_session_uses_home_and_scoped_tools_without_delivery(tmp
     assert "deliver_worker" not in tool_names
     assert "hire_project_manager" not in tool_names
     assert f"repo={repo}" in session._system_append
+
+
+def test_stale_codex_org_sessions_rotate_once_for_current_dynamic_tools(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.settings.agent_backend = "codex"
+    engine.store.put("general", ThreadRecord(
+        role="orchestrator", name="orchestrator", backend="codex",
+        session_id="old-thread", session_ids={"codex": "old-thread"},
+        tool_schema_version=0))
+    rec = engine.store.get("general")
+
+    upgraded = engine._make_orchestrator_session("general", rec)
+    assert upgraded.session_id is None
+    assert "DYNAMIC TOOL SCHEMA UPGRADE" in upgraded._system_append
+
+    upgraded._on_session_id("new-thread")
+    saved = engine.store.get("general")
+    assert saved.session_ids["codex"] == "new-thread"
+    assert saved.tool_schema_version == ORG_TOOL_SCHEMA_VERSION
+
+    resumed = engine._make_orchestrator_session("general", saved)
+    assert resumed.session_id == "new-thread"
+    assert "DYNAMIC TOOL SCHEMA UPGRADE" not in resumed._system_append
+
+    repo = _repo(tmp_path, "managed")
+    engine.store.put_project(ProjectRecord(
+        project_id="managed", name="Managed", charter="Own it", repos=[str(repo)],
+        manager_id="managed", manager_thread="80"))
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="Managed PM", cwd=str(tmp_path / "pm"),
+        repo=str(repo), project_id="managed", manager_id="managed",
+        manager_status="active", backend="codex", session_id="old-manager",
+        session_ids={"codex": "old-manager"}, tool_schema_version=0))
+    manager = engine._make_project_manager_session("80", engine.store.get("80"))
+    assert manager.session_id is None
+    assert "DYNAMIC TOOL SCHEMA UPGRADE" in manager._system_append
+
+    # A temporary switch to Claude must not mark a stale Codex schema current.
+    engine.store.put("switch", ThreadRecord(
+        role="orchestrator", name="orchestrator", backend="codex",
+        session_id="stale-codex", session_ids={"codex": "stale-codex"},
+        tool_schema_version=0))
+    engine.settings.agent_backend = "claude"
+    claude = engine._make_orchestrator_session("switch", engine.store.get("switch"))
+    claude._on_session_id("current-claude")
+    assert engine.store.get("switch").tool_schema_version == 0
+    engine.settings.agent_backend = "codex"
+    rotated = engine._make_orchestrator_session("switch", engine.store.get("switch"))
+    assert rotated.session_id is None
+    assert "DYNAMIC TOOL SCHEMA UPGRADE" in rotated._system_append
+
+
+def test_dynamic_project_can_span_repos_and_manager_tools_enforce_scope(
+    tmp_path, monkeypatch,
+):
+    engine, _ = _engine(tmp_path)
+    web = _repo(tmp_path, "web")
+    api = _repo(tmp_path, "api")
+    outsider = _repo(tmp_path, "unrelated")
+    manager_session = FakeSession()
+
+    async def ensure(thread_id, rec):
+        manager_session.thread_id = thread_id
+        engine.sessions[thread_id] = manager_session
+        return manager_session
+
+    monkeypatch.setattr(engine, "_ensure_session", ensure)
+    result = asyncio.run(engine._create_project(
+        "Checkout", "Ship one checkout outcome", ["web", "api"]))
+
+    assert not result.get("is_error")
+    project = engine.store.projects()["checkout"]
+    assert project.repos == [str(web.resolve()), str(api.resolve())]
+    manager = engine.store.get(project.manager_thread)
+    namespace = engine._build_manager_tools(project.manager_thread)
+    spawn = next(tool for tool in namespace.tools if tool.name == "spawn_worker")
+    steer = next(tool for tool in namespace.tools if tool.name == "message_worker")
+    missing = asyncio.run(spawn.handler({"task": "update client"}))
+    escaped = asyncio.run(spawn.handler({
+        "task": "touch unrelated", "repo": str(outsider)}))
+    assert missing.get("is_error") and "required" in missing["content"][0]["text"]
+    assert escaped.get("is_error") and "outside" in escaped["content"][0]["text"]
+    asyncio.run(engine._update_project_status("checkout", "completed"))
+    closed = asyncio.run(spawn.handler({
+        "task": "late work", "repo": str(web)}))
+    closed_steer = asyncio.run(steer.handler({
+        "worker_id": "missing", "text": "late work"}))
+    messaged = asyncio.run(engine._message_project_manager(
+        project.manager_id, "do more"))
+    assert closed.get("is_error") and "reactivate" in closed["content"][0]["text"]
+    assert closed_steer.get("is_error") and "reactivate" in closed_steer["content"][0]["text"]
+    assert messaged.get("is_error") and "reactivate" in messaged["content"][0]["text"]
+    assert manager.project_id == project.project_id
+    assert "repos=" in engine._make_project_manager_session(
+        project.manager_thread, manager)._system_append
+    status = engine._project_snapshot(project.manager_id)
+    assert "status=completed" in status
+    assert "charter=Ship one checkout outcome" in status
+    assert "status=completed" in engine._make_project_manager_session(
+        project.manager_thread, manager)._system_append
+
+
+def test_one_monorepo_may_hold_two_distinct_outcome_projects(tmp_path, monkeypatch):
+    engine, transport = _engine(tmp_path)
+    _repo(tmp_path, "monorepo")
+
+    async def ensure(thread_id, rec):
+        session = FakeSession(); session.thread_id = thread_id
+        engine.sessions[thread_id] = session
+        return session
+
+    monkeypatch.setattr(engine, "_ensure_session", ensure)
+    asyncio.run(engine._create_project("Billing", "Replace invoices", ["monorepo"]))
+    asyncio.run(engine._create_project("Identity", "Roll out passkeys", ["monorepo"]))
+
+    assert set(engine.store.projects()) == {"billing", "identity"}
+    assert len(engine.store.managers()) == 2
+    assert len(transport.threads) == 2
+
+
+def test_project_scope_cannot_orphan_live_worker_and_status_is_code_owned(tmp_path):
+    engine, _ = _engine(tmp_path)
+    web = _repo(tmp_path, "web")
+    api = _repo(tmp_path, "api")
+    engine.store.put_project(ProjectRecord(
+        project_id="checkout", name="Checkout", charter="Ship",
+        repos=[str(web), str(api)], manager_id="checkout", manager_thread="80"))
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="Checkout PM", manager_id="checkout",
+        project_id="checkout", repo=str(web), manager_status="active"))
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", repo=str(api),
+        project_id="checkout", supervisor_id="checkout", worker_status="working"))
+
+    refused = asyncio.run(engine._update_project_scope("checkout", ["web"]))
+    assert refused.get("is_error") and "nova" in refused["content"][0]["text"]
+    assert engine.store.projects()["checkout"].repos == [str(web), str(api)]
+
+    completed_early = asyncio.run(engine._update_project_status("checkout", "completed"))
+    archived = asyncio.run(engine._update_project_status("checkout", "archived"))
+    assert completed_early.get("is_error") and "unfinished" in completed_early["content"][0]["text"]
+    assert archived.get("is_error") and "unfinished" in archived["content"][0]["text"]
+    engine.store.update("81", worker_status="delivered")
+    completed = asyncio.run(engine._update_project_status("checkout", "completed"))
+    assert not completed.get("is_error")
+    assert engine.store.projects()["checkout"].status == "completed"
+    inactive_scope = asyncio.run(engine._update_project_scope("checkout", ["web"]))
+    assert inactive_scope.get("is_error") and "reactivate" in inactive_scope["content"][0]["text"]
+
+
+def test_project_scope_rolls_back_when_manager_cannot_resume(tmp_path, monkeypatch):
+    engine, _ = _engine(tmp_path)
+    web = _repo(tmp_path, "web")
+    api = _repo(tmp_path, "api")
+    engine.store.put_project(ProjectRecord(
+        project_id="checkout", name="Checkout", charter="Ship", repos=[str(web)],
+        manager_id="checkout", manager_thread="80"))
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="Checkout PM", manager_id="checkout",
+        project_id="checkout", repo=str(web), manager_status="active"))
+
+    async def unavailable(thread_id, rec):
+        return None
+
+    monkeypatch.setattr(engine, "_ensure_session", unavailable)
+    result = asyncio.run(engine._update_project_scope("checkout", ["web", "api"]))
+    assert result.get("is_error") and "rolled back" in result["content"][0]["text"]
+    assert engine.store.projects()["checkout"].repos == [str(web)]
+    assert engine.store.get("80").repo == str(web)
+
+
+def test_project_scope_refuses_to_interrupt_busy_manager(tmp_path):
+    engine, _ = _engine(tmp_path)
+    web = _repo(tmp_path, "web")
+    api = _repo(tmp_path, "api")
+    engine.store.put_project(ProjectRecord(
+        project_id="checkout", name="Checkout", charter="Ship", repos=[str(web)],
+        manager_id="checkout", manager_thread="80"))
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="Checkout PM", manager_id="checkout",
+        project_id="checkout", repo=str(web), manager_status="active"))
+    live = FakeSession()
+    live.status = "busy"
+    engine.sessions["80"] = live
+
+    result = asyncio.run(engine._update_project_scope("checkout", ["web", "api"]))
+
+    assert result.get("is_error") and "handling work" in result["content"][0]["text"]
+    assert engine.store.projects()["checkout"].repos == [str(web)]
+    assert engine.store.get("80").repo == str(web)
+    assert engine.sessions["80"] is live
+    assert live.status == "busy"
+
+
+def test_boss_project_room_message_explicitly_reopens_completed_project(tmp_path):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "app")
+    engine.store.put_project(ProjectRecord(
+        project_id="release", name="Release", charter="Ship", status="completed",
+        repos=[str(repo)], manager_id="release", manager_thread="80"))
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="Release PM", manager_id="release",
+        project_id="release", repo=str(repo), manager_status="active"))
+    session = FakeSession()
+    engine.sessions["80"] = session
+
+    asyncio.run(engine.on_inbound(InboundMessage(
+        thread_id="80", text="Start the follow-up", sender_name="the boss")))
+
+    assert engine.store.projects()["release"].status == "active"
+    assert session.submitted == [
+        "[Direct project-room message from the boss]: Start the follow-up"]
+
+
+def test_busy_and_idle_publish_current_runtime_to_observers(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", worker_status="working"))
+    session = FakeSession()
+    session.status = "busy"
+    engine.sessions["81"] = session
+
+    asyncio.run(engine._busy("81"))
+    busy = __import__("json").loads(
+        engine.store.organization_path.read_text(encoding="utf-8"))
+    assert busy["independent_workers"][0]["runtime"] == "busy"
+
+    session.status = "idle"
+    asyncio.run(engine._idle("81"))
+    idle = __import__("json").loads(
+        engine.store.organization_path.read_text(encoding="utf-8"))
+    assert idle["independent_workers"][0]["runtime"] == "idle"
+
+
+def test_org_snapshot_groups_legacy_and_new_work_without_losing_threads(tmp_path):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "app")
+    engine.store.put_project(ProjectRecord(
+        project_id="release", name="Release", charter="Ship it",
+        repos=[str(repo)], manager_id="release", manager_thread="80"))
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="Release PM", manager_id="release",
+        project_id="release", repo=str(repo), manager_status="active"))
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", repo=str(repo),
+        supervisor_id="release", project_id="release", worker_status="working"))
+    engine.store.put("82", ThreadRecord(
+        role="worker", name="Kite", worker_id="kite", repo=str(repo),
+        worker_status="done"))
+
+    asyncio.run(engine._refresh_dashboard())
+    snapshot = engine._organization_snapshot()
+    assert [worker["id"] for worker in snapshot["projects"][0]["workers"]] == ["nova"]
+    assert [worker["id"] for worker in snapshot["independent_workers"]] == ["kite"]
+    assert set(engine.store.all()) == {"80", "81", "82"}
+    assert engine.store.organization_path.exists()
+    tree = engine.render_organization_text()
+    assert "Release PM" in tree and "Nova" in tree and "Independent work" in tree
+
+
+def test_archived_project_children_do_not_reappear_as_independent(tmp_path):
+    engine, _ = _engine(tmp_path)
+    engine.store.put_project(ProjectRecord(
+        project_id="old", name="Old", charter="Done", status="archived",
+        repos=[str(tmp_path)], manager_id="old", manager_thread="80"))
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="Old PM", manager_id="old", project_id="old",
+        manager_status="dismissed", repo=str(tmp_path)))
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", project_id="old",
+        supervisor_id="old", worker_status="delivered", repo=str(tmp_path)))
+
+    snapshot = engine._organization_snapshot()
+    assert snapshot["projects"] == []
+    assert snapshot["independent_workers"] == []
+
+
+def test_delivered_worker_thread_cannot_resume_closed_work(tmp_path):
+    engine, transport = _engine(tmp_path)
+    engine.store.put("81", ThreadRecord(
+        role="worker", name="Nova", worker_id="nova", worker_status="delivered",
+        repo=str(tmp_path), cwd=str(tmp_path)))
+
+    asyncio.run(engine.on_inbound(InboundMessage(
+        thread_id="81", text="change one more thing", sender_name="the boss")))
+
+    assert "immutable" in transport.posts[-1].text
+    assert "81" not in engine.sessions
 
 
 def test_managed_worker_result_wakes_project_manager_not_global(tmp_path):
@@ -1239,6 +1536,8 @@ def test_factory_reset_clears_scrollback_and_keeps_the_office(tmp_path):
     assert "7" not in transport.threads            # the worker thread is gone
     assert "general" in transport.threads          # …but the office is still there
     assert transport.dashboard == ""
+    assert transport.organization["projects"] == []
+    assert transport.organization["independent_workers"] == []
 
 
 def test_reset_confirmation_owns_its_surface_caveat(tmp_path):

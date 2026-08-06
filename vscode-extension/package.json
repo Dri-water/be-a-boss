@@ -1,0 +1,45 @@
+{
+  "name": "be-a-boss-organization",
+  "displayName": "Be a Boss Organization",
+  "description": "Live, read-only organization chart for a local be-a-boss deployment.",
+  "version": "0.1.0",
+  "publisher": "be-a-boss",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dri-water/be-a-boss.git"
+  },
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onView:beaboss.organization"],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Be a Boss",
+      "properties": {
+        "beaboss.organizationUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8766/organization.json",
+          "description": "URL of the local read-only organization snapshot."
+        }
+      }
+    },
+    "commands": [
+      { "command": "beaboss.refreshOrganization", "title": "Be a Boss: Refresh Organization" },
+      { "command": "beaboss.openDashboard", "title": "Be a Boss: Open Organization Dashboard" }
+    ],
+    "views": {
+      "explorer": [
+        { "id": "beaboss.organization", "name": "Be a Boss Organization" }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        { "command": "beaboss.refreshOrganization", "when": "view == beaboss.organization", "group": "navigation" },
+        { "command": "beaboss.openDashboard", "when": "view == beaboss.organization", "group": "navigation" }
+      ]
+    }
+  },
+  "scripts": { "package": "vsce package --no-dependencies" },
+  "devDependencies": { "@vscode/vsce": "^3.6.0" }
+}

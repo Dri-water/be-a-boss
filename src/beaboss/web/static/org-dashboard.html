@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>be-a-boss · organization</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b0f14; --panel:#111821; --line:#273240;
+      --text:#e6edf3; --muted:#8b98a7; --blue:#63a9ff; --teal:#50d6bf;
+      --violet:#d08cff; --amber:#efb44b; --green:#64d48a; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45
+      ui-sans-serif,system-ui,sans-serif; }
+    header { position:sticky; top:0; z-index:2; display:flex; align-items:center;
+      justify-content:space-between; padding:18px clamp(18px,4vw,52px);
+      background:color-mix(in srgb,var(--bg) 92%,transparent); border-bottom:1px solid var(--line); }
+    h1 { margin:0; font-size:18px; letter-spacing:.2px; }
+    #health { color:var(--muted); font-size:12px; }
+    main { max-width:1050px; margin:auto; padding:32px clamp(18px,4vw,52px) 60px; }
+    .boss,.project { background:var(--panel); border:1px solid var(--line);
+      border-radius:12px; padding:16px 18px; }
+    .boss { border-left:4px solid var(--blue); }
+    .projects { display:grid; gap:14px; margin:14px 0 0 30px; padding-left:22px;
+      border-left:1px solid var(--line); }
+    .project { border-left:4px solid var(--teal); }
+    summary { cursor:pointer; font-size:15px; font-weight:700; }
+    .meta,.charter { color:var(--muted); margin-top:7px; }
+    .meta { font:12px/1.5 ui-monospace,SFMono-Regular,monospace; }
+    .people { margin:14px 0 0 18px; padding-left:18px; border-left:1px solid var(--line); }
+    .person { display:flex; gap:10px; align-items:baseline; padding:6px 0; }
+    .person.manager { color:var(--teal); } .person.worker { color:var(--violet); }
+    .state { font-size:11px; border:1px solid var(--line); color:var(--muted);
+      border-radius:999px; padding:1px 7px; }
+    .state.blocked,.state.approve { color:var(--amber); }
+    .state.done,.state.completed,.state.delivered { color:var(--green); }
+    .independent { margin-top:18px; }
+    .empty { color:var(--muted); padding:24px 2px; }
+    @media(max-width:600px){ .projects{margin-left:10px;padding-left:12px} }
+  </style>
+</head>
+<body>
+  <header><h1>🧭 Live organization</h1><span id="health">connecting…</span></header>
+  <main id="org"><div class="empty">Waiting for the orchestrator…</div></main>
+  <script>
+    const org = document.querySelector('#org'), health = document.querySelector('#health');
+    const el = (tag, cls, text) => { const node=document.createElement(tag);
+      if(cls) node.className=cls; if(text!==undefined) node.textContent=text; return node; };
+    const repoName = value => (value || '').replaceAll('\\','/').split('/').pop();
+    function person(value, kind) {
+      if(!value) return null;
+      const row=el('div','person '+kind), name=el('strong','',
+        (kind==='manager'?'🗂️ ':'⚙️ ')+(value.name || value.id));
+      const status=value.status || value.runtime || 'dormant';
+      row.append(name,el('span','state '+status,status)); return row;
+    }
+    function render(data) {
+      org.replaceChildren();
+      const boss=el('div','boss');
+      boss.append(el('strong','',`🧭 ${data.orchestrator?.name || 'Orchestrator'}`),
+        el('span','state '+(data.orchestrator?.status || ''),data.orchestrator?.status || 'dormant'));
+      org.append(boss);
+      const projects=el('section','projects');
+      for(const project of (data.projects || [])) {
+        const card=el('details','project'); card.open=project.status!=='completed' && project.status!=='archived';
+        const head=el('summary','',`📦 ${project.name} `);
+        head.append(el('span','state '+project.status,project.status || 'active')); card.append(head);
+        card.append(el('div','meta',(project.repos || []).map(repoName).join(' · ') || 'no repository scope'));
+        if(project.charter) card.append(el('div','charter',project.charter));
+        const people=el('div','people'), manager=person(project.manager,'manager');
+        if(manager) people.append(manager);
+        for(const worker of (project.workers || [])) people.append(person(worker,'worker'));
+        card.append(people); projects.append(card);
+      }
+      if(projects.children.length) org.append(projects);
+      const independent=data.independent_workers || [];
+      if(independent.length) { const group=el('section','independent');
+        group.append(el('strong','', 'Independent work'));
+        for(const worker of independent) group.append(person(worker,'worker')); org.append(group); }
+    }
+    async function refresh() {
+      try { const response=await fetch('/organization.json',{cache:'no-store'});
+        if(!response.ok) throw new Error('snapshot pending'); render(await response.json());
+        health.textContent='live · '+new Date().toLocaleTimeString(); }
+      catch(error) { health.textContent=error.message+' · retrying'; }
+    }
+    refresh(); setInterval(refresh,2000);
+  </script>
+</body>
+</html>

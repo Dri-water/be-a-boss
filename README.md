@@ -18,7 +18,7 @@
 <p align="center"><em>▶︎ <a href="https://github.com/Dri-water/be-a-boss/releases/download/v0.1.0/BeABoss.mp4">Watch with sound (43s)</a></em></p>
 
 **Run your own agent org.** You're the boss: you talk to an **orchestrator** agent,
-which can keep one **project manager** per repo and hire **worker** agents for the
+which can keep one **project manager** per outcome-based project and hire **worker** agents for the
 actual tasks. The hierarchy is adaptive: a small job can still go straight from the
 orchestrator to a worker. You can watch every agent-to-agent conversation and step
 into any of them. Each worker runs in an isolated git worktree, so parallel work
@@ -31,7 +31,7 @@ the core knows which one it's talking to.
 
 | | Supported now | Next |
 |---|---|---|
-| **Surface** — how you drive it | Telegram · **Web** (`python -m beaboss.web`) · **CLI / TUI** (`boss-cli`) | Slack · your own UI over the shared protocol |
+| **Surface** — how you drive it | Telegram · **Web** (`python -m beaboss.web`) · **CLI / TUI** (`boss-cli`) · read-only browser/VS Code org views | Slack · your own UI over the shared protocol |
 | **Agent backend** — what sessions run | Claude Code · **Codex** (`BEABOSS_BACKEND=codex`) | — |
 
 The quickstart below covers **all three** surfaces; the orchestrator + workers
@@ -50,7 +50,7 @@ terminal cockpit (`pip install be-a-boss[tui]`).
 ```mermaid
 flowchart LR
     H([You<br/>the boss]) <-->|"# General"| O["🧭 orchestrator"]
-    O <-->|"goal / milestone<br/>(project room)"| PM["🗂️ myapp manager"]
+    O <-->|"goal / milestone<br/>(project room)"| PM["🗂️ checkout manager<br/>web + API repos"]
     PM <-->|"brief / report<br/>(visible room)"| C1["⚙️ Nova · myapp<br/>worktree A"]
     O <-->|"small direct brief"| C2["⚙️ Kite · docs<br/>worktree B"]
     H -.->|"interject any time —<br/>both see it"| C1
@@ -61,14 +61,20 @@ flowchart LR
   tweak) out of #general. Give it goals in plain language ("fix the login 500 in
   myapp, then audit deps"). It splits the work, hires workers, briefs them, supervises
   at checkpoints, and reports outcomes.
-- **Long-lived repos can have a project manager.** Repo aliases that resolve to the
-  same canonical checkout share one manager and one project context. The manager
-  supervises that repo's workers and escalates concise milestones and decisions;
+- **Long-lived outcomes can have a project manager.** The orchestrator defines a
+  project from a coherent goal, shared decisions, dependencies, and delivery timing—not
+  from folder count. One project may span several repos, and a monorepo may contain
+  several distinct projects. The manager supervises only workers inside its
+  tool-enforced delegation scope and escalates concise milestones and decisions;
   the orchestrator stays focused on your portfolio. Small jobs can bypass the
   manager and use the original direct-worker route.
 - **#general is a live status board** — a single pinned message, always current,
   showing what's running, what's blocked, and what's awaiting your `/approve`. It's
   code-rendered from state, not chatter.
+- **One live org chart, several views.** `/org` renders the hierarchy in Telegram;
+  the interactive web cockpit and CLI receive a structured `organization` event;
+  Docker also starts a read-only local dashboard at `http://127.0.0.1:8766` that
+  the bundled VS Code Explorer view consumes. Observer views cannot command agents.
 - **Every manager and worker gets a visible room.** The web and terminal surfaces
   can group workers beneath their project. Telegram uses flat project/worker topics
   with project-aware names and headers because forum topics cannot be nested.
@@ -92,10 +98,12 @@ sender per message.
 
 - **Orchestrator + team** — talk to one agent; it hires, briefs, and supervises
   workers. Or go direct with `/new`.
-- **Adaptive project managers** — one scoped manager per canonical repo isolates
+- **Adaptive project managers** — one scoped manager per coherent project isolates
   project context when it helps; direct delegation avoids the extra hop when it
-  would only add latency and tokens. Managers can review and request delivery, but
-  cannot land work or operate outside their repo.
+  would only add latency and tokens. A project may span repos or share a monorepo
+  with another project. Managers can review and request delivery, but cannot land
+  work outside their assigned repo set through project-management tools. Managers
+  are trusted, prompt-bounded agents—not separate OS security sandboxes.
 - **Glass-walled delegation** — every worker conversation is a visible topic you
   can watch and interject into; both agents see your message.
 - **Isolated git worktrees** — each worker on its own `worker/<name>` branch;
@@ -284,6 +292,14 @@ runs locally, gated by who can run a process on the host.
    you're allowlisted, which is the whole point of setup mode. Put that id in
    `TELEGRAM_ALLOWED_USER_IDS`, restart, and you're the boss. No third-party bot needed.
 
+Docker Compose also starts a read-only organization dashboard on
+`http://127.0.0.1:8766`. It observes the same durable state as Telegram, so opening
+it does not start a second orchestrator or consume chat updates. For a non-Docker
+run, start `uv run boss-dashboard` beside `uv run boss`. The source for the optional
+VS Code Explorer tree is in `vscode-extension/`; package it with
+`npm install && npm run package`, then install the resulting VSIX. Both views are
+local and read-only by design.
+
 | Variable | Needed | Meaning |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | ✅ | BotFather token |
@@ -298,6 +314,7 @@ runs locally, gated by who can run a process on the host.
 | `AGENT_MODEL_FAST/BALANCED/DEEP`, `AGENT_REASONING_EFFORT_FAST/BALANCED/DEEP` | – | Worker routing overrides. Codex defaults: Luna/low, Terra/medium, Sol/high; `CODEX_*` overrides just Codex. |
 | `BEABOSS_NETWORK_UPLOAD_LIMIT`, `BEABOSS_NETWORK_DOWNLOAD_LIMIT` | – | Optional fair-queued Docker caps such as `12mbit` / `30mbit`; blank/unset is uncapped. `BEABOSS_NETWORK_LIMIT` remains the symmetric fallback. Recreate after changing. |
 | `BEABOSS_CPU_LIMIT`, `BEABOSS_MEMORY_LIMIT` | – | Whole-container host safeguards for bursty builds/tests (Docker defaults: `4` CPUs / `4g`). |
+| `BEABOSS_DASHBOARD_PORT` | – | Host loopback port for the read-only live org chart (default `8766`). |
 
 Docker mounts `HOST_DOCUMENTS` → `/workspace` and sets `PROJECTS_ROOT=/workspace`,
 so `/new myapp` targets `/workspace/myapp`. Use forward slashes on all platforms
@@ -432,6 +449,7 @@ src/beaboss/
   __main__.py            Telegram entrypoint (config → engine → telegram → poll)
   config.py              env-backed settings (transport-neutral)
   rendering.py           SDK message → text (pure, testable)
+  org_dashboard.py       read-only HTTP view over the durable org projection
   core/
     ports.py             Transport / Speaker / Outbound / Inbound contracts
     session.py           CoreSession — one agent session, posts via a callback
@@ -449,6 +467,7 @@ src/beaboss/
     __main__.py          entrypoint; Origin + token gated
     static/              the app shell (index.html + client.js), served over HTTP
   cli/                   terminal surface: __main__.py (json/plain) + tui.py (cockpit)
+vscode-extension/        optional read-only Explorer organization tree
 ```
 
 Adding a transport = implement `core.ports.Transport` and feed the engine

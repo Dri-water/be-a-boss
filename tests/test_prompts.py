@@ -13,7 +13,8 @@ def test_project_manager_prompt_enforces_project_scope_and_authority_boundary():
     prompt = PROJECT_MANAGER_APPEND.lower()
 
     assert "project manager" in prompt
-    assert "one repository" in prompt
+    assert "one outcome-based project" in prompt
+    assert "one or more code-generated repository scopes" in prompt
     assert "do not edit project code" in prompt
     assert "another manager's worker" in prompt
     assert "report upward" in prompt

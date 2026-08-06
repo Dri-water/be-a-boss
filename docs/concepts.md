@@ -10,8 +10,10 @@ it's a mental model everyone already has, so the tool is obvious to use.
 - **The orchestrator — your portfolio lead.** One persistent agent you talk to. It
   keeps your priorities straight across projects, delegates, and reports outcomes.
   It does *not* write project code itself — it directs.
-- **Project managers — repo specialists.** At most one for each canonical repo.
-  A manager remembers that project's plan and decisions, briefs and supervises its
+- **Project managers — outcome specialists.** At most one for each durable project.
+  A project is the smallest coherent body of work that shares goals, decisions,
+  dependencies, and delivery timing—not necessarily a repository. A manager
+  remembers that project's plan and decisions, briefs and supervises its
   workers, and escalates the parts that need you or the orchestrator. Managers are
   used adaptively: a quick one-off task can skip this layer.
 - **Workers — the individual contributors.** Short-lived agents, one per task. Each
@@ -33,7 +35,7 @@ A **thread** (or room) is one conversation. There are four kinds:
 - the **orchestrator thread** — where you talk to the one orchestrator. Reach it in
   the shared group thread or by DM; both drive the same orchestrator, which replies
   wherever you spoke.
-- a **project room** — the visible home of one repo and its manager;
+- a **project room** — the visible home of one outcome and its manager;
 - a **worker room** — one worker being directed (the glass wall above);
 - a **direct thread** — you talking straight to a single agent, no orchestrator in
   the middle. For quick, hands-on work where a manager would just be overhead.
@@ -52,12 +54,12 @@ messages and another opportunity for a hand-off to lose detail. be-a-boss theref
 keeps both routes:
 
 ```text
-orchestrator → project manager → worker   long-lived or multi-project work
+orchestrator → project manager → worker   long-lived or coordinated work
 orchestrator → worker                     small, direct delegation
 ```
 
 The hierarchy is deliberately shallow. A project manager cannot create another
-manager, cannot operate outside its canonical repo, and cannot deliver work. It can
+manager, must not operate outside its assigned canonical repo set, and cannot deliver work. Its project tools refuse out-of-scope delegation. It can
 review and request delivery; the orchestrator and your configured approval policy
 remain the authority for landing a branch.
 
@@ -66,6 +68,12 @@ project record and backend session ID survive while the process hibernates betwe
 turns. A new message or worker checkpoint resumes it naturally. After a restart,
 stored manager, worker, git, and session state reconstruct what needs attention, so
 hibernation and reboot do not abandon work.
+
+There is no forced repo-to-manager mapping. A cross-repo release can be one project;
+two unrelated products in a monorepo can be two projects. The orchestrator chooses
+the boundary dynamically, while code enforces worker delegation/control within the
+resulting repo set. Managers themselves are trusted, prompt-bounded agent sessions,
+not separate OS security sandboxes.
 
 ## Isolation
 

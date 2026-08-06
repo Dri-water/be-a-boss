@@ -30,10 +30,15 @@ from .ports import (InboundMessage, MediaIn, Outbound, OutboundDeliveryError,
                     Speaker, SYSTEM, Transport)
 from .session import CoreSession, DEFAULT_SESSION_APPEND
 from .recovery import infer_legacy_backend, recovery_append
-from .store import CoreStore, ThreadRecord
+from .store import CoreStore, ProjectRecord, ThreadRecord
 from . import worktrees
 
 log = logging.getLogger("beaboss.core.engine")
+
+# Codex persists dynamic tools inside native thread metadata and cannot override
+# them on resume. Bump this whenever orchestrator/manager tool names or schemas
+# change; legacy native sessions rotate once with a code-owned recovery handoff.
+ORG_TOOL_SCHEMA_VERSION = 2
 
 ORCHESTRATOR_EMOJI = "🧭"
 PROJECT_MANAGER_EMOJI = "🗂️"
@@ -199,6 +204,7 @@ class Engine:
         self._pending_delivery: dict[str, dict[str, str] | str] = dict(
             store.pending_delivery)
         self._last_dashboard = ""                          # last rendered board (skip no-op edits)
+        self._last_organization: dict[str, Any] | None = None
         # Where the boss last spoke to the orchestrator (#general or a DM). Digest
         # replies and approval prompts follow the boss there instead of stranding
         # the conversation in #general while their DM goes silent.
@@ -270,6 +276,7 @@ class Engine:
     async def _busy(self, thread_id: str) -> None:
         if self.transport is not None:
             await self.transport.indicate_busy(thread_id)
+        await self._refresh_organization()
 
     async def _idle(self, thread_id: str) -> None:
         # The turn-end counterpart to _busy. Optional on the transport: Telegram's
@@ -278,6 +285,7 @@ class Engine:
         indicate_idle = getattr(self.transport, "indicate_idle", None)
         if indicate_idle is not None:
             await indicate_idle(thread_id)
+        await self._refresh_organization()
 
     # ---- speakers --------------------------------------------------------
 
@@ -306,13 +314,16 @@ class Engine:
         for _tid, manager in self.store.managers().items():
             if manager.manager_status == "dismissed":
                 continue
+            project = self._project_for_manager(manager)
             active = sum(
                 1 for worker in self.store.workers().values()
-                if worker.supervisor_id == manager.manager_id
+                if (worker.project_id == (project.project_id if project else "")
+                    or worker.supervisor_id == manager.manager_id)
                 and worker.worker_status not in ("dismissed", "delivered")
             )
             rows.append(
-                f"project {Path(manager.repo).name}={manager.manager_id}/"
+                f"project {(project.name if project else Path(manager.repo).name)}="
+                f"{(project.project_id if project else manager.manager_id)}/"
                 f"{active} active workers")
         for tid, rec in self.store.workers().items():
             if rec.worker_status in ("dismissed", "delivered"):
@@ -389,6 +400,18 @@ class Engine:
             ))
             return
 
+        if rec.role == "worker":
+            project = self._find_project(rec.project_id) if rec.project_id else None
+            if rec.worker_status == "delivered" or (
+                    project and project.status in ("completed", "archived")):
+                await self._post(Outbound(
+                    thread_id=msg.thread_id, speaker=SYSTEM,
+                    text=(f"{rec.name}'s task is closed and its delivered revision is "
+                          "immutable here. Ask the orchestrator to reactivate the "
+                          "project if needed and hire a fresh worker."),
+                ))
+                return
+
         if rec.role == "project_manager" and rec.manager_status == "dismissed":
             await self._post(Outbound(
                 thread_id=msg.thread_id, speaker=SYSTEM,
@@ -396,6 +419,21 @@ class Engine:
                       f"management for {Path(rec.repo).name}."),
             ))
             return
+
+        if rec.role == "project_manager":
+            project = self._project_for_manager(rec)
+            if project and project.status == "archived":
+                await self._post(Outbound(
+                    thread_id=msg.thread_id, speaker=SYSTEM,
+                    text=(f"Project {project.name} is archived. Ask the orchestrator "
+                          "to create a new project for renewed work."),
+                ))
+                return
+            if project and project.status == "completed":
+                # A direct boss interjection is explicit authority to reopen the
+                # completed project; agent-to-agent tools still require reactivation.
+                self.store.update_project(project.project_id, status="active")
+                await self._refresh_dashboard()
 
         session = await self._ensure_session(msg.thread_id, rec)
         if session is None:
@@ -482,16 +520,35 @@ class Engine:
             self.sessions[thread_id] = session
             return session
 
-    def _sid_saver(self, thread_id: str):
+    def _sid_saver(self, thread_id: str, *, tool_schema_version: int = 0):
         backend = self.settings.agent_backend
 
         def save(sid: str) -> None:
             rec = self.store.get(thread_id)
             ids = dict(rec.session_ids) if rec else {}
             ids[backend] = sid
-            self.store.update(
-                thread_id, backend=backend, session_id=sid, session_ids=ids)
+            fields: dict[str, Any] = {
+                "backend": backend, "session_id": sid, "session_ids": ids}
+            if tool_schema_version and backend == "codex":
+                fields["tool_schema_version"] = tool_schema_version
+            self.store.update(thread_id, **fields)
         return save
+
+    def _rotate_stale_codex_tools(
+        self, rec: ThreadRecord, resume_id: str | None, handoff: str,
+    ) -> tuple[str | None, str]:
+        """Start fresh when a resumed Codex thread embeds an older tool schema."""
+        if (self.settings.agent_backend != "codex" or not resume_id
+                or rec.tool_schema_version >= ORG_TOOL_SCHEMA_VERSION):
+            return resume_id, handoff
+        upgrade = (
+            "\n\n[DYNAMIC TOOL SCHEMA UPGRADE — code-generated recovery]\n"
+            "The previous Codex native thread used an older fleet/project tool schema "
+            "that cannot be replaced during thread/resume. This is a fresh native "
+            "session with current tools. Recover from the durable project, worker, "
+            "workspace, git, and pending-turn state supplied by be-a-boss; do not "
+            "invent missing history or repeat external side effects.\n")
+        return None, handoff + upgrade
 
     def _session_material(
         self, thread_id: str, rec: ThreadRecord,
@@ -554,6 +611,7 @@ class Engine:
 
     def _make_orchestrator_session(self, thread_id: str, rec: ThreadRecord) -> CoreSession:
         resume_id, model, effort, handoff = self._session_material(thread_id, rec)
+        resume_id, handoff = self._rotate_stale_codex_tools(rec, resume_id, handoff)
         home = self.settings.state_dir / "orchestrator-home"
         home.mkdir(parents=True, exist_ok=True)
         base = (self.settings.session_system_append
@@ -572,7 +630,9 @@ class Engine:
             thread_id=thread_id, cwd=home,
             speaker=self.orchestrator_speaker(),
             settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
-            on_session_id=self._sid_saver(thread_id), session_id=resume_id,
+            on_session_id=self._sid_saver(
+                thread_id, tool_schema_version=ORG_TOOL_SCHEMA_VERSION),
+            session_id=resume_id,
             system_append=append,
             extra_tool_namespaces=(self._build_fleet_tools(),),
             final_only=True,  # text the boss one clean reply, don't narrate
@@ -609,21 +669,32 @@ class Engine:
         self, thread_id: str, rec: ThreadRecord,
     ) -> CoreSession:
         resume_id, model, effort, handoff = self._session_material(thread_id, rec)
+        resume_id, handoff = self._rotate_stale_codex_tools(rec, resume_id, handoff)
         home = Path(rec.cwd)
         home.mkdir(parents=True, exist_ok=True)
         base = (self.settings.session_system_append
                 if self.settings.session_system_append is not None else "")
+        project_record = self._project_for_manager(rec)
+        repos = (project_record.repos if project_record else
+                 ([rec.repo] if rec.repo else []))
+        charter = project_record.charter if project_record else rec.task
         project = (
             "\n\nCODE-GENERATED PROJECT SCOPE (cannot be widened by chat):\n"
-            f"manager_id={rec.manager_id}\nrepo={rec.repo}\n"
-            f"charter={rec.task or '(ongoing project stewardship)'}\n")
+            f"project_id={rec.project_id or rec.manager_id}\n"
+            f"manager_id={rec.manager_id}\n"
+            f"repo={rec.repo}\n"  # legacy single-repo prompt compatibility
+            f"repos={repos}\n"
+            f"status={(project_record.status if project_record else 'active')}\n"
+            f"charter={charter or '(ongoing project stewardship)'}\n")
         append = ((base + "\n\n" if base else "") + PROJECT_MANAGER_APPEND
                   + project + handoff)
         session = CoreSession(
             thread_id=thread_id, cwd=home,
             speaker=self.project_manager_speaker(rec.name),
             settings=self.settings, post=self._post, busy=self._busy, idle=self._idle,
-            on_session_id=self._sid_saver(thread_id), session_id=resume_id,
+            on_session_id=self._sid_saver(
+                thread_id, tool_schema_version=ORG_TOOL_SCHEMA_VERSION),
+            session_id=resume_id,
             system_append=append,
             extra_tool_namespaces=(self._build_manager_tools(thread_id),),
             final_only=True,
@@ -718,14 +789,30 @@ class Engine:
                 return thread_id, rec
         return None
 
+    def _find_project(self, project_id: str) -> ProjectRecord | None:
+        return self.store.projects().get(project_id)
+
+    def _project_for_manager(self, manager: ThreadRecord) -> ProjectRecord | None:
+        project_id = manager.project_id or manager.manager_id
+        return self._find_project(project_id)
+
     def _project_snapshot(self, manager_id: str) -> str:
         found = self._find_manager(manager_id)
         if found is None:
             return "(project manager missing)"
         thread_id, manager = found
+        project = self._project_for_manager(manager)
         live = self.sessions.get(thread_id)
+        repos = project.repos if project else ([manager.repo] if manager.repo else [])
         lines = [
-            f"project={Path(manager.repo).name} repo={manager.repo}",
+            f"project={(project.name if project else Path(manager.repo).name)} "
+            f"project_id={(project.project_id if project else manager.manager_id)}",
+            f"status={(project.status if project else manager.manager_status or 'active')}",
+            "repos=" + (", ".join(repos) if repos else "(none)"),
+            f"charter={((project.charter if project else manager.task) or '(none)')[:600]}",
+            "last_summary=" + (
+                ((project.last_summary if project else manager.last_summary)
+                 or "(none)")[:1000]),
             f"manager={manager.manager_id} runtime={live.status if live else 'dormant'}",
         ]
         children = [
@@ -741,6 +828,96 @@ class Engine:
                 f"runtime={runtime.status if runtime else 'dormant'} "
                 f"checks={worker.checks or 'not-run'} task={worker.task[:100]}")
         return "\n".join(lines)
+
+    def _organization_snapshot(self) -> dict[str, Any]:
+        """Deterministic org truth shared by browser, editor, CLI, and tests."""
+        def worker_json(thread_id: str, rec: ThreadRecord) -> dict[str, Any]:
+            runtime = self.sessions.get(thread_id)
+            status = rec.worker_status or "working"
+            if rec.worker_id in self._pending_delivery:
+                status = "approve"
+            return {
+                "id": rec.worker_id,
+                "thread_id": thread_id,
+                "name": rec.name,
+                "role": "worker",
+                "project_id": rec.project_id,
+                "repo": rec.repo,
+                "task": rec.task,
+                "status": status,
+                "runtime": runtime.status if runtime else "dormant",
+                "checks": rec.checks,
+            }
+
+        projects: list[dict[str, Any]] = []
+        assigned_threads: set[str] = set()
+        managers = self.store.managers()
+        workers = self.store.workers()
+        for project in sorted(
+            self.store.projects().values(), key=lambda p: (p.created_at, p.project_id),
+        ):
+            if project.status == "archived":
+                continue
+            manager_pair = next(
+                ((tid, rec) for tid, rec in managers.items()
+                 if rec.project_id == project.project_id
+                 or (not rec.project_id and rec.manager_id == project.manager_id)),
+                None,
+            )
+            manager_json: dict[str, Any] | None = None
+            manager_id = project.manager_id
+            if manager_pair:
+                manager_thread, manager = manager_pair
+                assigned_threads.add(manager_thread)
+                runtime = self.sessions.get(manager_thread)
+                manager_id = manager.manager_id
+                manager_json = {
+                    "id": manager.manager_id,
+                    "thread_id": manager_thread,
+                    "name": manager.name,
+                    "role": "project_manager",
+                    "status": manager.manager_status or "active",
+                    "runtime": runtime.status if runtime else "dormant",
+                    "last_summary": project.last_summary or manager.last_summary,
+                }
+            children: list[dict[str, Any]] = []
+            for thread_id, worker in workers.items():
+                if (worker.project_id == project.project_id
+                        or (not worker.project_id and manager_id
+                            and worker.supervisor_id == manager_id)) \
+                        and worker.worker_status != "dismissed":
+                    assigned_threads.add(thread_id)
+                    children.append(worker_json(thread_id, worker))
+            projects.append({
+                "id": project.project_id,
+                "name": project.name,
+                "charter": project.charter,
+                "status": project.status,
+                "repos": list(project.repos),
+                "manager": manager_json,
+                "workers": children,
+                "last_summary": project.last_summary,
+            })
+        independent = [
+            worker_json(thread_id, worker)
+            for thread_id, worker in workers.items()
+            if thread_id not in assigned_threads
+            and worker.worker_status != "dismissed"
+            and not worker.project_id
+            and not worker.supervisor_id
+        ]
+        orchestrator = self.sessions.get(self.main_thread)
+        return {
+            "version": 1,
+            "orchestrator": {
+                "thread_id": self.main_thread,
+                "name": self.settings.bot_name,
+                "role": "orchestrator",
+                "status": orchestrator.status if orchestrator else "dormant",
+            },
+            "projects": projects,
+            "independent_workers": independent,
+        }
 
     def _render_dashboard(self) -> str:
         """A deterministic snapshot of the fleet, rendered from the store in code
@@ -770,18 +947,22 @@ class Engine:
         out = [f"📋 {self.settings.bot_name} — live status",
                f"🟢 {len(cats['running'])} running   🔎 {len(cats['review'])} in review"
                f"   🚦 {len(cats['approve'])} to approve   ⛔ {len(cats['blocked'])} blocked"]
-        managers = [m for m in self.store.managers().values()
-                    if m.manager_status != "dismissed"]
-        if managers:
+        projects = [p for p in self.store.projects().values()
+                    if p.status != "archived"]
+        if projects:
             out += ["", "🗂 Projects:"]
-            for manager in managers[-12:]:
-                children = [w for w in workers
-                            if w.supervisor_id == manager.manager_id]
+            for project in projects[-12:]:
+                children = [
+                    w for w in workers
+                    if w.project_id == project.project_id
+                    or (not w.project_id and project.manager_id
+                        and w.supervisor_id == project.manager_id)
+                ]
                 counts = {key: 0 for key in cats}
                 for child in children:
                     counts[bucket(child)] += 1
                 out.append(
-                    f"  • {Path(manager.repo).name} · {manager.manager_id} — "
+                    f"  • {project.name} · {len(project.repos)} repo(s) — "
                     f"{counts['running']} running, {counts['review']} review, "
                     f"{counts['blocked']} blocked")
                 for child in children:
@@ -806,9 +987,60 @@ class Engine:
             out += ["", "idle — nothing running. Send me a goal to get started."]
         return "\n".join(out)
 
+    def render_organization_text(self) -> str:
+        """Compact, transport-neutral tree for chat and plain terminals."""
+        organization = self._organization_snapshot()
+        boss = organization["orchestrator"]
+        lines = [f"🧭 {boss['name']} [{boss['status']}]", "│"]
+        projects = organization["projects"]
+        independent = organization["independent_workers"]
+        for index, project in enumerate(projects):
+            last = index == len(projects) - 1 and not independent
+            branch = "└─" if last else "├─"
+            repos = ", ".join(Path(value).name for value in project["repos"])
+            lines.append(
+                f"{branch} 📦 {project['name']} [{project['status']}] · "
+                f"{repos or 'no repo'}")
+            stem = "   " if last else "│  "
+            manager = project["manager"]
+            if manager:
+                lines.append(
+                    f"{stem}{'└─' if not project['workers'] else '├─'} "
+                    f"🗂️ {manager['name']} "
+                    f"[{manager['status']}/{manager['runtime']}]")
+            for worker_index, worker in enumerate(project["workers"]):
+                worker_last = worker_index == len(project["workers"]) - 1
+                lines.append(
+                    f"{stem}{'└─' if worker_last else '├─'} ⚙️ {worker['name']} "
+                    f"[{worker['status']}/{worker['runtime']}]")
+        if independent:
+            lines.append("└─ Independent work")
+            for index, worker in enumerate(independent):
+                lines.append(
+                    f"   {'└─' if index == len(independent) - 1 else '├─'} "
+                    f"⚙️ {worker['name']} [{worker['status']}/{worker['runtime']}]")
+        if not projects and not independent:
+            lines.append("└─ No active projects or workers")
+        return "\n".join(lines)
+
+    async def _refresh_organization(self) -> None:
+        """Publish one org projection without forcing a chat dashboard edit."""
+        organization = self._organization_snapshot()
+        if organization == self._last_organization:
+            return
+        self._last_organization = organization
+        self.store.write_organization(organization)
+        org_fn = getattr(self.transport, "update_organization", None)
+        if org_fn is not None:
+            try:
+                await org_fn(organization)
+            except Exception:  # noqa: BLE001
+                log.exception("organization refresh failed")
+
     async def _refresh_dashboard(self) -> None:
         """Re-render the board and push it if it changed. A no-op on transports that
         don't support a dashboard (web), and never allowed to break the flow."""
+        await self._refresh_organization()
         fn = getattr(self.transport, "update_dashboard", None)
         if fn is None:
             return
@@ -858,8 +1090,12 @@ class Engine:
         if meaningful:
             summary = full if len(full) <= 1000 else full[:1000] + "…"
             self.store.update(session.thread_id, last_summary=summary)
+            if rec.project_id:
+                self.store.update_project(rec.project_id, last_summary=summary)
+            project = self._project_for_manager(rec)
             self._note(
-                f"project manager {rec.manager_id} ({Path(rec.repo).name}) report: "
+                f"project manager {rec.manager_id} "
+                f"({project.name if project else Path(rec.repo).name}) report: "
                 f"{summary}")
             await self._wake_orchestrator()
         self._schedule_project_manager_retirement(session.thread_id, session)
@@ -871,8 +1107,10 @@ class Engine:
         if rec is None:
             return
         detail = str(error) or error.__class__.__name__
+        project = self._project_for_manager(rec)
         self._note(
-            f"project manager {rec.manager_id} ({Path(rec.repo).name}) failed a turn: "
+            f"project manager {rec.manager_id} "
+            f"({project.name if project else Path(rec.repo).name}) failed a turn: "
             f"{detail[:400]}. Inspect the project and recover supervision.")
         await self._wake_orchestrator()
         self._schedule_project_manager_retirement(session.thread_id, session)
@@ -1145,10 +1383,73 @@ class Engine:
             return await engine._inspect_repo(str(args.get("repo", "")))
 
         @fleet_tool(
+            "create_project",
+            "Create or reuse an outcome-based project with one hibernating manager. "
+            "A project may span multiple repositories; choose the grouping from shared "
+            "goals, decisions, dependencies, and delivery timing—not repo count.",
+            {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "charter": {"type": "string"},
+                "repos": {"type": "array", "items": {"type": "string"},
+                          "minItems": 1},
+                "tier": {"type": "string", "enum": ["fast", "balanced", "deep"]},
+            }, "required": ["name", "charter", "repos"]},
+        )
+        async def create_project(args: dict[str, Any]) -> dict[str, Any]:
+            raw_repos = args.get("repos")
+            repos = [str(value) for value in raw_repos] \
+                if isinstance(raw_repos, list) else []
+            return await engine._create_project(
+                str(args.get("name", "")), str(args.get("charter", "")), repos,
+                tier=str(args.get("tier", "")).strip().lower() or None)
+
+        @fleet_tool(
+            "update_project_scope",
+            "Replace a project's assigned repository set. Only use when the outcome "
+            "genuinely crosses or stops involving repositories; code validates scope.",
+            {"type": "object", "properties": {
+                "project_id": {"type": "string"},
+                "repos": {"type": "array", "items": {"type": "string"},
+                          "minItems": 1},
+            }, "required": ["project_id", "repos"]},
+        )
+        async def update_project_scope(args: dict[str, Any]) -> dict[str, Any]:
+            raw_repos = args.get("repos")
+            repos = [str(value) for value in raw_repos] \
+                if isinstance(raw_repos, list) else []
+            return await engine._update_project_scope(
+                str(args.get("project_id", "")), repos)
+
+        @fleet_tool(
+            "update_project_status",
+            "Set the code-owned project lifecycle after evidence changes. Completed "
+            "projects retain their resumable manager. Use dismiss_project_manager "
+            "to archive retired work.",
+            {"type": "object", "properties": {
+                "project_id": {"type": "string"},
+                "status": {"type": "string", "enum": [
+                    "active", "blocked", "completed"]},
+            }, "required": ["project_id", "status"]},
+        )
+        async def update_project_status(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._update_project_status(
+                str(args.get("project_id", "")), str(args.get("status", "")))
+
+        @fleet_tool(
+            "message_project",
+            "Send a project-level outcome, constraint, or decision by stable project id.",
+            {"type": "object", "properties": {
+                "project_id": {"type": "string"}, "text": {"type": "string"},
+            }, "required": ["project_id", "text"]},
+        )
+        async def message_project(args: dict[str, Any]) -> dict[str, Any]:
+            return await engine._message_project(
+                str(args.get("project_id", "")), str(args.get("text", "")))
+
+        @fleet_tool(
             "hire_project_manager",
-            "Create or reuse one durable, hibernating project manager for a repository. "
-            "Use this context boundary for continuing, multi-step, or multi-worker work; "
-            "keep trivial one-offs on the direct worker path.",
+            "Backward-compatible shortcut for a single-repository project. Prefer "
+            "create_project when shaping new work.",
             {"type": "object", "properties": {
                 "repo": {"type": "string"},
                 "charter": {"type": "string"},
@@ -1173,16 +1474,18 @@ class Engine:
 
         @fleet_tool(
             "project_status",
-            "Code-owned project/manager/worker state. Pass manager_id for one project.",
+            "Code-owned project/manager/worker state. Pass project_id or manager_id.",
             {"type": "object", "properties": {
+                "project_id": {"type": "string"},
                 "manager_id": {"type": "string"}}},
         )
         async def project_status(args: dict[str, Any]) -> dict[str, Any]:
-            want = str(args.get("manager_id", "")).strip()
+            want = (str(args.get("project_id", "")).strip()
+                    or str(args.get("manager_id", "")).strip())
             managers = engine.store.managers().items()
             blocks = [engine._project_snapshot(rec.manager_id)
                       for _tid, rec in managers
-                      if not want or rec.manager_id == want]
+                      if not want or rec.manager_id == want or rec.project_id == want]
             return ok("\n\n".join(blocks) or "(no matching projects)")
 
         @fleet_tool(
@@ -1331,7 +1634,7 @@ class Engine:
         )
 
     def _build_manager_tools(self, manager_thread: str) -> ToolNamespace:
-        """A deliberately small, repository-scoped project-management surface."""
+        """A deliberately small, project-scoped management surface."""
         engine = self
         specs: list[AgentTool] = []
 
@@ -1348,20 +1651,35 @@ class Engine:
             rec = engine.store.get(manager_thread)
             return rec if rec and rec.role == "project_manager" else None
 
+        def project(rec: ThreadRecord) -> ProjectRecord | None:
+            return engine._project_for_manager(rec)
+
         @project_tool(
             "inspect_project",
-            "Inspect your assigned repository's guidance, layout, branch, and test hint.",
+            "Inspect every repository assigned to this project's durable scope.",
             {"type": "object", "properties": {}},
         )
         async def inspect_project(args: dict[str, Any]) -> dict[str, Any]:
             rec = manager()
-            return await engine._inspect_repo(rec.repo) if rec else err("manager missing")
+            if rec is None:
+                return err("manager missing")
+            assigned = project(rec)
+            repos = assigned.repos if assigned else [rec.repo]
+            bodies: list[str] = []
+            for repo in repos:
+                result = await engine._inspect_repo(repo)
+                if result.get("is_error"):
+                    return result
+                bodies.append(result["content"][0]["text"])
+            return {"content": [{"type": "text", "text": "\n\n".join(bodies)}]}
 
         @project_tool(
             "spawn_worker",
-            "Hire a worker inside your assigned repository for one self-contained task.",
+            "Hire a worker in one repository assigned to this project. Specify repo "
+            "when the project spans more than one.",
             {"type": "object", "properties": {
                 "task": {"type": "string"},
+                "repo": {"type": "string"},
                 "tier": {"type": "string", "enum": ["fast", "balanced", "deep"]},
             }, "required": ["task"]},
         )
@@ -1369,10 +1687,27 @@ class Engine:
             rec = manager()
             if rec is None:
                 return err("manager missing")
+            assigned = project(rec)
+            if assigned and assigned.status in ("completed", "archived"):
+                return err(
+                    f"project {assigned.project_id} is {assigned.status}; the global "
+                    "orchestrator must reactivate it before new work")
+            repos = assigned.repos if assigned else [rec.repo]
+            requested = str(args.get("repo", "")).strip()
+            if requested:
+                resolved = engine._resolve_repo(requested)
+                if resolved is None or str(resolved) not in repos:
+                    return err("repository is outside this project's assigned scope")
+                repo = str(resolved)
+            elif len(repos) == 1:
+                repo = repos[0]
+            else:
+                return err("repo is required for a multi-repository project")
             return await engine._spawn_worker(
-                rec.repo, str(args.get("task", "")),
+                repo, str(args.get("task", "")),
                 tier=str(args.get("tier", "")).strip().lower() or None,
-                supervisor_id=rec.manager_id)
+                supervisor_id=rec.manager_id,
+                project_id=(assigned.project_id if assigned else rec.project_id))
 
         @project_tool(
             "message_worker",
@@ -1385,6 +1720,11 @@ class Engine:
             rec = manager()
             if rec is None:
                 return err("manager missing")
+            assigned = project(rec)
+            if assigned and assigned.status in ("completed", "archived"):
+                return err(
+                    f"project {assigned.project_id} is {assigned.status}; the global "
+                    "orchestrator must reactivate it before new work")
             return await engine._message_worker(
                 str(args.get("worker_id", "")), str(args.get("text", "")),
                 supervisor_id=rec.manager_id)
@@ -1444,8 +1784,9 @@ class Engine:
 
         return ToolNamespace(
             name="project",
-            description=("Manage workers and verification inside exactly one assigned "
-                         "repository. Delivery remains with the global orchestrator."),
+            description=("Manage workers and verification inside one outcome project "
+                         "and its assigned repositories. Delivery remains with the "
+                         "global orchestrator."),
             tools=tuple(specs),
         )
 
@@ -1479,66 +1820,91 @@ class Engine:
             return None  # outside the projects root — refused
         return repo if repo.is_dir() else None
 
-    async def _hire_project_manager(
-        self, repo_raw: str, charter: str, tier: str | None = None,
+    async def _create_project(
+        self, name: str, charter: str, repos_raw: list[str],
+        tier: str | None = None,
     ) -> dict[str, Any]:
         def err(text: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": text}], "is_error": True}
 
-        if not charter.strip():
-            return err("charter is required")
+        if not name.strip() or not charter.strip() or not repos_raw:
+            return err("name, charter, and at least one repository are required")
         if tier and tier not in ("fast", "balanced", "deep"):
             return err(f"unknown tier '{tier}' — use fast, balanced, or deep")
-        repo = self._resolve_repo(repo_raw)
-        if repo is None:
-            return err(f"no such repo: {repo_raw}")
+        repos: list[Path] = []
+        for raw in repos_raw:
+            repo = self._resolve_repo(str(raw))
+            if repo is None:
+                return err(f"no such repo: {raw}")
+            if repo not in repos:
+                repos.append(repo)
+        canonical = [str(repo) for repo in repos]
 
-        for thread_id, rec in self.store.managers().items():
-            if Path(rec.repo).resolve() == repo and rec.manager_status != "dismissed":
-                result = await self._message_project_manager(
-                    rec.manager_id, charter.strip())
+        for project in self.store.projects().values():
+            if (project.status != "archived"
+                    and project.name.casefold() == name.strip().casefold()
+                    and set(project.repos) == set(canonical)):
+                self.store.update_project(
+                    project.project_id, charter=charter.strip(), status="active")
+                found = self._find_manager(project.manager_id)
+                if found:
+                    self.store.update(found[0], task=charter.strip())
+                result = await self._message_project(
+                    project.project_id, charter.strip())
                 if result.get("is_error"):
                     return result
-                self._action(f"reuse_project_manager({rec.manager_id})")
+                self._action(f"reuse_project({project.project_id})")
                 return {"content": [{"type": "text", "text":
-                        f"reused project manager {rec.manager_id} for {repo.name}; "
+                        f"reused project manager for project {project.project_id}; "
                         "the new charter was delivered."}]}
 
         selected_tier, model, effort = self.settings.resolve_worker_profile(
             tier or "balanced")
-        base_id = worker_id_for(repo.name) or "project"
-        taken = {r.manager_id for r in self.store.managers().values()}
-        manager_id = base_id
+        base_id = worker_id_for(name.strip()) or "project"
+        taken = set(self.store.projects()) | {
+            r.manager_id for r in self.store.managers().values()}
+        project_id = base_id
         suffix = 2
-        while manager_id in taken:
-            manager_id = f"{base_id}-{suffix}"
+        while project_id in taken:
+            project_id = f"{base_id}-{suffix}"
             suffix += 1
-        name = f"{repo.name} PM"
+        manager_id = project_id
+        manager_name = f"{name.strip()} PM"
         home = self.settings.state_dir / "managers" / f"{manager_id}-home"
         home.mkdir(parents=True, exist_ok=True)
 
         assert self.transport is not None
         thread_id = await self.transport.create_thread(
-            f"{PROJECT_MANAGER_EMOJI} {repo.name} · project manager")
+            f"{PROJECT_MANAGER_EMOJI} {name.strip()} · project manager")
         rec = ThreadRecord(
-            role="project_manager", name=name, cwd=str(home), repo=str(repo),
+            role="project_manager", name=manager_name, cwd=str(home),
+            repo=canonical[0],
             task=charter.strip(), manager_id=manager_id, manager_status="active",
+            project_id=project_id,
             tier=selected_tier, model=model or "", reasoning_effort=effort or "",
             backend=self.settings.agent_backend,
             models=({self.settings.agent_backend: model} if model else {}),
             reasoning_efforts=(
                 {self.settings.agent_backend: effort} if effort else {}),
         )
+        project = ProjectRecord(
+            project_id=project_id, name=name.strip(), charter=charter.strip(),
+            repos=canonical, status="active", manager_id=manager_id,
+            manager_thread=thread_id,
+        )
+        self.store.put_project(project)
         self.store.put(thread_id, rec)
         update_thread = getattr(self.transport, "update_thread", None)
         if update_thread is not None:
             await update_thread(
-                thread_id, role="project_manager", repo=str(repo),
-                manager_id=manager_id, supervisor_id="", status="active")
+                thread_id, role="project_manager", repo=canonical[0],
+                project_id=project_id, manager_id=manager_id,
+                supervisor_id="", status="active")
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM,
-            text=(f"Project room opened for {repo.name}. {name} retains project "
-                  "context and hibernates when idle.")))
+            text=(f"Project room opened for {name.strip()} across "
+                  f"{len(canonical)} repository scope(s). {manager_name} retains "
+                  "project context and hibernates when idle.")))
         await self._post(Outbound(
             thread_id=thread_id, speaker=self.orchestrator_speaker(),
             text=charter.strip()))
@@ -1548,10 +1914,140 @@ class Engine:
         await session.submit(
             "[Initial charter from the global orchestrator]\n" + charter.strip())
         await self._refresh_dashboard()
-        self._action(f"hire_project_manager → {manager_id} · {repo.name}")
+        self._action(f"create_project → {project_id} · {name.strip()}")
         return {"content": [{"type": "text", "text":
-                f"hired project manager {manager_id} for {repo.name}; project room "
-                "created and charter delivered."}]}
+                f"created project {project_id} with manager {manager_id} across "
+                f"{len(canonical)} repo(s); project room and charter are live."}]}
+
+    async def _hire_project_manager(
+        self, repo_raw: str, charter: str, tier: str | None = None,
+    ) -> dict[str, Any]:
+        """Backward-compatible single-repository project creation tool."""
+        repo = self._resolve_repo(repo_raw)
+        if repo is None:
+            return {"content": [{"type": "text", "text":
+                    f"no such repo: {repo_raw}"}], "is_error": True}
+        return await self._create_project(repo.name, charter, [str(repo)], tier)
+
+    async def _message_project(
+        self, project_id: str, text: str,
+    ) -> dict[str, Any]:
+        project = self._find_project(project_id.strip())
+        if project is None:
+            return {"content": [{"type": "text", "text":
+                    f"no such project: {project_id}"}], "is_error": True}
+        return await self._message_project_manager(project.manager_id, text)
+
+    async def _update_project_scope(
+        self, project_id: str, repos_raw: list[str],
+    ) -> dict[str, Any]:
+        project = self._find_project(project_id.strip())
+        if project is None:
+            return {"content": [{"type": "text", "text":
+                    f"no such project: {project_id}"}], "is_error": True}
+        if not repos_raw:
+            return {"content": [{"type": "text", "text":
+                    "at least one repository is required"}], "is_error": True}
+        if project.status in ("completed", "archived"):
+            return {"content": [{"type": "text", "text":
+                    f"project {project.project_id} is {project.status}; reactivate it "
+                    "before changing scope"}], "is_error": True}
+        repos: list[str] = []
+        for raw in repos_raw:
+            repo = self._resolve_repo(str(raw))
+            if repo is None:
+                return {"content": [{"type": "text", "text":
+                        f"no such repo: {raw}"}], "is_error": True}
+            if str(repo) not in repos:
+                repos.append(str(repo))
+        removed = set(project.repos) - set(repos)
+        live_removed = [
+            worker.worker_id for worker in self.store.workers().values()
+            if (worker.project_id == project.project_id
+                or worker.supervisor_id == project.manager_id)
+            and worker.repo in removed
+            and worker.worker_status not in ("dismissed", "delivered")
+        ]
+        if live_removed:
+            return {"content": [{"type": "text", "text":
+                    "refused to remove repository scope while workers remain active: "
+                    + ", ".join(live_removed)}], "is_error": True}
+        found = self._find_manager(project.manager_id)
+        if found is None:
+            return {"content": [{"type": "text", "text":
+                    f"project manager missing for {project.project_id}"}], "is_error": True}
+        thread_id, manager = found
+        live = self.sessions.get(thread_id)
+        if live is not None and (
+                live.status in ("busy", "waiting") or live.pending > 0):
+            return {"content": [{"type": "text", "text":
+                    f"project manager {manager.manager_id} is handling work; retry "
+                    "the scope change after the turn and queued messages finish"}],
+                    "is_error": True}
+        old_repos = list(project.repos)
+        old_primary = manager.repo
+        self.store.update_project(project.project_id, repos=repos)
+        self.store.update(thread_id, repo=repos[0])
+        live = self.sessions.pop(thread_id, None)
+        if live is not None:
+            await live.stop()
+        update_thread = getattr(self.transport, "update_thread", None)
+        if update_thread is not None:
+            await update_thread(
+                thread_id, repo=repos[0], project_id=project.project_id)
+        notice = await self._message_project_manager(
+            manager.manager_id,
+            "Project scope changed. Re-read the code-generated repository list "
+            "before delegating further.")
+        if notice.get("is_error"):
+            self.store.update_project(project.project_id, repos=old_repos)
+            self.store.update(thread_id, repo=old_primary)
+            if update_thread is not None:
+                await update_thread(
+                    thread_id, repo=old_primary, project_id=project.project_id)
+            return {"content": [{"type": "text", "text":
+                    "project scope change rolled back: "
+                    + notice["content"][0]["text"]}], "is_error": True}
+        await self._refresh_dashboard()
+        self._action(f"update_project_scope({project.project_id})")
+        return {"content": [{"type": "text", "text":
+                f"project {project.project_id} now spans {len(repos)} repo(s)"}]}
+
+    async def _update_project_status(
+        self, project_id: str, status: str,
+    ) -> dict[str, Any]:
+        project = self._find_project(project_id.strip())
+        allowed = ("active", "blocked", "completed", "archived")
+        if project is None:
+            return {"content": [{"type": "text", "text":
+                    f"no such project: {project_id}"}], "is_error": True}
+        if status not in allowed:
+            return {"content": [{"type": "text", "text":
+                    f"invalid status: {status}"}], "is_error": True}
+        if project.status == "archived":
+            return {"content": [{"type": "text", "text":
+                    "archived projects are retired; create a new project instead"}],
+                    "is_error": True}
+        if status in ("completed", "archived"):
+            unfinished = [
+                worker.worker_id for worker in self.store.workers().values()
+                if (worker.project_id == project.project_id
+                    or worker.supervisor_id == project.manager_id)
+                and worker.worker_status not in ("dismissed", "delivered")
+            ]
+            if unfinished:
+                return {"content": [{"type": "text", "text":
+                        f"refused to mark project {status} with unfinished workers: "
+                        + ", ".join(unfinished)}], "is_error": True}
+        if status == "archived":
+            return {"content": [{"type": "text", "text":
+                    "use dismiss_project_manager to archive a retired project"}],
+                    "is_error": True}
+        self.store.update_project(project.project_id, status=status)
+        await self._refresh_dashboard()
+        self._action(f"update_project_status({project.project_id}, {status})")
+        return {"content": [{"type": "text", "text":
+                f"project {project.project_id} is now {status}"}]}
 
     async def _message_project_manager(
         self, manager_id: str, text: str,
@@ -1567,12 +2063,17 @@ class Engine:
         thread_id, rec = found
         if rec.manager_status == "dismissed":
             return err(f"project manager {manager_id} is dismissed")
-        await self._post(Outbound(
-            thread_id=thread_id, speaker=self.orchestrator_speaker(),
-            text=text.strip()))
+        project = self._project_for_manager(rec)
+        if project and project.status in ("completed", "archived"):
+            return err(
+                f"project {project.project_id} is {project.status}; reactivate it "
+                "before sending new work")
         session = await self._ensure_session(thread_id, rec)
         if session is None:
             return err("project manager session unavailable")
+        await self._post(Outbound(
+            thread_id=thread_id, speaker=self.orchestrator_speaker(),
+            text=text.strip()))
         await session.submit(f"[From the global orchestrator]: {text.strip()}")
         self._action(f"message_project_manager({rec.manager_id})")
         return {"content": [{"type": "text", "text": "delivered"}]}
@@ -1598,6 +2099,8 @@ class Engine:
         if session is not None:
             await session.stop()
         self.store.update(thread_id, manager_status="dismissed")
+        if rec.project_id:
+            self.store.update_project(rec.project_id, status="archived")
         update_thread = getattr(self.transport, "update_thread", None)
         if update_thread is not None:
             await update_thread(thread_id, status="dismissed")
@@ -1641,7 +2144,8 @@ class Engine:
 
     async def _spawn_worker(self, repo_raw: str, task: str,
                             tier: str | None = None,
-                            supervisor_id: str = "") -> dict[str, Any]:
+                            supervisor_id: str = "",
+                            project_id: str = "") -> dict[str, Any]:
         def err(text: str) -> dict[str, Any]:
             return {"content": [{"type": "text", "text": text}], "is_error": True}
 
@@ -1700,13 +2204,15 @@ class Engine:
             reasoning_efforts=(
                 {self.settings.agent_backend: effort} if effort else {}),
             supervisor_id=supervisor_id,
+            project_id=project_id,
         )
         self.store.put(thread_id, rec)
         update_thread = getattr(self.transport, "update_thread", None)
         if update_thread is not None:
             await update_thread(
                 thread_id, role="worker", repo=str(repo),
-                supervisor_id=supervisor_id, status="working")
+                project_id=project_id, supervisor_id=supervisor_id,
+                status="working")
 
         iso_note = ("its own isolated copy · branch worker/" + worker_id if isolated
                     else "⚠️ not a git repo — working directly in the project dir")
@@ -2257,6 +2763,11 @@ class Engine:
                 pass
 
         self.store.wipe()
+        # Read-only observer surfaces do not share the transport's in-memory reset;
+        # replace their projection immediately so a clean slate cannot show stale
+        # projects until the boss sends the next message.
+        self._last_organization = None
+        await self._refresh_organization()
         for sub in ("orchestrator-home", "managers", "worktrees"):
             shutil.rmtree(self.settings.state_dir / sub, ignore_errors=True)
         log.warning("factory reset executed — all state wiped")
