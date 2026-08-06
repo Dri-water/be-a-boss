@@ -134,7 +134,7 @@ sender per message.
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TB
     U([You]) -->|"# General"| ENG[engine<br/>core, transport-agnostic]
     U -. "interject in a worker topic" .-> ENG
     ENG --> ORC["🧭 orchestrator session"]
@@ -145,8 +145,10 @@ flowchart LR
     C1 -->|"turn-end / blocked / done"| SUP[project checkpoint inbox]
     SUP -->|coalesced digest| PM
     PM -->|"decision / milestone / delivery request"| ORC
-    ENG <-->|Transport contract| TG[telegram adapter<br/>topics ⇄ threads, header cards]
-    TG <--> U
+    ENG <-->|Transport contract| SURFACES[Telegram · WebSocket · CLI/TUI]
+    SURFACES <--> U
+    ENG -.->|atomic org projection| OBS[local dashboard · VS Code]
+    ORC & PM & C1 <-->|AgentBackend contract| BACKENDS[Claude Code · Codex]
 ```
 
 This is intentionally not a claim that more agents are always better. Multi-agent

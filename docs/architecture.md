@@ -10,6 +10,9 @@
    vocabulary (`Thread`, `Speaker`, `Outbound`). It never imports a chat
    platform. Telegram and a WebSocket surface (the web app) are adapters in
    `transports/`; Slack would be another, with zero core changes.
+   No connector or agent SDK is the application itself: python-telegram-bot,
+   WebSockets, and the CLI are transport harnesses, while Claude Agent SDK and
+   Codex app-server are backend harnesses behind a separate `AgentBackend` seam.
 2. **Glass-walled delegation.** The orchestrator drives worker sessions, and every
    conversation happens in a visible thread. The human can watch any exchange and
    type into it as a third party — both agents see the interjection.
@@ -49,26 +52,35 @@ flowchart TB
         SUP[supervisor<br/>checkpoint inbox]
         ST[store<br/>restart-proof state]
     end
-    TG -- InboundMessage --> ENG
-    ENG -- Outbound --> TG
+    subgraph backends/
+        CLAUDE[Claude Code<br/>Agent SDK adapter]
+        CODEX[Codex<br/>app-server adapter]
+    end
+    TG <-->|Transport contract| ENG
+    WS <-->|Transport contract| ENG
+    CLI <-->|Transport contract| ENG
     ENG -. atomic org projection .-> OBS
     ENG --> ORC & PROJECTS & FLEET & SUP
     PROJECTS --> CS
     FLEET --> CS
     SUP -- wake --> PROJECTS & ORC
     ORC & CS --> ST
+    CS <-->|AgentBackend contract| CLAUDE
+    CS <-->|AgentBackend contract| CODEX
 ```
 
 ### The transport contract (`core/ports.py`)
 
-A transport implements one small interface and receives one callback:
+A transport implements one small interface and calls one engine callback:
 
-- `create_thread(title) -> thread_id` · `close_thread`
-- `post(thread_id, speaker, content)` — content is text or media; the transport
-  renders the speaker (headers, emojis, quoting) however fits the platform
+- `create_thread(title) -> thread_id` · `close_thread(thread_id)`
+- `post(Outbound)` — the outbound value carries thread, speaker, text, and optional
+  media; the transport renders it however fits the platform
+- `indicate_busy(thread_id)` (with an optional `indicate_idle` capability)
 - it calls `engine.on_inbound(InboundMessage)` for every human message
 
-`Speaker` is `{role: orchestrator|worker|system, name, emoji}`. The core never
+`Speaker` is `{role: orchestrator|project_manager|worker|direct|system, name, emoji}`.
+The core never
 formats platform text; the adapter never holds session state.
 
 ## The org model
