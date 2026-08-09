@@ -60,6 +60,9 @@ class ThreadRecord:
     supervisor_id: str = ""    # worker-only: owning manager_id; blank = orchestrator
     last_summary: str = ""     # manager's latest bounded portfolio-level report
     project_id: str = ""       # owning durable project; blank = independent/legacy
+    # Verbatim conversation inherited from the agent(s) above this thread.  Briefs
+    # add to this context instead of replacing the boss's original intent.
+    upstream_context: list[dict[str, str]] = field(default_factory=list)
     # Version of the dynamic-tool schema embedded in the Codex native session.
     # Zero is legacy/unknown; used to rotate sessions whose resume protocol
     # cannot accept updated dynamic tool definitions.

@@ -230,6 +230,18 @@ class Engine:
         # were previously unlogged, which made a run impossible to review after the fact.
         if out.speaker.role == "orchestrator" and out.text.strip():
             log.info("orchestrator -> %s: %s", out.thread_id, out.text.strip()[:300])
+        # Keep the human-facing supervisory conversation available to agents hired
+        # later.  Delegated messages in worker threads are deliberately not folded
+        # back into the boss conversation.
+        if out.text.strip() and out.speaker.role == "orchestrator" \
+                and self._is_orchestrator_thread(out.thread_id):
+            self._append_upstream_context(
+                self.main_thread, self.settings.bot_name, out.text)
+        elif out.text.strip() and out.speaker.role == "project_manager":
+            rec = self.store.get(out.thread_id)
+            if rec is not None and rec.role == "project_manager":
+                self._append_upstream_context(
+                    out.thread_id, rec.name, out.text)
         # Give the orchestrator EYES: remember a worker's screenshots so its next
         # supervision turn can SEE the work and judge it, not just read a description.
         # Detect images by the actual file type, not the media_kind label.
@@ -308,6 +320,30 @@ class Engine:
         you used, so a DM keeps chatter out of #general — no separate 'office'."""
         return thread_id == self.main_thread or thread_id.startswith("dm:")
 
+    def _append_upstream_context(
+        self, thread_id: str, speaker: str, text: str,
+    ) -> None:
+        rec = self.store.get(thread_id)
+        if rec is None or not text.strip():
+            return
+        context = list(rec.upstream_context)
+        context.append({"speaker": speaker, "text": text.strip()})
+        self.store.update(thread_id, upstream_context=context)
+
+    @staticmethod
+    def _brief_with_upstream_context(
+        context: list[dict[str, str]], heading: str, brief: str,
+    ) -> str:
+        if not context:
+            return f"{heading}\n{brief.strip()}"
+        transcript = "\n\n".join(
+            f"[{item.get('speaker') or 'Unknown'}]\n{item.get('text', '').strip()}"
+            for item in context if item.get("text", "").strip())
+        return (
+            "[Upstream conversation — preserve the boss's intent]\n"
+            f"{transcript}\n\n{heading}\n{brief.strip()}"
+        )
+
     def _fleet_snapshot(self) -> str:
         """One compact line of ground truth, injected into every boss turn."""
         rows = []
@@ -363,6 +399,8 @@ class Engine:
             self.store.set_last_boss_thread(msg.thread_id)
             delivery_id = self.store.enqueue_boss_turn(msg.thread_id, msg.text)
             await self._ensure_orchestrator(self.main_thread)
+            self._append_upstream_context(
+                self.main_thread, msg.sender_name or "Boss", msg.text)
             session = await self._ensure_session(
                 self.main_thread, self.store.get(self.main_thread))
             if session is None:
@@ -445,6 +483,7 @@ class Engine:
 
         if rec.role == "project_manager":
             who = msg.sender_name or "the boss"
+            self._append_upstream_context(msg.thread_id, who, msg.text)
             text = f"[Direct project-room message from {who}]: {msg.text}"
             if msg.media:
                 await session.submit_media(text, msg.media)
@@ -1886,6 +1925,11 @@ class Engine:
             models=({self.settings.agent_backend: model} if model else {}),
             reasoning_efforts=(
                 {self.settings.agent_backend: effort} if effort else {}),
+            upstream_context=list(
+                (self.store.get(self.main_thread) or ThreadRecord(
+                    role="orchestrator", name="orchestrator"
+                )).upstream_context
+            ),
         )
         project = ProjectRecord(
             project_id=project_id, name=name.strip(), charter=charter.strip(),
@@ -1911,8 +1955,11 @@ class Engine:
         session = await self._ensure_session(thread_id, rec)
         if session is None:
             return err("project manager session failed to start (see project room)")
-        await session.submit(
-            "[Initial charter from the global orchestrator]\n" + charter.strip())
+        # _post above records the charter in the manager's inherited transcript.
+        # Keep the explicit assignment last as the actionable instruction.
+        await session.submit(self._brief_with_upstream_context(
+            rec.upstream_context,
+            "[Initial charter from the global orchestrator]", charter))
         await self._refresh_dashboard()
         self._action(f"create_project → {project_id} · {name.strip()}")
         return {"content": [{"type": "text", "text":
@@ -2194,6 +2241,7 @@ class Engine:
         thread_id = await self.transport.create_thread(
             f"{prefix}{WORKER_EMOJI} {name} · {repo.name}")
 
+        supervisor = self._find_manager(supervisor_id) if supervisor_id else None
         rec = ThreadRecord(
             role="worker", name=name, cwd=str(cwd), worker_id=worker_id,
             repo=str(repo), base_branch=base_branch,
@@ -2205,6 +2253,11 @@ class Engine:
                 {self.settings.agent_backend: effort} if effort else {}),
             supervisor_id=supervisor_id,
             project_id=project_id,
+            upstream_context=list(
+                (self.store.get(supervisor[0]) if supervisor else
+                 self.store.get(self.main_thread)).upstream_context
+                if (supervisor or self.store.get(self.main_thread)) else []
+            ),
         )
         self.store.put(thread_id, rec)
         update_thread = getattr(self.transport, "update_thread", None)
@@ -2221,7 +2274,6 @@ class Engine:
             text=f"{name} hired for {repo.name} ({iso_note}).",
         ))
         # the orchestrator's brief, visible in the thread:
-        supervisor = self._find_manager(supervisor_id) if supervisor_id else None
         speaker = (self.project_manager_speaker(supervisor[1].name)
                    if supervisor else self.orchestrator_speaker())
         await self._post(Outbound(
@@ -2233,7 +2285,8 @@ class Engine:
             return err("worker session failed to start (see thread)")
         source = (f"project manager {supervisor[1].name}"
                   if supervisor else "the orchestrator")
-        await session.submit(f"[Brief from {source}]\n{task.strip()}")
+        await session.submit(self._brief_with_upstream_context(
+            rec.upstream_context, f"[Brief from {source}]", task))
         await self._refresh_dashboard()
         profile = f"{selected_tier} → {model or 'default'}/{effort or 'default'}"
         if not supervisor_id:

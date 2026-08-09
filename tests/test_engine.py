@@ -710,6 +710,68 @@ def test_hire_project_manager_reuses_one_manager_for_canonical_repo(
     assert "reused project manager" in second["content"][0]["text"]
 
 
+def test_project_manager_inherits_boss_conversation_before_charter(
+    tmp_path, monkeypatch,
+):
+    engine, _ = _engine(tmp_path)
+    _repo(tmp_path, "myrepo")
+    engine.store.put("general", ThreadRecord(
+        role="orchestrator", name="orchestrator", upstream_context=[
+            {"speaker": "Boss", "text": "Keep this deliberately simple."},
+            {"speaker": "Lim Wei Jie", "text": "I will preserve that intent."},
+        ]))
+    manager_session = FakeSession()
+
+    async def ensure(thread_id, rec):
+        manager_session.thread_id = thread_id
+        engine.sessions[thread_id] = manager_session
+        return manager_session
+
+    monkeypatch.setattr(engine, "_ensure_session", ensure)
+    asyncio.run(engine._hire_project_manager("myrepo", "Ship the context change"))
+
+    prompt = manager_session.submitted[0]
+    assert prompt.index("Keep this deliberately simple.") < prompt.index(
+        "[Initial charter from the global orchestrator]")
+    assert prompt.endswith("Ship the context change")
+    manager = next(iter(engine.store.managers().values()))
+    assert manager.upstream_context[0]["text"] == "Keep this deliberately simple."
+
+
+def test_worker_inherits_manager_and_boss_context_before_brief(
+    tmp_path, monkeypatch,
+):
+    engine, _ = _engine(tmp_path)
+    _repo(tmp_path, "myrepo")
+    manager_context = [
+        {"speaker": "Boss", "text": "Do not overengineer this."},
+        {"speaker": "myrepo PM", "text": "Use the existing handoff path."},
+    ]
+    engine.store.put("80", ThreadRecord(
+        role="project_manager", name="myrepo PM", repo=str(tmp_path / "projects" / "myrepo"),
+        manager_id="myrepo", manager_status="active", project_id="myrepo",
+        upstream_context=manager_context))
+    worker_session = FakeSession()
+
+    async def ensure(thread_id, rec):
+        worker_session.thread_id = thread_id
+        engine.sessions[thread_id] = worker_session
+        return worker_session
+
+    monkeypatch.setattr(engine, "_ensure_session", ensure)
+    result = asyncio.run(engine._spawn_worker(
+        "myrepo", "Implement the smallest change", supervisor_id="myrepo",
+        project_id="myrepo"))
+
+    assert not result.get("is_error")
+    prompt = worker_session.submitted[0]
+    assert prompt.index("Do not overengineer this.") < prompt.index(
+        "[Brief from project manager myrepo PM]")
+    assert prompt.endswith("Implement the smallest change")
+    worker = next(iter(engine.store.workers().values()))
+    assert worker.upstream_context == manager_context
+
+
 def test_project_manager_session_uses_home_and_scoped_tools_without_delivery(tmp_path):
     engine, _ = _engine(tmp_path)
     repo = _repo(tmp_path, "myrepo")
