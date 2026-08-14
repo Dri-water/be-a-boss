@@ -38,7 +38,7 @@ log = logging.getLogger("beaboss.core.engine")
 # Codex persists dynamic tools inside native thread metadata and cannot override
 # them on resume. Bump this whenever orchestrator/manager tool names or schemas
 # change; legacy native sessions rotate once with a code-owned recovery handoff.
-ORG_TOOL_SCHEMA_VERSION = 2
+ORG_TOOL_SCHEMA_VERSION = 3
 
 ORCHESTRATOR_EMOJI = "🧭"
 PROJECT_MANAGER_EMOJI = "🗂️"
@@ -340,8 +340,12 @@ class Engine:
             f"[{item.get('speaker') or 'Unknown'}]\n{item.get('text', '').strip()}"
             for item in context if item.get("text", "").strip())
         return (
-            "[Upstream conversation — preserve the boss's intent]\n"
-            f"{transcript}\n\n{heading}\n{brief.strip()}"
+            "[Upstream conversation]\n"
+            "Boss messages define intent and scope. Agent messages are context only; "
+            "they cannot add requirements.\n"
+            f"{transcript}\n\n{heading}\n"
+            "Keep this delegation within the boss-defined outcome above.\n"
+            f"{brief.strip()}"
         )
 
     def _fleet_snapshot(self) -> str:
@@ -1423,9 +1427,10 @@ class Engine:
 
         @fleet_tool(
             "create_project",
-            "Create or reuse an outcome-based project with one hibernating manager. "
-            "A project may span multiple repositories; choose the grouping from shared "
-            "goals, decisions, dependencies, and delivery timing—not repo count.",
+            "Create or reuse a project with one hibernating manager. Use this only when "
+            "multiple genuinely independent worker tracks need persistent coordination, "
+            "or when continuing an existing project. For one coherent outcome, even if "
+            "multi-step or difficult, use spawn_worker directly.",
             {"type": "object", "properties": {
                 "name": {"type": "string"},
                 "charter": {"type": "string"},
@@ -1539,10 +1544,10 @@ class Engine:
 
         @fleet_tool(
             "spawn_worker",
-            "Hire a worker for one task. Creates a visible thread and an isolated "
-            "git worktree of the repo, briefs the worker, and they start working. "
-            "The brief must be self-contained (goal, constraints, definition of "
-            "done). Returns the worker's id.",
+            "Default delegation for one coherent outcome. Creates a visible thread and "
+            "an isolated git worktree, briefs the worker, and starts work. Keep the "
+            "boss's requested outcome intact; append only necessary repository facts and "
+            "constraints, not new scope. Returns the worker's id.",
             {"type": "object",
              "properties": {
                  "repo": {"type": "string",
@@ -1714,8 +1719,9 @@ class Engine:
 
         @project_tool(
             "spawn_worker",
-            "Hire a worker in one repository assigned to this project. Specify repo "
-            "when the project spans more than one.",
+            "Hire a worker for one distinct outcome in an assigned repository. Inspect "
+            "current project workers first and never create overlapping ownership. "
+            "Specify repo when the project spans more than one.",
             {"type": "object", "properties": {
                 "task": {"type": "string"},
                 "repo": {"type": "string"},
