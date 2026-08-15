@@ -38,7 +38,7 @@ log = logging.getLogger("beaboss.core.engine")
 # Codex persists dynamic tools inside native thread metadata and cannot override
 # them on resume. Bump this whenever orchestrator/manager tool names or schemas
 # change; legacy native sessions rotate once with a code-owned recovery handoff.
-ORG_TOOL_SCHEMA_VERSION = 3
+ORG_TOOL_SCHEMA_VERSION = 4
 
 ORCHESTRATOR_EMOJI = "🧭"
 PROJECT_MANAGER_EMOJI = "🗂️"
@@ -1553,6 +1553,10 @@ class Engine:
                  "repo": {"type": "string",
                           "description": "repo name under the projects root, or absolute path"},
                  "task": {"type": "string", "description": "the self-contained brief"},
+                 "target_branch": {"type": "string",
+                                   "description": "existing local branch to fork from and "
+                                                  "deliver back to; omit for the repository "
+                                                  "default branch"},
                  "tier": {"type": "string", "enum": ["fast", "balanced", "deep"],
                           "description": "model tier for this worker: 'fast' (cheap/quick "
                                          "— routine or mechanical work), 'balanced' "
@@ -1565,7 +1569,8 @@ class Engine:
         async def spawn_worker(args: dict[str, Any]) -> dict[str, Any]:
             return await engine._spawn_worker(
                 str(args.get("repo", "")), str(args.get("task", "")),
-                tier=str(args.get("tier", "")).strip().lower() or None)
+                tier=str(args.get("tier", "")).strip().lower() or None,
+                target_branch=str(args.get("target_branch", "")).strip() or None)
 
         @fleet_tool(
             "message_worker",
@@ -1657,8 +1662,8 @@ class Engine:
         @fleet_tool(
             "deliver_worker",
             "Deliver a worker's finished work after review. In this deployment it "
-            f"{delivery_behavior}. method='merge' merges into the repository's "
-            "resolved default branch and pushes it when a remote exists; method='pr' "
+            f"{delivery_behavior}. method='merge' merges into the target branch bound "
+            "when the worker was spawned and pushes it when a remote exists; method='pr' "
             "pushes and opens a GitHub PR. Refuses dirty, empty, or failed-check work.",
             {"type": "object",
              "properties": {
@@ -1725,6 +1730,9 @@ class Engine:
             {"type": "object", "properties": {
                 "task": {"type": "string"},
                 "repo": {"type": "string"},
+                "target_branch": {"type": "string",
+                                  "description": "existing local branch to fork from and "
+                                                 "deliver back to; omit for the default"},
                 "tier": {"type": "string", "enum": ["fast", "balanced", "deep"]},
             }, "required": ["task"]},
         )
@@ -1751,6 +1759,7 @@ class Engine:
             return await engine._spawn_worker(
                 repo, str(args.get("task", "")),
                 tier=str(args.get("tier", "")).strip().lower() or None,
+                target_branch=str(args.get("target_branch", "")).strip() or None,
                 supervisor_id=rec.manager_id,
                 project_id=(assigned.project_id if assigned else rec.project_id))
 
@@ -2197,6 +2206,7 @@ class Engine:
 
     async def _spawn_worker(self, repo_raw: str, task: str,
                             tier: str | None = None,
+                            target_branch: str | None = None,
                             supervisor_id: str = "",
                             project_id: str = "") -> dict[str, Any]:
         def err(text: str) -> dict[str, Any]:
@@ -2216,14 +2226,18 @@ class Engine:
         name = pick_name(taken, self.settings.worker_names)
         worker_id = worker_id_for(name)
 
-        # Workers fork the repository's default branch, not whichever branch happens
-        # to be checked out when the tool call arrives.
+        # Bind the delivery target at spawn time. This makes review and approval apply
+        # to one stable base while allowing non-default environments such as `uat`.
         base_branch = ""
         try:
             if await worktrees.is_git_repo(repo):
-                base_branch = await worktrees.default_branch(repo) or ""
+                base_branch = target_branch or await worktrees.default_branch(repo) or ""
                 if not base_branch:
                     return err(f"can't determine the default branch for {repo.name}")
+                if target_branch and not await worktrees.branch_exists(repo, base_branch):
+                    return err(
+                        f"target branch '{base_branch}' does not exist locally in "
+                        f"{repo.name} — fetch or create it before spawning the worker")
                 worktrees_dir = self.settings.state_dir / "worktrees"
                 while (
                     await worktrees.branch_exists(repo, f"worker/{worker_id}")
@@ -2273,7 +2287,8 @@ class Engine:
                 project_id=project_id, supervisor_id=supervisor_id,
                 status="working")
 
-        iso_note = ("its own isolated copy · branch worker/" + worker_id if isolated
+        iso_note = ("its own isolated copy · branch worker/" + worker_id
+                    + " → " + base_branch if isolated
                     else "⚠️ not a git repo — working directly in the project dir")
         await self._post(Outbound(
             thread_id=thread_id, speaker=SYSTEM,

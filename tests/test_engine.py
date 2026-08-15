@@ -1796,6 +1796,41 @@ def test_spawn_worker_rejects_bogus_tier(tmp_path):
     assert engine.store.workers() == {}
 
 
+def test_spawn_worker_targets_existing_non_default_branch(tmp_path, monkeypatch):
+    engine, _ = _engine(tmp_path)
+    repo = _repo(tmp_path, "myrepo")
+    _git(repo, "branch", "uat")
+
+    class FS:
+        async def submit(self, *args, **kwargs):
+            pass
+
+    async def fake_ensure(thread_id, rec):
+        return FS()
+
+    monkeypatch.setattr(engine, "_ensure_session", fake_ensure)
+    result = asyncio.run(engine._spawn_worker(
+        "myrepo", "prepare UAT", target_branch="uat"))
+
+    assert result.get("is_error") is not True
+    rec = next(iter(engine.store.workers().values()))
+    assert rec.base_branch == "uat"
+    assert "→ uat" in result["content"][0]["text"]
+
+
+def test_spawn_worker_rejects_missing_target_branch(tmp_path):
+    engine, transport = _engine(tmp_path)
+    _repo(tmp_path, "myrepo")
+
+    result = asyncio.run(engine._spawn_worker(
+        "myrepo", "prepare UAT", target_branch="uat"))
+
+    assert result.get("is_error") is True
+    assert "does not exist locally" in result["content"][0]["text"]
+    assert engine.store.workers() == {}
+    assert transport.threads == []
+
+
 def test_make_worker_session_uses_dispatched_model(tmp_path):
     """The persisted model and effort reach CoreSession across a restart."""
     engine, t = _engine(tmp_path)
