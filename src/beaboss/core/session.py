@@ -267,6 +267,8 @@ class CoreSession:
             include_partial_messages=False,
             resume=self.session_id,
             model=self._model_override or self.settings.model or None,
+            effort=(self._reasoning_effort_override
+                    or self.settings.reasoning_effort or None),
             max_turns=self.settings.max_turns,
             cli_path=self.settings.cli_path or None,
             setting_sources=SETTING_SOURCES,

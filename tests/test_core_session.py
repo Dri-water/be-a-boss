@@ -70,6 +70,15 @@ def test_build_options_has_chat_mcp_and_env_prompt(tmp_path):
     assert "send_photo" in opts.system_prompt["append"]
 
 
+def test_build_options_passes_reasoning_effort(tmp_path):
+    s = _session(tmp_path)
+    assert s._build_options().effort is None
+    s.settings.reasoning_effort = "medium"
+    assert s._build_options().effort == "medium"
+    s._reasoning_effort_override = "high"   # a worker's tier wins over the global
+    assert s._build_options().effort == "high"
+
+
 def test_extra_tool_namespaces_merge(tmp_path):
     s = _session(tmp_path)
     async def noop(_args):
